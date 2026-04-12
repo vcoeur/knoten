@@ -392,17 +392,27 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
 
     # ── Warnings / next steps ───────────────────────────────────────────
     if total_vs_scanned_drift:
+        # Tripwire for a regression in `notes.vcoeur.com`. The 2026-04-12 fix
+        # (incident `2026-04-12-notes-list-permission-leaks`) added a stable
+        # secondary sort key to `listNotes.orderBy`, after which this branch
+        # should never fire in a steady state. If it does, the pagination walk
+        # and the count query are seeing different row sets — usually because
+        # a stable-sort regression reintroduced unstable ordering, or a new
+        # filter was added to the data query without being mirrored on the
+        # count query. Keep the warning in place even if it never fires —
+        # silent drift is worse than a noisy tripwire.
         _console.print(
             f"[yellow]⚠[/yellow] The server's [bold]`total={remote_total}`[/bold] "
             f"disagrees with what pagination actually returned "
             f"([bold]{scanned_remote_ids}[/bold] IDs). "
-            f"This usually means the server's count query sees rows that its "
-            f"data query hides — possibly notes with [bold]`mcpPermissions = NONE`[/bold] "
-            f"or [bold]trashed notes[/bold] leaking into the `total` count.\n"
+            f"This should not happen after the 2026-04-12 "
+            f"[cyan]notes.vcoeur.com[/cyan] fix — the pagination walk and the "
+            f"count query are seeing different row sets.\n"
             f"  Try [bold]`kasten sync --full`[/bold] to confirm the drift is "
-            f"stable; if it is, it is a server-side bug in "
-            f"[cyan]notes.vcoeur.com[/cyan] (see the conception document on `total` "
-            f"audit)."
+            f"stable; if it is, it is likely a regression in the server's "
+            f"list endpoint (unstable sort, or an asymmetric filter between "
+            f"the count and data queries). See incident "
+            f"[dim]`2026-04-12-notes-list-permission-leaks`[/dim] for context."
         )
     elif scanned_vs_local_drift > 0:
         _console.print(

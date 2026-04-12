@@ -44,10 +44,13 @@ class SyncResult:
     deleted: int
     # `remote_total` is the `total` field from the first list response —
     # what the server claims the count is. `scanned_remote_ids` is what
-    # `iter_all_summaries` actually yielded. If they disagree, the server
-    # and KastenManager see different things (server-side filter mismatch,
-    # pagination gap, or an inconsistent count query). The summary flags
-    # this explicitly.
+    # `iter_all_summaries` actually yielded. After the 2026-04-12 fix to
+    # `notes.vcoeur.com` (incident `2026-04-12-notes-list-permission-leaks`)
+    # these two values should always agree. Keep both on the result as a
+    # diagnostic tripwire: any future disagreement points at a regression —
+    # a stable-sort regression in the list endpoint, an asymmetric filter
+    # between the count query and the data query, or a server-side schema
+    # change that KastenManager's pagination does not yet understand.
     remote_total: int | None
     scanned_remote_ids: int
     local_total: int
@@ -113,12 +116,6 @@ def incremental_sync(
     restricted_placeholders = 0
     max_seen = cursor
     remote_total: int | None = None
-    # Collect IDs that showed up in the list responses. Used below to catch
-    # notes that are older than the cursor but have never been seen locally
-    # — this was the root cause of the ~90-note drift against vaults with
-    # `LIST`-only notes.
-    seen_list_ids: set[str] = set()
-    seen_list_summaries: dict[str, dict[str, Any]] = {}
     local_ids_before = store.all_ids()
 
     offset = 0
@@ -141,8 +138,6 @@ def incremental_sync(
         page_has_stale = False
         for item in items:
             item_id = str(item["id"])
-            seen_list_ids.add(item_id)
-            seen_list_summaries[item_id] = item
             updated = _updated(item)
             if updated > cursor:
                 filename = item.get("filename") or item_id
@@ -173,21 +168,14 @@ def incremental_sync(
     #   (a) Delete detection — any local ID not in the remote is gone on the
     #       server (trashed or hard-deleted). Remove it.
     #   (b) Drift catch-up — any remote ID not in the local store is a note
-    #       we have never ingested. This happens for notes with
-    #       `mcpPermissions = LIST` (server 404s on the read, they never
-    #       enter the store), and for notes that were created while a
-    #       previous sync was aborted mid-flight. Fetch them now.
+    #       we have never ingested. This happens when a previous sync was
+    #       aborted mid-flight, and also for `mcpPermissions = LIST` notes
+    #       that live in the vault but return 404 on `GET /api/notes/{id}`
+    #       (they come through here as placeholders via `_fetch_or_placeholder`).
     #
     # Merging the two into one iter_all_summaries call halves the HTTP cost
     # relative to running them separately.
     log("→ Reconciling remote ID set (delete detection + drift catch-up)")
-    # Snapshot the set of IDs we already have locally AFTER the main
-    # pagination loop. Any remote ID not in this set is either:
-    #   (a) a genuinely-new note the main loop did not see (another page
-    #       we did not fetch because we stopped early on a stale page), or
-    #   (b) a restricted note we have never managed to ingest (the main
-    #       loop skipped it because its updatedAt was below the cursor).
-    # Either way, we want to fetch it here.
     local_ids_after_main = store.all_ids()
     deleted = 0
     remote_ids_seen: set[str] = set()
@@ -229,10 +217,17 @@ def incremental_sync(
         f"restricted placeholders={catch_up_restricted}"
     )
     if remote_total is not None and scanned_remote_ids != remote_total:
+        # Tripwire for a regression in the server's list endpoint. After the
+        # 2026-04-12 fix (incident `2026-04-12-notes-list-permission-leaks`)
+        # this branch should never trigger in a steady state. If it does,
+        # the most likely causes are a stable-sort regression in
+        # `notes.vcoeur.com`'s `listNotes.orderBy` or a new filter applied
+        # to the data query but not the count query. Keep the warning as
+        # surface area even if it never fires — silent drift is worse.
         log(
             f"  ⚠ server `total` ({remote_total}) disagrees with scanned count "
-            f"({scanned_remote_ids}) — the server claims more/fewer notes than "
-            f"iter_all_summaries actually returned"
+            f"({scanned_remote_ids}) — pagination walk saw a different row set "
+            f"than the count query. Should not happen post-2026-04-12 fix."
         )
 
     # Delete detection — local IDs (pre-sync) absent from the remote set.
