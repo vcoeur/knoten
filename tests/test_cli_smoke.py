@@ -1,0 +1,59 @@
+"""Smoke tests for the Typer CLI — exercises `status` and `config`.
+
+These commands do not touch the network, so they are safe to run without a
+live remote. They confirm that the wiring from CLI → Settings → Store works
+end-to-end and that JSON output mode is parseable.
+"""
+
+from __future__ import annotations
+
+import json
+
+from typer.testing import CliRunner
+
+from app.cli.main import app
+
+
+def test_status_json(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["api_url"] == "https://notes.test"
+    assert payload["local_total"] == 0
+
+
+def test_config_json_redacts_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_secret_xyz")
+    runner = CliRunner()
+    result = runner.invoke(app, ["config", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["api_token"].startswith("nt_")
+    assert "secret" not in payload["api_token"]
+
+
+def test_list_empty_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["total"] == 0
+    assert payload["notes"] == []
+
+
+def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
+    # Explicitly set to "" so environs does not fall back to the repo-level
+    # .env (which may or may not exist depending on the user's setup).
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    runner = CliRunner()
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 4, result.output
+    assert "KASTEN_API_TOKEN" in result.output or "KASTEN_API_TOKEN" in (result.stderr or "")

@@ -1,0 +1,33 @@
+# Secrets and local config
+.env
+.env.local
+
+# Local vault mirror (rebuilt from notes.vcoeur.com via `kasten sync`)
+kasten/
+kasten.bak-*/
+
+# Runtime state (index, sync cursor, scratch)
+.kasten-state/
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude scratch (per global convention)
+.claude/*.local.*
