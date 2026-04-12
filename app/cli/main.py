@@ -57,12 +57,14 @@ from app.services.notes import (
     append_note_remote,
     create_note_remote,
     delete_note_remote,
+    download_file_remote,
     edit_note_remote,
     hit_to_dict,
     list_summaries_to_dicts,
     read_note_full,
     resolve_target,
     restore_note_remote,
+    upload_file_remote,
 )
 from app.services.reconcile import reconcile_local
 from app.services.reindex import reindex_from_files
@@ -843,6 +845,133 @@ def cmd_rename(
         force=force,
         json_output=json_output,
     )
+
+
+# ---- attachments --------------------------------------------------------
+
+
+@app.command("upload")
+def cmd_upload(
+    path: Path = typer.Argument(
+        ...,
+        help="Local file to upload",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    filename: str = typer.Option(
+        ...,
+        "--filename",
+        help="Kasten file-note filename (e.g. 'Scott2019+ Summary.pdf' or '2024-11-10+ scan.pdf')",
+    ),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help="Override the attachment's source label; defaults to the server's own inference",
+    ),
+    content_type: str | None = typer.Option(
+        None,
+        "--content-type",
+        help="Override the content type sent with the upload "
+        "(defaults to application/octet-stream)",
+    ),
+    tag: list[str] = typer.Option([], "--tag", help="Tag to add to the created note (repeatable)"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Upload a file and create a linked file-family note.
+
+    Two steps, atomic from the caller's perspective:
+
+      1. POST the file bytes to `/api/attachments` (multipart) — the server
+         returns a short `storageKey`.
+      2. POST a file-family note whose frontmatter `attachment` field points
+         at that key.
+
+    The created note is then refreshed into the local mirror. `--filename`
+    must use a `CiteKey+` or `YYYY-MM-DD+` prefix — the server's file-family
+    shape requires it.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        _require_token(settings)
+        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+            with NotesClient(settings) as client:
+                note, upload = upload_file_remote(
+                    client=client,
+                    store=store,
+                    vault_dir=settings.vault_dir,
+                    source_path=path,
+                    filename=filename,
+                    tags=list(tag),
+                    source=source,
+                    content_type=content_type,
+                )
+            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
+        payload["upload"] = {
+            "storage_key": upload.get("storageKey"),
+            "content_type": upload.get("contentType"),
+            "size_bytes": upload.get("sizeBytes"),
+            "url": upload.get("url"),
+        }
+        if mode.json:
+            emit_json(payload)
+        else:
+            render_note(payload, mode=mode)
+            log(
+                f"uploaded {upload.get('storageKey')} ({upload.get('sizeBytes')} bytes)",
+                mode=mode,
+            )
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("download")
+def cmd_download(
+    target: str = typer.Argument(..., help="File-family note UUID or filename (or prefix)"),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Destination path. Defaults to ./<note filename> in the current directory.",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Download the attachment linked to a file-family note.
+
+    Resolves the target locally, reads the `attachment` storage key from the
+    note's frontmatter, and streams `GET /api/attachments/{key}` to disk.
+    Refuses targets that are not file-family or that have no attachment key.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        _require_token(settings)
+        with Store(settings.index_path) as store:
+            with NotesClient(settings) as client:
+                result = download_file_remote(
+                    client=client,
+                    store=store,
+                    target=target,
+                    destination=output,
+                )
+        payload = {
+            "note_id": result["note_id"],
+            "filename": result["filename"],
+            "storage_key": result["storage_key"],
+            "path": str(result["path"].resolve()),
+            "bytes_written": result["bytes_written"],
+            "content_type": result["content_type"],
+        }
+        if mode.json:
+            emit_json(payload)
+        else:
+            log(
+                f"downloaded {result['bytes_written']} bytes → {payload['path']}",
+                mode=mode,
+            )
+    except Exception as exc:
+        _fail(exc)
 
 
 # ---- status / config / reset -------------------------------------------

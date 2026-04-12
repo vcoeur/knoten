@@ -1,8 +1,20 @@
 """Runtime configuration loaded from environment and .env files.
 
-The layout rule is: all local state lives under `KASTEN_HOME` (the directory
-containing `pyproject.toml` by default). Vault content and index are siblings
-under that root, so Claude and humans can find them with predictable paths.
+All local state lives under `KASTEN_HOME`. Discovery order for the root
+and the `.env` file is designed so the same codebase works in three
+different runtime contexts:
+
+  1. **Dev from the repo** (`uv run kasten …`, `make sync`): `_default_home()`
+     walks up from `__file__` and finds the repo root via `pyproject.toml`.
+     The repo's `.env` is picked up automatically.
+  2. **Installed globally** (`uv tool install .` → `~/.local/bin/kasten`):
+     `__file__` is inside a uv tools venv's `site-packages/`, so the
+     pyproject walk would match nothing useful. `_default_home()` detects
+     that case and falls back to `~/.kasten`, and `.env` is picked up from
+     `~/.config/kasten/.env` so the installed CLI can find the user's real
+     vault without per-invocation env vars.
+  3. **Tests**: `tmp_settings` fixture constructs `Settings` explicitly;
+     the discovery helpers are bypassed entirely.
 """
 
 from __future__ import annotations
@@ -12,14 +24,41 @@ from pathlib import Path
 
 from environs import Env
 
+# Stable user-level config path, read before the source-tree fallback so an
+# installed CLI can find a repo vault via `KASTEN_HOME=…` inside this file.
+USER_CONFIG_ENV = Path.home() / ".config" / "kasten" / ".env"
+
+# Final fallback home when no other anchor is available. Matches the layout
+# expected by `ensure_dirs` — `kasten/` + `.kasten-state/` as siblings.
+FALLBACK_HOME = Path.home() / ".kasten"
+
+
+def _looks_like_installed_location(path: Path) -> bool:
+    """True when `path` is inside a uv tools venv (or any site-packages tree).
+
+    Used to reject the source-tree walk when the code is running from an
+    installed copy — otherwise the walk falls off the end and returns a
+    nonsense directory under `site-packages/` as the home.
+    """
+    parts = path.parts
+    return "site-packages" in parts or ("uv" in parts and "tools" in parts)
+
 
 def _default_home() -> Path:
-    """Return the KastenManager repo root: the directory that contains pyproject.toml."""
+    """Return the best guess for `KASTEN_HOME` when nothing overrides it.
+
+    Walks up from this file looking for a `pyproject.toml` — that path
+    matches the dev workflow (`uv run` / `make` from the repo). If the
+    walk finishes without finding one, or if `__file__` is inside a uv
+    tools install, returns `~/.kasten` so the installed CLI has a real,
+    writable place to put its state.
+    """
     here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return here.parent.parent
+    if not _looks_like_installed_location(here):
+        for parent in here.parents:
+            if (parent / "pyproject.toml").exists():
+                return parent
+    return FALLBACK_HOME
 
 
 @dataclass(frozen=True)
@@ -46,6 +85,79 @@ class Settings:
         return f"{prefix}_******" if prefix else "******"
 
 
+def _env_file_candidates(explicit: Path | None) -> list[Path]:
+    """Return every `.env` that should be layered, in priority order.
+
+    `environs.read_env(override=False)` implements "first value wins", so
+    files later in the list only fill in keys the earlier files did not
+    set. This means an installed CLI can keep a tiny `~/.config/kasten/.env`
+    that just points `KASTEN_HOME` at a repo, and still pick up the
+    token from that repo's own `.env` — no secret duplication.
+
+    Order:
+      1. `explicit` — caller-supplied, for tests or advanced callers.
+      2. `~/.config/kasten/.env` — user-level config. The canonical
+         location for an installed CLI's `KASTEN_HOME` pointer.
+      3. `$KASTEN_HOME/.env` — if `KASTEN_HOME` was set by the shell
+         (or by an earlier layer), its sibling `.env` is layered next.
+         This is what lets the user-level pointer cascade into the repo's
+         own `.env`.
+      4. `_default_home() / .env` — dev workflow (repo via pyproject walk
+         or `~/.kasten`). Only added when it's not already in the list.
+    """
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.expanduser()
+        if resolved.exists() and resolved not in candidates:
+            candidates.append(resolved)
+
+    add(explicit)
+    add(USER_CONFIG_ENV)
+
+    # Second pass: re-read the environment so a layer-1/2 hit that set
+    # KASTEN_HOME is visible for candidate 3.
+    import os
+
+    env_home_value = os.environ.get("KASTEN_HOME")
+    if candidates:
+        # Pre-parse candidates already collected so KASTEN_HOME that lives
+        # only inside those files still activates candidate 3.
+        for candidate in candidates:
+            env_home_value = _peek_env_var(candidate, "KASTEN_HOME", env_home_value)
+    if env_home_value:
+        add(Path(env_home_value) / ".env")
+
+    add(_default_home() / ".env")
+    return candidates
+
+
+def _peek_env_var(env_file: Path, key: str, current: str | None) -> str | None:
+    """Return the first definition of `key` in `env_file`, or `current` if absent.
+
+    A minimal parser — we only care about simple `KEY=value` lines at the
+    top of a `.env`, which is enough to look up `KASTEN_HOME` before fully
+    loading the layered config via environs.
+    """
+    if current:
+        return current
+    try:
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            lhs, _, rhs = line.partition("=")
+            if lhs.strip() == key:
+                return rhs.strip().strip('"').strip("'") or None
+    except OSError:
+        return current
+    return current
+
+
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load settings from process env and optional .env file.
 
@@ -54,12 +166,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
     usable even when the token is not yet set.
     """
     env = Env()
-    if env_file is not None and env_file.exists():
-        env.read_env(str(env_file), override=False)
-    else:
-        default_env = _default_home() / ".env"
-        if default_env.exists():
-            env.read_env(str(default_env), override=False)
+    for candidate in _env_file_candidates(env_file):
+        env.read_env(str(candidate), override=False)
 
     home = Path(env.str("KASTEN_HOME", str(_default_home()))).expanduser().resolve()
     vault_dir = home / env.str("KASTEN_VAULT_DIR", "kasten")

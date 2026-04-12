@@ -143,18 +143,30 @@ kasten rename "! New idea" "! Core insight" --json
 
 ## Local paths
 
-By default everything lives inside the repo:
+`KASTEN_HOME` anchors the vault and state directories:
 
 | Path | Purpose | Gitignored |
 |---|---|---|
-| `./kasten/` | plaintext markdown mirror | yes |
-| `./.kasten-state/index.sqlite` | metadata + FTS5 index | yes |
-| `./.kasten-state/state.json` | sync cursor, schema version | yes |
-| `./.kasten-state/tmp/` | scratch (atomic writes, zip unpack) | yes |
-| `./.kasten-state/sync.lock` | fcntl advisory lock held during sync / writes | yes |
-| `./.env` | API URL + token | yes |
+| `$KASTEN_HOME/kasten/` | plaintext markdown mirror | yes |
+| `$KASTEN_HOME/.kasten-state/index.sqlite` | metadata + FTS5 index | yes |
+| `$KASTEN_HOME/.kasten-state/state.json` | sync cursor, schema version | yes |
+| `$KASTEN_HOME/.kasten-state/tmp/` | scratch (atomic writes, zip unpack) | yes |
+| `$KASTEN_HOME/.kasten-state/sync.lock` | fcntl advisory lock during sync / writes | yes |
+| `$KASTEN_HOME/.env` | API URL + token | yes |
 
-Override the root with `KASTEN_HOME=/path/to/somewhere` in `.env`. On a laptop where the repo lives somewhere inconvenient, set `KASTEN_HOME=~/.cache/kasten-manager` to get a more traditional XDG layout.
+### Two runtime contexts
+
+**Dev from the repo** (`uv run kasten …`, `make sync`): `KASTEN_HOME` defaults to the directory containing `pyproject.toml`, and the repo's own `.env` is read automatically. Clone, `cp .env.example .env`, fill in the token, done.
+
+**Installed globally** (`uv tool install . → ~/.local/bin/kasten`): the installed copy can't find the source tree, so it reads **`~/.config/kasten/.env`** first. That file is typically a two-line pointer:
+
+```ini
+KASTEN_HOME=/home/alice/src/vcoeur/KastenManager
+```
+
+Once `KASTEN_HOME` is known, the CLI layers on `$KASTEN_HOME/.env` automatically to pick up the API URL + token — no secret duplication. Fallback if nothing is configured: `~/.kasten/` (state) + `~/.kasten/.env` (config).
+
+`.env` files are layered with "first value wins" semantics (`environs.read_env(override=False)`), so a process env var always beats any file, and an earlier layer always beats a later one.
 
 ## Development
 

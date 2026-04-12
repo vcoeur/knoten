@@ -13,8 +13,23 @@ from typing import Any
 
 import httpx
 
-from app.repositories.errors import AuthError, NetworkError, NoteForbiddenError
+from app.repositories.errors import AuthError, NetworkError, NoteForbiddenError, NotFoundError
 from app.settings import Settings
+
+
+def _parse_disposition_filename(header: str) -> str | None:
+    """Best-effort extraction of `filename="..."` from a Content-Disposition header."""
+    if not header:
+        return None
+    marker = 'filename="'
+    start = header.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end = header.find('"', start)
+    if end == -1:
+        return None
+    return header[start:end] or None
 
 
 class NotesClient:
@@ -179,6 +194,84 @@ class NotesClient:
             params["tag"] = tag
         data = self._get_json("/api/search", params=params)
         return data if isinstance(data, list) else data.get("data", [])
+
+    # ---- Attachments -----------------------------------------------------
+
+    def upload_attachment(
+        self,
+        path: Path,
+        *,
+        content_type: str | None = None,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/attachments — multipart upload.
+
+        Streams `path` to the server as a `file` form field and returns the
+        parsed JSON body. The response always includes `storageKey`, which
+        the caller uses to link a file-family note to the uploaded blob.
+        """
+        try:
+            with path.open("rb") as handle:
+                files = {"file": (path.name, handle, content_type or "application/octet-stream")}
+                data: dict[str, str] = {}
+                if source is not None:
+                    data["source"] = source
+                response = self._client.post("/api/attachments", files=files, data=data)
+        except OSError as exc:
+            raise NetworkError(f"Cannot read {path}: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"POST /api/attachments failed: {exc}") from exc
+        if response.status_code in (401, 403):
+            raise AuthError(
+                f"POST /api/attachments returned {response.status_code} — "
+                "check KASTEN_API_TOKEN scope (needs web, api, or mcp)."
+            )
+        if response.status_code not in (200, 201):
+            raise NetworkError(
+                f"POST /api/attachments returned {response.status_code}: {response.text[:200]}"
+            )
+        return response.json()
+
+    def download_attachment(self, storage_key: str, destination: Path) -> dict[str, Any]:
+        """GET /api/attachments/{key} — stream to `destination`.
+
+        Returns a dict with the bytes written and the server-provided
+        content type / filename (parsed from Content-Disposition when
+        available). Caller is responsible for choosing `destination`.
+        """
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
+        content_type = ""
+        disposition_filename: str | None = None
+        try:
+            with self._client.stream("GET", f"/api/attachments/{storage_key}") as response:
+                if response.status_code in (401, 403):
+                    raise AuthError(
+                        f"GET /api/attachments/{storage_key} returned {response.status_code} — "
+                        "check KASTEN_API_TOKEN scope."
+                    )
+                if response.status_code == 404:
+                    raise NotFoundError(f"Attachment {storage_key} not found or deleted on remote")
+                if response.status_code >= 400:
+                    raise NetworkError(
+                        f"GET /api/attachments/{storage_key} returned {response.status_code}"
+                    )
+                content_type = response.headers.get("content-type", "")
+                disposition_filename = _parse_disposition_filename(
+                    response.headers.get("content-disposition", "")
+                )
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_bytes():
+                        handle.write(chunk)
+                        written += len(chunk)
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"Cannot reach {self._settings.api_url}: {exc}") from exc
+        return {
+            "path": destination,
+            "bytes_written": written,
+            "content_type": content_type,
+            "filename": disposition_filename,
+        }
 
     # ---- Export / bulk ---------------------------------------------------
 

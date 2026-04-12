@@ -44,15 +44,31 @@ The single most important rule for anyone (especially Claude) using this CLI:
 
 ## Paths
 
-Default layout — all inside the repo:
+Default layout — `KASTEN_HOME` anchors a vault + state pair:
 
-- `./kasten/` — markdown mirror (gitignored)
-- `./.kasten-state/index.sqlite` — metadata + FTS5 (gitignored)
-- `./.kasten-state/state.json` — sync cursor, schema version (gitignored)
-- `./.kasten-state/sync.lock` — fcntl lock held during sync / writes
-- `./.env` — API URL + token (gitignored)
+- `$KASTEN_HOME/kasten/` — markdown mirror (gitignored)
+- `$KASTEN_HOME/.kasten-state/index.sqlite` — metadata + FTS5 (gitignored)
+- `$KASTEN_HOME/.kasten-state/state.json` — sync cursor, schema version (gitignored)
+- `$KASTEN_HOME/.kasten-state/sync.lock` — fcntl lock held during sync / writes
+- `$KASTEN_HOME/.env` — API URL + token (gitignored)
 
-Override with `KASTEN_HOME` in `.env`.
+### How `KASTEN_HOME` is resolved
+
+The resolution tries, in order: shell env → any `.env` layer that sets it → source-tree walk → `~/.kasten` fallback. Two runtime contexts matter:
+
+- **Dev** (`uv run kasten …`, `make sync` from the repo): `_default_home()` walks up from `__file__` and finds the repo root via its `pyproject.toml`. The repo's `.env` is read automatically. No user config needed.
+- **Installed** (`uv tool install .` → `~/.local/bin/kasten`): `__file__` lives in a uv tools venv's `site-packages/`, so the pyproject walk is skipped. The CLI reads `~/.config/kasten/.env` first — that file typically only carries `KASTEN_HOME=/path/to/repo`, which then triggers a second layer read of `$KASTEN_HOME/.env` for the API URL + token. No secret duplication.
+
+### `.env` layering
+
+`load_settings()` reads multiple `.env` files in priority order with `override=False` — **first value wins**, later files fill in missing keys:
+
+1. `env_file` arg — explicit, tests / advanced callers
+2. `~/.config/kasten/.env` — user-level pointer (installed CLI)
+3. `$KASTEN_HOME/.env` — once `KASTEN_HOME` is known from layer 2 or the process env
+4. `_default_home() / .env` — dev workflow (repo or `~/.kasten`)
+
+Process env vars always win over any file layer (environs `override=False`).
 
 ## Commands
 

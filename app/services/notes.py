@@ -287,6 +287,103 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
 # ---- Write-path (remote-first) ------------------------------------------
 
 
+def upload_file_remote(
+    *,
+    client: NotesClient,
+    store: Store,
+    vault_dir: Path,
+    source_path: Path,
+    filename: str,
+    tags: list[str],
+    source: str | None,
+    content_type: str | None,
+) -> tuple[Note, dict[str, Any]]:
+    """Upload `source_path` to the remote and create a linked file-family note.
+
+    Two HTTP calls in order:
+
+      1. `POST /api/attachments` — multipart upload; response contains a
+         `storageKey` string that identifies the stored blob.
+      2. `POST /api/notes` — creates a file-family note whose frontmatter
+         sets `attachment: <storage_key>`. The server rejects non-file
+         filenames for this shape, so the caller is responsible for using
+         a `CiteKey+` or `YYYY-MM-DD+` prefix.
+
+    The created note is then re-fetched and ingested into the local mirror.
+    Returns `(note, upload_metadata)` — the metadata dict is the raw upload
+    response, useful for the CLI's JSON output.
+    """
+    if not source_path.is_file():
+        raise UserError(f"Not a file: {source_path}")
+
+    upload = client.upload_attachment(
+        source_path,
+        content_type=content_type,
+        source=source,
+    )
+    storage_key = upload.get("storageKey")
+    if not storage_key:
+        raise UserError(f"Upload response missing storageKey: {upload}")
+
+    payload: dict[str, Any] = {
+        "filename": filename,
+        "kind": "file",
+        "frontmatter": {"attachment": storage_key},
+    }
+    composed_body = _compose_body("", add_tags=tags, remove_tags=[])
+    if composed_body:
+        payload["body"] = composed_body
+
+    raw = client.create_note(payload)
+    created_id = str(raw.get("id"))
+    fresh = client.read_note(created_id)
+    note = note_from_api(fresh)
+    ingest_note(note, store=store, vault_dir=vault_dir)
+    return note, upload
+
+
+def download_file_remote(
+    *,
+    client: NotesClient,
+    store: Store,
+    target: str,
+    destination: Path | None,
+) -> dict[str, Any]:
+    """Resolve a file-family note and stream its attachment to disk.
+
+    The storage key lives in the note's `frontmatter.attachment` field. The
+    function refuses to download non-file-family notes — there is nothing
+    to download — and refuses targets whose frontmatter has no attachment
+    key (malformed file note or pending upload).
+    """
+    row = resolve_target(store, target)
+    if row.get("family") != "file":
+        raise UserError(
+            f"Note '{row['filename']}' is not a file-family note "
+            f"(family={row.get('family')}) — nothing to download"
+        )
+
+    import json as _json
+
+    try:
+        frontmatter = _json.loads(row.get("frontmatter_json") or "{}")
+    except _json.JSONDecodeError:
+        frontmatter = {}
+    storage_key = frontmatter.get("attachment")
+    if not isinstance(storage_key, str) or not storage_key:
+        raise UserError(
+            f"Note '{row['filename']}' has no `attachment` key in its frontmatter — "
+            "the link to the uploaded blob is missing"
+        )
+
+    chosen = destination if destination is not None else Path.cwd() / row["filename"]
+    result = client.download_attachment(storage_key, chosen)
+    result["note_id"] = row["id"]
+    result["filename"] = row["filename"]
+    result["storage_key"] = storage_key
+    return result
+
+
 def create_note_remote(
     *,
     client: NotesClient,

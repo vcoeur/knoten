@@ -48,6 +48,28 @@ def test_list_empty_store(monkeypatch, tmp_path) -> None:
     assert payload["notes"] == []
 
 
+def test_upload_smoke_missing_file_is_user_error(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["upload", str(tmp_path / "missing.pdf"), "--filename", "2024-11-10+ x.pdf", "--json"],
+    )
+    # Typer's built-in exists=True check fires first → exit code 2.
+    assert result.exit_code != 0
+
+
+def test_download_smoke_no_such_note(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["download", "nonexistent", "--json"])
+    assert result.exit_code == 1
+
+
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
     # Explicitly set to "" so environs does not fall back to the repo-level
     # .env (which may or may not exist depending on the user's setup).
