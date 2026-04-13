@@ -95,6 +95,7 @@ make tool-install  # install `kasten` globally via `uv tool install`
 - HTTP client: `app/repositories/http_client.py` — all exceptions inherit from `app/repositories/errors.py`.
 - Store: `app/repositories/store.py` — schema in `_SCHEMA`, all queries are explicit SQL strings (no ORM).
 - FTS5 search: `Store.search()` — weights `(1.0, 10.0, 1.0, 5.0)` map to (note_id, title, body, filename). Keep the UNINDEXED `note_id` weight in the list or bm25 silently mis-weights.
+- Fuzzy search: `Store.search_fuzzy()` — combines a second FTS5 virtual table `notes_fts_trigram` (tokenize='trigram', used for substring matching) with a `rapidfuzz.process.extract` pass over titles+filenames. Both FTS tables must stay in sync: `upsert_note`, `upsert_placeholder`, and `delete_note` all write to both, and `fts_cardinality_check` covers both. Combined score = rapidfuzz WRatio (0..100) + 30 if the note is also a trigram substring hit.
 - Sync orchestration: `app/services/sync.py` — `incremental_sync` is the real work; `full_sync` delegates to it with a cleared cursor.
 - File writing: `app/repositories/vault_files.py` — atomic writes via tmp + rename, path derivation in `path_for_note`.
 

@@ -350,7 +350,7 @@ def cmd_reindex(
 
 @app.command("search")
 def cmd_search(
-    query: str = typer.Argument(..., help="FTS5 query string"),
+    query: str = typer.Argument(..., help="FTS5 query string (or free text with --fuzzy)"),
     family: str | None = typer.Option(None, "--family"),
     kind: str | None = typer.Option(None, "--kind"),
     tag: str | None = typer.Option(None, "--tag"),
@@ -368,11 +368,18 @@ def cmd_search(
     limit: int = typer.Option(20, "--limit", min=1, max=200),
     offset: int = typer.Option(0, "--offset", min=0),
     remote: bool = typer.Option(False, "--remote", help="Bypass local index, hit the server"),
+    fuzzy: bool = typer.Option(
+        False,
+        "--fuzzy",
+        help="Typo-tolerant + substring search (trigram FTS + rapidfuzz on titles)",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Full-text search against the local index (or --remote for server search)."""
     mode = OutputMode.detect(json_output)
     try:
+        if fuzzy and remote:
+            raise UserError("--fuzzy is a local-only mode; drop --remote to use it")
         settings = _load()
         if remote:
             _require_token(settings)
@@ -384,22 +391,37 @@ def cmd_search(
             render_search_hits(payload, mode=mode)
             return
         with Store(settings.index_path) as store:
-            hits, total = store.search(
-                query,
-                family=family,
-                kind=kind,
-                tag=tag,
-                min_permission=min_permission,
-                max_permission=max_permission,
-                limit=limit,
-                offset=offset,
-                vault_dir=settings.vault_dir,
-            )
+            if fuzzy:
+                hits, total = store.search_fuzzy(
+                    query,
+                    family=family,
+                    kind=kind,
+                    tag=tag,
+                    min_permission=min_permission,
+                    max_permission=max_permission,
+                    limit=limit,
+                    offset=offset,
+                    vault_dir=settings.vault_dir,
+                )
+                source = "local-fuzzy"
+            else:
+                hits, total = store.search(
+                    query,
+                    family=family,
+                    kind=kind,
+                    tag=tag,
+                    min_permission=min_permission,
+                    max_permission=max_permission,
+                    limit=limit,
+                    offset=offset,
+                    vault_dir=settings.vault_dir,
+                )
+                source = "local"
         payload = {
             "query": query,
             "total": total,
             "hits": [hit_to_dict(h) for h in hits],
-            "source": "local",
+            "source": source,
         }
         render_search_hits(payload, mode=mode)
     except Exception as exc:

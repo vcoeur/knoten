@@ -16,10 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rapidfuzz import fuzz, process
+
 from app.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from app.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -75,11 +77,37 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     tokenize='unicode61 remove_diacritics 2'
 );
 
+-- Mirror of notes_fts with the trigram tokenizer, used by `search --fuzzy`
+-- for substring/partial-word matching. Column order must match notes_fts
+-- so bm25() weights stay consistent.
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts_trigram USING fts5(
+    note_id UNINDEXED,
+    title,
+    body,
+    filename,
+    tokenize='trigram'
+);
+
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 """
+
+
+def _trigram_query(query: str) -> str:
+    """Build an FTS5 query for the trigram tokenizer from free-form input.
+
+    Splits on whitespace, drops tokens shorter than 3 characters (the trigram
+    tokenizer cannot match them), and wraps each surviving token as a quoted
+    phrase so FTS5 treats it literally. The resulting AND-of-phrases finds
+    notes whose columns contain every surviving token as a substring.
+    Returns "" if nothing survives — the caller should then skip the pass.
+    """
+    tokens = [token for token in query.split() if len(token) >= 3]
+    if not tokens:
+        return ""
+    return " ".join('"' + token.replace('"', '""') + '"' for token in tokens)
 
 
 def _append_permission_filter(
@@ -211,6 +239,18 @@ class Store:
                 self.conn.execute(
                     "ALTER TABLE notes ADD COLUMN mcp_permissions TEXT NOT NULL DEFAULT 'ALL'"
                 )
+        if from_version < 4:
+            # v3 -> v4: backfill the trigram FTS table from the existing
+            # unicode61 FTS table. The CREATE VIRTUAL TABLE above already
+            # created the (empty) trigram table; populate it row-for-row
+            # so `search --fuzzy` works without a full re-sync.
+            self.conn.execute("DELETE FROM notes_fts_trigram")
+            self.conn.execute(
+                """
+                INSERT INTO notes_fts_trigram(note_id, title, body, filename)
+                SELECT note_id, title, body, filename FROM notes_fts
+                """
+            )
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -314,6 +354,11 @@ class Store:
                 "INSERT INTO notes_fts(note_id, title, body, filename) VALUES(?, ?, ?, ?)",
                 (note.id, note.title, note.body, note.filename),
             )
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note.id,))
+            conn.execute(
+                "INSERT INTO notes_fts_trigram(note_id, title, body, filename) VALUES(?, ?, ?, ?)",
+                (note.id, note.title, note.body, note.filename),
+            )
 
     def upsert_placeholder(self, summary: NoteSummary, *, path: str) -> None:
         """Insert a metadata-only row for a note whose body we cannot fetch.
@@ -371,6 +416,11 @@ class Store:
                 "INSERT INTO notes_fts(note_id, title, body, filename) VALUES(?, ?, '', ?)",
                 (summary.id, summary.title, summary.filename),
             )
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (summary.id,))
+            conn.execute(
+                "INSERT INTO notes_fts_trigram(note_id, title, body, filename) VALUES(?, ?, '', ?)",
+                (summary.id, summary.title, summary.filename),
+            )
 
     def count_restricted(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM notes WHERE restricted = 1").fetchone()
@@ -379,6 +429,7 @@ class Store:
     def delete_note(self, note_id: str) -> None:
         with self.transaction() as conn:
             conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note_id,))
             conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
 
     def get_row(self, note_id: str) -> StoreNoteRow | None:
@@ -440,7 +491,8 @@ class Store:
         Returns a dict with counts and the first-N mismatched note IDs in
         each direction. In a healthy store, both counts and both lists are
         empty. This is the core "is the index consistent with the metadata"
-        question.
+        question. Covers both the primary notes_fts (unicode61) and the
+        trigram mirror used by `search --fuzzy`.
         """
         missing_in_fts = [
             row["id"]
@@ -464,14 +516,49 @@ class Store:
                 """
             ).fetchall()
         ]
+        missing_in_trigram = [
+            row["id"]
+            for row in self.conn.execute(
+                """
+                SELECT n.id FROM notes n
+                LEFT JOIN notes_fts_trigram t ON t.note_id = n.id
+                WHERE t.note_id IS NULL
+                LIMIT 100
+                """
+            ).fetchall()
+        ]
+        orphan_trigram = [
+            row["note_id"]
+            for row in self.conn.execute(
+                """
+                SELECT t.note_id FROM notes_fts_trigram t
+                LEFT JOIN notes n ON n.id = t.note_id
+                WHERE n.id IS NULL
+                LIMIT 100
+                """
+            ).fetchall()
+        ]
         notes_count = self.count_notes()
         fts_count = int(self.conn.execute("SELECT COUNT(*) AS c FROM notes_fts").fetchone()["c"])
+        trigram_count = int(
+            self.conn.execute("SELECT COUNT(*) AS c FROM notes_fts_trigram").fetchone()["c"]
+        )
         return {
             "notes_count": notes_count,
             "fts_count": fts_count,
+            "trigram_count": trigram_count,
             "missing_in_fts": missing_in_fts,
             "orphan_fts": orphan_fts,
-            "consistent": (notes_count == fts_count and not missing_in_fts and not orphan_fts),
+            "missing_in_trigram": missing_in_trigram,
+            "orphan_trigram": orphan_trigram,
+            "consistent": (
+                notes_count == fts_count
+                and notes_count == trigram_count
+                and not missing_in_fts
+                and not orphan_fts
+                and not missing_in_trigram
+                and not orphan_trigram
+            ),
         }
 
     def count_notes(self) -> int:
@@ -778,6 +865,136 @@ class Store:
                     tags=self.tags_for_note(row["id"]),
                     score=float(row["score"]) if row["score"] is not None else 0.0,
                     snippet=row["snippet"] or "",
+                    updated_at=row["updated_at"],
+                    mcp_permissions=row["mcp_permissions"] or "ALL",
+                )
+            )
+        return hits, total
+
+    def search_fuzzy(
+        self,
+        query: str,
+        *,
+        family: str | None = None,
+        kind: str | None = None,
+        tag: str | None = None,
+        min_permission: str | None = None,
+        max_permission: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        vault_dir: Path,
+    ) -> tuple[list[SearchHit], int]:
+        """Typo-tolerant + substring search.
+
+        Combines two passes and merges candidates by note_id:
+          1. FTS5 trigram: substring match on title / body / filename,
+             catching partial words and mid-word hits that the unicode61
+             tokenizer misses (`auth` inside `authentication`).
+          2. rapidfuzz over titles + filenames: Levenshtein-style scoring,
+             catches typos and reorderings the user types.
+
+        Filters (family/kind/tag/permission) apply to both passes at SQL
+        level so we never fuzz-rank notes the user has excluded.
+        """
+        query = query.strip()
+        if not query:
+            return [], 0
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if family:
+            where_clauses.append("n.family = ?")
+            params.append(family)
+        if kind:
+            where_clauses.append("n.kind = ?")
+            params.append(kind)
+        if tag:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM tags t WHERE t.note_id = n.id AND t.tag = ?)"
+            )
+            params.append(tag)
+        _append_permission_filter(where_clauses, params, min_permission, max_permission)
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+        trigram_hits: dict[str, tuple[float, str]] = {}
+        trigram_query = _trigram_query(query)
+        if trigram_query:
+            trigram_rows = self.conn.execute(
+                f"""
+                SELECT
+                    notes_fts_trigram.note_id AS id,
+                    bm25(notes_fts_trigram, 1.0, 10.0, 1.0, 5.0) AS score,
+                    snippet(notes_fts_trigram, 2, '<<', '>>', '...', 16) AS snippet
+                FROM notes_fts_trigram
+                JOIN notes n ON n.id = notes_fts_trigram.note_id
+                WHERE notes_fts_trigram MATCH ? AND {where_sql}
+                ORDER BY score
+                LIMIT 200
+                """,
+                (trigram_query, *params),
+            ).fetchall()
+            for row in trigram_rows:
+                trigram_hits[row["id"]] = (float(row["score"] or 0.0), row["snippet"] or "")
+
+        filtered_rows = self.conn.execute(
+            f"""
+            SELECT n.id, n.filename, n.title, n.family, n.kind, n.source, n.path,
+                   n.mcp_permissions, n.updated_at
+            FROM notes n
+            WHERE {where_sql}
+            """,
+            tuple(params),
+        ).fetchall()
+        row_by_id = {row["id"]: row for row in filtered_rows}
+
+        haystack = {row["id"]: f"{row['title']} {row['filename']}" for row in filtered_rows}
+        fuzz_hits: dict[str, float] = {}
+        if haystack:
+            matches = process.extract(
+                query,
+                haystack,
+                scorer=fuzz.WRatio,
+                limit=200,
+                score_cutoff=55,
+            )
+            for _, score, key in matches:
+                fuzz_hits[key] = float(score)
+
+        candidate_ids = set(trigram_hits) | set(fuzz_hits)
+        scored: list[tuple[float, str, str]] = []
+        for note_id in candidate_ids:
+            if note_id not in row_by_id:
+                continue
+            fuzz_score = fuzz_hits.get(note_id, 0.0)
+            trigram_entry = trigram_hits.get(note_id)
+            has_trigram = trigram_entry is not None
+            snippet = trigram_entry[1] if trigram_entry else ""
+            # rapidfuzz is 0..100. A trigram substring hit alone is worth
+            # a fixed 30-point floor so the user still sees it above pure
+            # noise. A note that matches both gets the sum, capped at 130.
+            combined = fuzz_score + (30.0 if has_trigram else 0.0)
+            scored.append((combined, note_id, snippet))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        total = len(scored)
+        page = scored[offset : offset + limit]
+
+        hits: list[SearchHit] = []
+        for score, note_id, snippet in page:
+            row = row_by_id[note_id]
+            absolute = str((vault_dir / row["path"]).resolve())
+            hits.append(
+                SearchHit(
+                    id=row["id"],
+                    title=row["title"],
+                    family=row["family"],
+                    kind=row["kind"],
+                    source=row["source"],
+                    path=row["path"],
+                    absolute_path=absolute,
+                    tags=self.tags_for_note(row["id"]),
+                    score=score,
+                    snippet=snippet,
                     updated_at=row["updated_at"],
                     mcp_permissions=row["mcp_permissions"] or "ALL",
                 )

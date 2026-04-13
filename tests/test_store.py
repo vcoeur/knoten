@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from app.models import Note, WikiLink
-from app.repositories.store import Store
+from app.repositories.store import SCHEMA_VERSION, Store
 
 
 def _make_note(
@@ -135,6 +136,159 @@ def test_list_filters_by_family(store: Store) -> None:
     notes, total = store.list_notes(family="person")
     assert total == 1
     assert notes[0].id == "a"
+
+
+def test_fuzzy_search_matches_substring_in_body(store: Store, tmp_path: Path) -> None:
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Auth middleware notes",
+            body="Refactoring the authentication middleware to use JWTs.",
+        ),
+        path="note/! Auth middleware notes.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(
+            note_id="n2",
+            filename="! Unrelated",
+            body="Nothing about the topic here.",
+        ),
+        path="note/! Unrelated.md",
+        body_sha256="2",
+    )
+
+    # Substring "auth" (inside "authentication") — unicode61 FTS misses this;
+    # trigram FTS picks it up.
+    hits, total = store.search_fuzzy("auth", vault_dir=tmp_path)
+    assert total == 1
+    assert hits[0].id == "n1"
+    assert hits[0].score > 0.0
+
+
+def test_fuzzy_search_typo_tolerant_on_title(store: Store, tmp_path: Path) -> None:
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Encryption handbook",
+            body="",
+        ),
+        path="note/! Encryption handbook.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(
+            note_id="n2",
+            filename="! Something else entirely",
+            body="",
+        ),
+        path="note/! Something else entirely.md",
+        body_sha256="2",
+    )
+
+    # Typo "encrpytion" should still find the encryption note via rapidfuzz.
+    hits, total = store.search_fuzzy("encrpytion handbok", vault_dir=tmp_path)
+    assert total >= 1
+    assert hits[0].id == "n1"
+
+
+def test_fuzzy_search_respects_family_filter(store: Store, tmp_path: Path) -> None:
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="@ Encryption person",
+            body="encryption body",
+            family="person",
+            kind="person",
+        ),
+        path="entity/@ Encryption person.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(
+            note_id="n2",
+            filename="! Encryption handbook",
+            body="encryption body",
+            family="permanent",
+            kind="permanent",
+        ),
+        path="note/! Encryption handbook.md",
+        body_sha256="2",
+    )
+
+    hits, _ = store.search_fuzzy("encryption", family="permanent", vault_dir=tmp_path)
+    assert {hit.id for hit in hits} == {"n2"}
+
+
+def test_fuzzy_search_empty_query_returns_nothing(store: Store, tmp_path: Path) -> None:
+    store.upsert_note(
+        _make_note(note_id="n1", filename="! Anything", body="some body"),
+        path="note/! Anything.md",
+        body_sha256="1",
+    )
+    hits, total = store.search_fuzzy("   ", vault_dir=tmp_path)
+    assert hits == []
+    assert total == 0
+
+
+def test_v3_to_v4_migration_populates_trigram(tmp_path: Path) -> None:
+    """Opening a v3 store triggers the trigram backfill from notes_fts."""
+    db_path = tmp_path / "index.sqlite"
+    # Seed a minimal v3 store: notes row + notes_fts row, without the trigram
+    # table. `_ensure_schema` will then add the trigram table and backfill it.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO notes VALUES (
+                'n1', '! Legacy note', 'Legacy note', 'permanent', 'permanent',
+                NULL, 'note/! Legacy note.md', '{}', 'abc', 0, 'ALL',
+                '2024-01-01T00:00:00Z', '2024-01-02T00:00:00Z'
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO notes_fts(note_id, title, body, filename) VALUES(?, ?, ?, ?)",
+            ("n1", "Legacy note", "authentication middleware body", "! Legacy note"),
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '3')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        # Schema version bumped
+        assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
+        # Trigram table populated
+        trigram_count = migrated.conn.execute("SELECT COUNT(*) FROM notes_fts_trigram").fetchone()[
+            0
+        ]
+        assert trigram_count == 1
+        # Fuzzy search against the migrated store finds the body substring
+        hits, total = migrated.search_fuzzy("auth", vault_dir=tmp_path)
+        assert total == 1
+        assert hits[0].id == "n1"
 
 
 def test_tag_and_kind_counts(store: Store) -> None:

@@ -226,8 +226,8 @@ def test_permission_filter_rejects_unknown_level(store: Store) -> None:
 # ── schema migration v1/v2 → v3 ────────────────────────────────────────
 
 
-def test_schema_version_is_v3() -> None:
-    assert SCHEMA_VERSION == 3
+def test_schema_version_is_v4() -> None:
+    assert SCHEMA_VERSION == 4
 
 
 def _seed_v1_database(path: Path) -> None:
@@ -272,8 +272,8 @@ def test_schema_migration_from_v1_adds_mcp_permissions_with_all_default(tmp_path
     _seed_v1_database(db_path)
 
     with Store(db_path) as store:
-        # Opening should auto-migrate from v1 to v3.
-        assert store.get_meta("schema_version") == "3"
+        # Opening should auto-migrate from v1 up to the current schema.
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
         row = store.find_by_id("legacy-1")
         assert row is not None
         assert row["mcp_permissions"] == "ALL"
