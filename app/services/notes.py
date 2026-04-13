@@ -230,6 +230,33 @@ def read_note_full(
     return payload
 
 
+def summarize_note(store: Store, vault_dir: Path, target: str) -> dict[str, Any]:
+    """Build the minimal post-write payload for a target.
+
+    Unlike `read_note_full`, this skips the body file read, the
+    wikilinks/backlinks/tags lookups, and frontmatter parsing. Returned
+    dict size is independent of the note's body length — suited for write
+    commands whose caller already has the content and only needs to
+    confirm the identity/metadata of the resulting note.
+    """
+    row = resolve_target(store, target)
+    absolute_path = (vault_dir / row["path"]).resolve()
+    return {
+        "id": row["id"],
+        "filename": row["filename"],
+        "title": row["title"],
+        "family": row["family"],
+        "kind": row["kind"],
+        "source": row["source"],
+        "path": row["path"],
+        "absolute_path": str(absolute_path),
+        "restricted": bool(row.get("restricted", 0)),
+        "mcp_permissions": row.get("mcp_permissions") or "ALL",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def _strip_frontmatter(body: str) -> str:
     """Remove a leading YAML frontmatter block, if any."""
     if not body.startswith("---\n"):

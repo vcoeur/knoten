@@ -133,7 +133,7 @@ def _colourise_snippet(snippet: str) -> Text:
     return text
 
 
-def render_note(payload: dict[str, Any], *, mode: OutputMode) -> None:
+def render_note(payload: dict[str, Any], *, mode: OutputMode, minimal: bool = False) -> None:
     if mode.json:
         emit_json(payload)
         return
@@ -144,18 +144,21 @@ def render_note(payload: dict[str, Any], *, mode: OutputMode) -> None:
     header = f"[bold]{title}[/bold]\n[dim]{note_id}  •  {family_kind}  •  mcp={permission}[/dim]"
     if mode.tty:
         _console.print(Panel(header, title=payload.get("filename", ""), expand=False))
-        _console.print(payload.get("body", ""))
-        backlinks = payload.get("backlinks")
-        if backlinks:
-            bl_table = Table(title="Backlinks", show_header=False)
-            for bl in backlinks:
-                bl_table.add_row(bl.get("title", ""), f"[dim]{bl.get('family', '')}[/dim]")
-            _console.print(bl_table)
+        if not minimal:
+            _console.print(payload.get("body", ""))
+            backlinks = payload.get("backlinks")
+            if backlinks:
+                bl_table = Table(title="Backlinks", show_header=False)
+                for bl in backlinks:
+                    bl_table.add_row(bl.get("title", ""), f"[dim]{bl.get('family', '')}[/dim]")
+                _console.print(bl_table)
     else:
         sys.stdout.write(f"# {payload.get('title', '')}\n")
-        sys.stdout.write(f"id: {payload.get('id', '')}\n\n")
-        sys.stdout.write(payload.get("body", ""))
-        sys.stdout.write("\n")
+        sys.stdout.write(f"id: {payload.get('id', '')}\n")
+        if not minimal:
+            sys.stdout.write("\n")
+            sys.stdout.write(payload.get("body", ""))
+            sys.stdout.write("\n")
 
 
 def render_summary_list(payload: dict[str, Any], *, mode: OutputMode) -> None:

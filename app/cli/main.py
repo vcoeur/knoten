@@ -64,6 +64,7 @@ from app.services.notes import (
     read_note_full,
     resolve_target,
     restore_note_remote,
+    summarize_note,
     upload_file_remote,
 )
 from app.services.reconcile import reconcile_local
@@ -609,6 +610,16 @@ def _resolve_body(body: str | None, body_file: Path | None) -> str | None:
     return None
 
 
+def _wrap_ai(content: str) -> str:
+    """Wrap AI-authored content with `#ai begin` / `#ai end` markers.
+
+    Literal wrap — pre-existing markers in the input are not stripped or
+    de-duplicated. Leading and trailing blank lines are trimmed so the
+    markers sit flush against the content.
+    """
+    return f"#ai begin\n{content.strip(chr(10))}\n#ai end"
+
+
 @app.command("create")
 def cmd_create(
     filename: str = typer.Option(
@@ -618,6 +629,16 @@ def cmd_create(
     body_file: Path | None = typer.Option(None, "--body-file"),
     kind: str | None = typer.Option(None, "--kind"),
     tag: list[str] = typer.Option([], "--tag"),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Wrap the body in `#ai begin` / `#ai end` markers (AI-authored content).",
+    ),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Create a new note on notes.vcoeur.com and mirror it locally."""
@@ -626,6 +647,10 @@ def cmd_create(
         settings = _load()
         _require_token(settings)
         body_text = _resolve_body(body, body_file)
+        if ai:
+            if body_text is None:
+                raise UserError("--ai requires --body or --body-file")
+            body_text = _wrap_ai(body_text)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
             with NotesClient(settings) as client:
                 note = create_note_remote(
@@ -637,8 +662,13 @@ def cmd_create(
                     kind=kind,
                     tags=list(tag),
                 )
-            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
-        render_note(payload, mode=mode)
+            if with_body:
+                payload = read_note_full(
+                    store, settings.vault_dir, note.id, include_backlinks=False
+                )
+            else:
+                payload = summarize_note(store, settings.vault_dir, note.id)
+        render_note(payload, mode=mode, minimal=not with_body)
     except Exception as exc:
         _fail(exc)
 
@@ -654,10 +684,20 @@ def cmd_edit(
     unset_frontmatter: list[str] = typer.Option([], "--unset-frontmatter"),
     add_tag: list[str] = typer.Option([], "--add-tag"),
     remove_tag: list[str] = typer.Option([], "--remove-tag"),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Wrap the replacement body in `#ai begin` / `#ai end` markers.",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+    ),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -667,6 +707,10 @@ def cmd_edit(
         settings = _load()
         _require_token(settings)
         body_text = _resolve_body(body, body_file)
+        if ai:
+            if body_text is None:
+                raise UserError("--ai requires --body or --body-file")
+            body_text = _wrap_ai(body_text)
         fm_sets: dict[str, str] = {}
         for pair in set_frontmatter:
             if "=" not in pair:
@@ -689,8 +733,13 @@ def cmd_edit(
                     remove_tags=list(remove_tag),
                     force=force,
                 )
-            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
-        render_note(payload, mode=mode)
+            if with_body:
+                payload = read_note_full(
+                    store, settings.vault_dir, note.id, include_backlinks=False
+                )
+            else:
+                payload = summarize_note(store, settings.vault_dir, note.id)
+        render_note(payload, mode=mode, minimal=not with_body)
     except Exception as exc:
         _fail(exc)
 
@@ -708,10 +757,20 @@ def cmd_append(
         "--content-file",
         help="Read the content from a file (use '-' for stdin).",
     ),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Wrap the appended content in `#ai begin` / `#ai end` markers.",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+    ),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -739,6 +798,8 @@ def cmd_append(
             text = content or ""
         if not text:
             raise UserError("Content is empty — nothing to append")
+        if ai:
+            text = _wrap_ai(text)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
             with NotesClient(settings) as client:
                 note = append_note_remote(
@@ -749,8 +810,13 @@ def cmd_append(
                     content=text,
                     force=force,
                 )
-            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
-        render_note(payload, mode=mode)
+            if with_body:
+                payload = read_note_full(
+                    store, settings.vault_dir, note.id, include_backlinks=False
+                )
+            else:
+                payload = summarize_note(store, settings.vault_dir, note.id)
+        render_note(payload, mode=mode, minimal=not with_body)
     except Exception as exc:
         _fail(exc)
 
@@ -798,6 +864,11 @@ def cmd_delete(
 @app.command("restore")
 def cmd_restore(
     note_id: str = typer.Argument(...),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Restore a note from trash."""
@@ -810,8 +881,13 @@ def cmd_restore(
                 note = restore_note_remote(
                     client=client, store=store, vault_dir=settings.vault_dir, note_id=note_id
                 )
-            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
-        render_note(payload, mode=mode)
+            if with_body:
+                payload = read_note_full(
+                    store, settings.vault_dir, note.id, include_backlinks=False
+                )
+            else:
+                payload = summarize_note(store, settings.vault_dir, note.id)
+        render_note(payload, mode=mode, minimal=not with_body)
     except Exception as exc:
         _fail(exc)
 
@@ -824,6 +900,11 @@ def cmd_rename(
         False,
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+    ),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -842,7 +923,9 @@ def cmd_rename(
         unset_frontmatter=[],
         add_tag=[],
         remove_tag=[],
+        ai=False,
         force=force,
+        with_body=with_body,
         json_output=json_output,
     )
 
@@ -876,6 +959,11 @@ def cmd_upload(
         "(defaults to application/octet-stream)",
     ),
     tag: list[str] = typer.Option([], "--tag", help="Tag to add to the created note (repeatable)"),
+    with_body: bool = typer.Option(
+        False,
+        "--with-body",
+        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Upload a file and create a linked file-family note.
@@ -907,7 +995,12 @@ def cmd_upload(
                     source=source,
                     content_type=content_type,
                 )
-            payload = read_note_full(store, settings.vault_dir, note.id, include_backlinks=False)
+            if with_body:
+                payload = read_note_full(
+                    store, settings.vault_dir, note.id, include_backlinks=False
+                )
+            else:
+                payload = summarize_note(store, settings.vault_dir, note.id)
         payload["upload"] = {
             "storage_key": upload.get("storageKey"),
             "content_type": upload.get("contentType"),
@@ -917,7 +1010,7 @@ def cmd_upload(
         if mode.json:
             emit_json(payload)
         else:
-            render_note(payload, mode=mode)
+            render_note(payload, mode=mode, minimal=not with_body)
             log(
                 f"uploaded {upload.get('storageKey')} ({upload.get('sizeBytes')} bytes)",
                 mode=mode,
