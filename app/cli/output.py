@@ -90,29 +90,61 @@ def render_search_hits(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if not hits:
         _console.print(f"No matches for [bold]{query}[/bold].")
         return
+    has_explain = any(isinstance(h.get("explain"), dict) for h in hits)
     if mode.tty:
         table = Table(title=f'{total} match(es) for "{query}"', show_lines=False)
         table.add_column("Score", justify="right", style="dim")
         table.add_column("P", justify="center")
         table.add_column("Family/Kind", style="cyan")
         table.add_column("Title", style="bold")
+        if has_explain:
+            table.add_column("bm25 T/B/F", justify="right", no_wrap=True)
         table.add_column("Snippet", overflow="fold")
         for hit in hits:
             snippet = _colourise_snippet(hit.get("snippet", ""))
             family_kind = f"{hit.get('family', '')}/{hit.get('kind', '')}"
-            table.add_row(
+            row: list[Any] = [
                 f"{hit.get('score', 0.0):.2f}",
                 _permission_badge(hit.get("mcp_permissions")),
                 family_kind,
                 hit.get("title", ""),
-                snippet,
-            )
+            ]
+            if has_explain:
+                row.append(_format_explain(hit.get("explain") or {}))
+            row.append(snippet)
+            table.add_row(*row)
         _console.print(table)
     else:
         for hit in hits:
             sys.stdout.write(
                 f"{hit.get('score', 0.0):.3f}\t{hit.get('id', '')}\t{hit.get('title', '')}\n"
             )
+
+
+def _format_explain(explain: dict[str, Any]) -> Text:
+    """Compact per-column bm25 breakdown: `T:-1.25 B:0.00 F:-0.31`.
+
+    bm25 is ≤0 (more negative = better match). The column with the
+    most-negative value — the one driving the rank — is highlighted so
+    the eye catches it. Columns with 0.00 didn't contribute at all.
+    Rendered as a Rich `Text` object so each segment can carry its own
+    style independently of the surrounding table cell style.
+    """
+    columns = (
+        ("T", float(explain.get("title") or 0.0)),
+        ("B", float(explain.get("body") or 0.0)),
+        ("F", float(explain.get("filename") or 0.0)),
+    )
+    dominant_label = min(columns, key=lambda item: item[1])[0]
+    text = Text()
+    for index, (label, value) in enumerate(columns):
+        if index > 0:
+            text.append(" ")
+        is_dominant = label == dominant_label and value < 0
+        is_unused = value == 0.0
+        style = "bold yellow" if is_dominant else ("dim" if is_unused else "")
+        text.append(f"{label}:{value:.2f}", style=style)
+    return text
 
 
 def _colourise_snippet(snippet: str) -> Text:
@@ -199,8 +231,14 @@ def render_backlinks(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if not backlinks:
         _console.print("No backlinks.")
         return
+    total = payload.get("total", len(backlinks))
     if mode.tty:
-        table = Table(title=f"{len(backlinks)} backlink(s)")
+        title = (
+            f"{len(backlinks)} of {total} backlink(s)"
+            if total != len(backlinks)
+            else f"{total} backlink(s)"
+        )
+        table = Table(title=title)
         table.add_column("Title", style="bold")
         table.add_column("Family/Kind", style="cyan")
         for bl in backlinks:

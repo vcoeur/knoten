@@ -138,6 +138,34 @@ def test_list_filters_by_family(store: Store) -> None:
     assert notes[0].id == "a"
 
 
+def test_search_explain_returns_per_column_scores(store: Store, tmp_path: Path) -> None:
+    """`search(..., explain=True)` attaches per-column bm25 breakdowns.
+
+    A title-heavy hit should have a larger (more negative) `title`
+    contribution than its `body` contribution under bm25. We only assert
+    the structure + ordering, not exact numbers — bm25 is tokenizer- and
+    corpus-dependent, so hardcoded values rot.
+    """
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Trigram blind index",
+            body="A note about search strategies.",
+        ),
+        path="note/! Trigram blind index.md",
+        body_sha256="1",
+    )
+    hits, total = store.search("trigram", vault_dir=tmp_path, explain=True)
+    assert total == 1
+    hit = hits[0]
+    assert hit.explain is not None
+    columns = dict(hit.explain)
+    assert set(columns) == {"title", "body", "filename"}
+    # bm25 is negative for matches; more negative = better.
+    # The title hit should beat the body-only hit in magnitude.
+    assert columns["title"] < columns["body"]
+
+
 def test_fuzzy_search_matches_substring_in_body(store: Store, tmp_path: Path) -> None:
     store.upsert_note(
         _make_note(

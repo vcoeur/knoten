@@ -1,11 +1,12 @@
-"""Write-command CLI output shape — minimal payload + --with-body escape hatch.
+"""Write-command CLI output shape — minimal payload + --fields full escape hatch.
 
 Every write-side subcommand (`create`, `edit`, `append`, `restore`, `rename`,
-`upload`) defaults to emitting a small summary dict (id, filename, family,
-kind, updated_at, mcp_permissions) instead of the full note body. Passing
-`--with-body` restores the old behaviour. These tests lock that contract
-down so the `/kasten` Claude skill can stop piping output through `python3`
-to strip the body — it is already stripped by default.
+`upload`) defaults to `--fields minimal`, which emits a small summary dict
+(id, filename, family, kind, tags, updated_at, mcp_permissions) instead of
+the full note body. Tags are included because they're cheap and callers
+frequently want to confirm `--add-tag` / `--remove-tag` landed without
+paying for `--fields full`. Passing `--fields full` restores the full-read
+behaviour.
 """
 
 from __future__ import annotations
@@ -33,18 +34,20 @@ MINIMAL_KEYS = {
     "title",
     "family",
     "kind",
+    "tags",
     "mcp_permissions",
     "updated_at",
 }
 
-FORBIDDEN_KEYS = {"body", "frontmatter", "tags", "wikilinks", "backlinks"}
+FORBIDDEN_KEYS = {"body", "frontmatter", "wikilinks", "backlinks"}
 
 
 def _assert_minimal(payload: dict) -> None:
-    """Minimal payloads carry identity + metadata, never body/tags/links."""
+    """Minimal payloads carry identity + metadata + tags, never body/links."""
     assert MINIMAL_KEYS.issubset(payload.keys()), f"missing keys: {MINIMAL_KEYS - payload.keys()}"
     present_forbidden = FORBIDDEN_KEYS & payload.keys()
     assert not present_forbidden, f"unexpected keys leaked: {present_forbidden}"
+    assert isinstance(payload["tags"], list)
 
 
 @pytest.fixture
@@ -125,7 +128,7 @@ def test_create_default_is_minimal(cli_env, httpx_mock: HTTPXMock) -> None:
     assert payload["id"] == NOTE_ID
 
 
-def test_create_with_body_flag_returns_full(cli_env, httpx_mock: HTTPXMock) -> None:
+def test_create_fields_full_returns_full(cli_env, httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{API_URL}/api/notes",
         method="POST",
@@ -139,7 +142,16 @@ def test_create_with_body_flag_returns_full(cli_env, httpx_mock: HTTPXMock) -> N
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["create", "--filename", "! Seed", "--body", "first line", "--with-body", "--json"],
+        [
+            "create",
+            "--filename",
+            "! Seed",
+            "--body",
+            "first line",
+            "--fields",
+            "full",
+            "--json",
+        ],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)

@@ -202,6 +202,19 @@ class Store:
 
     # ---- schema ----------------------------------------------------------
 
+    @property
+    def schema_version(self) -> int:
+        """Current schema version recorded in sync_meta.
+
+        The authoritative copy lives in the `sync_meta` table (written by
+        `_ensure_schema` on migration). The value in `state.json` is a
+        human-readable mirror and can drift after an offline migration —
+        callers that need the real version should read this property, not
+        state.json.
+        """
+        raw = self._read_meta("schema_version")
+        return int(raw) if raw is not None else 0
+
     def _ensure_schema(self) -> None:
         try:
             self.conn.executescript(_SCHEMA)
@@ -473,7 +486,12 @@ class Store:
         ]
 
     def full_row(self, note_id: str) -> dict[str, Any] | None:
-        """Raw notes row including frontmatter_json — used by reindex."""
+        """Raw notes row including `frontmatter_json`.
+
+        Used by `reindex` to rebuild derived tables from stored metadata
+        without re-parsing the on-disk file. Callers that only need the
+        StoreNoteRow subset should use `get_row()` instead.
+        """
         row = self.conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
         return dict(row) if row else None
 
@@ -802,6 +820,7 @@ class Store:
         limit: int = 20,
         offset: int = 0,
         vault_dir: Path,
+        explain: bool = False,
     ) -> tuple[list[SearchHit], int]:
         where_clauses: list[str] = ["notes_fts MATCH ?"]
         params: list[Any] = [query]
@@ -834,13 +853,25 @@ class Store:
         # so the order matches the virtual table columns:
         #   (note_id UNINDEXED, title, body, filename).
         # note_id's weight is irrelevant (never matches), but must be present.
+        #
+        # For `--explain`, we additionally compute isolated per-column
+        # scores by zeroing out the other columns' weights. Cost: 3 extra
+        # bm25 evaluations per row — negligible next to the FTS match.
+        explain_columns = (
+            """,
+                bm25(notes_fts, 0.0, 10.0, 0.0, 0.0) AS score_title,
+                bm25(notes_fts, 0.0, 0.0, 1.0, 0.0) AS score_body,
+                bm25(notes_fts, 0.0, 0.0, 0.0, 5.0) AS score_filename"""
+            if explain
+            else ""
+        )
         rows = self.conn.execute(
             f"""
             SELECT
                 n.id, n.title, n.family, n.kind, n.source, n.path, n.mcp_permissions,
                 n.updated_at,
                 bm25(notes_fts, 1.0, 10.0, 1.0, 5.0) AS score,
-                snippet(notes_fts, 2, '<<', '>>', '...', 16) AS snippet
+                snippet(notes_fts, 2, '<<', '>>', '...', 16) AS snippet{explain_columns}
             FROM notes_fts
             JOIN notes n ON n.id = notes_fts.note_id
             WHERE {where_sql}
@@ -853,6 +884,13 @@ class Store:
         hits: list[SearchHit] = []
         for row in rows:
             absolute = str((vault_dir / row["path"]).resolve())
+            explain_tuple: tuple[tuple[str, float], ...] | None = None
+            if explain:
+                explain_tuple = (
+                    ("title", float(row["score_title"] or 0.0)),
+                    ("body", float(row["score_body"] or 0.0)),
+                    ("filename", float(row["score_filename"] or 0.0)),
+                )
             hits.append(
                 SearchHit(
                     id=row["id"],
@@ -867,6 +905,7 @@ class Store:
                     snippet=row["snippet"] or "",
                     updated_at=row["updated_at"],
                     mcp_permissions=row["mcp_permissions"] or "ALL",
+                    explain=explain_tuple,
                 )
             )
         return hits, total

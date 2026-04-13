@@ -87,6 +87,10 @@ def test_search_fuzzy_rejects_remote_combo(monkeypatch, tmp_path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["search", "x", "--fuzzy", "--remote", "--json"])
     assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "user"
+    assert "local-only" in payload["message"]
+    assert payload["code"] == 1
 
 
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
@@ -98,3 +102,41 @@ def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 4, result.output
     assert "KASTEN_API_TOKEN" in result.output or "KASTEN_API_TOKEN" in (result.stderr or "")
+
+
+def test_error_envelope_config_error_json(monkeypatch, tmp_path) -> None:
+    """ConfigError with --json must emit a parseable error envelope on stdout."""
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    runner = CliRunner()
+    result = runner.invoke(app, ["sync", "--json"])
+    assert result.exit_code == 4, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "config"
+    assert payload["code"] == 4
+    assert "KASTEN_API_TOKEN" in payload["message"]
+
+
+def test_error_envelope_not_found_json(monkeypatch, tmp_path) -> None:
+    """A NotFoundError from `read` with --json emits a structured envelope."""
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["read", "definitely-not-a-real-note", "--json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "not_found"
+    assert payload["code"] == 1
+    assert "message" in payload
+
+
+def test_error_envelope_plaintext_without_json(monkeypatch, tmp_path) -> None:
+    """Without --json, errors emit plain text and no JSON envelope."""
+    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    runner = CliRunner()
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 4
+    # The error message is present, but not wrapped in a JSON envelope.
+    assert "KASTEN_API_TOKEN" in result.output
+    assert '"error":' not in result.output

@@ -38,8 +38,9 @@ Layer rules:
 
 The single most important rule for anyone (especially Claude) using this CLI:
 
-- **Reads never touch the network.** `search`, `read`, `list`, `backlinks`, `tags`, `kinds`, `status`, `path` all resolve against the local mirror + SQLite index.
-- **Writes always touch the network.** `create`, `edit`, `delete`, `rename`, `restore` call the REST API first; only after a 2xx do they re-fetch and mirror locally.
+- **Reads never touch the network.** Any command that does not hit the server goes straight to the local mirror + SQLite index. The only commands that touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`). Everything else — `search`, `read`, `list`, `backlinks`, `tags`, `kinds`, `graph`, `status`, `config`, `path`, `reindex` — is local-only.
+- **Writes always touch the network.** The mutation commands call the REST API first; only after a 2xx do they re-fetch and mirror locally. The local mirror is never authoritative.
+- **`search --remote`** is the single opt-in override for "I want the server's view instead of the local index."
 - **Sync never runs implicitly.** If the mirror is stale, the user (or Claude) must run `kasten sync`.
 
 ## Paths

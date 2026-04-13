@@ -9,11 +9,11 @@ Local CLI mirror and search tool for [notes.vcoeur.com](https://notes.vcoeur.com
 - **`kasten sync`** — pull new / changed notes from `notes.vcoeur.com` into a local markdown mirror and SQLite FTS5 index. Always runs delete detection and reconciliation (re-fetch missing files, remove orphans). Add `--verify` for full body-hash verification.
 - **`kasten verify`** — run SQLite integrity check, FTS5 / notes cardinality check, file existence + orphan cleanup. Add `--hashes` to compare every file against its recorded body hash.
 - **`kasten reindex`** — rebuild derived tables (FTS5, tags, wikilinks, frontmatter fields) from the `notes` table + on-disk files. No network. Use when `verify` reports FTS5 drift or when you are offline.
-- **`kasten search "query"`** — full-text search on the local index, with snippets, ranking (title > filename > body), filters (`--family`, `--kind`, `--tag`), JSON output.
+- **`kasten search "query"`** — full-text search on the local index, with snippets, ranking (title > filename > body), filters (`--family`, `--kind`, `--tag`), JSON output. Pass `--fuzzy` for typo-tolerant + substring match (trigram FTS + rapidfuzz on titles).
 - **`kasten read <id|filename>`** — full note body + wiki-links + backlinks, resolved from the local mirror (no network hit).
 - **`kasten backlinks <target>`**, **`kasten list`**, **`kasten tags`**, **`kasten kinds`** — metadata queries, all offline.
 - **`kasten graph <target> --depth N --direction out|in|both`** — BFS wiki-link neighbourhood for broadened search. Returns nodes with their distance from the start, plus edges. Depth 0-5.
-- **`kasten create`**, **`kasten edit`**, **`kasten delete`**, **`kasten restore`**, **`kasten rename`** — write operations that hit `notes.vcoeur.com` first, then refresh the affected note locally. The local mirror is never authoritative.
+- **`kasten create`**, **`kasten edit`**, **`kasten append`**, **`kasten delete`**, **`kasten restore`**, **`kasten rename`**, **`kasten upload`**, **`kasten download`** — write / attachment operations that hit `notes.vcoeur.com` first, then refresh the affected note locally. The local mirror is never authoritative.
 - **`kasten status`** / **`kasten config`** — inspect the mirror and effective config without touching the network.
 
 All commands accept `--json` for machine-parseable output. On a TTY without `--json`, output is rendered with rich (tables, snippet highlighting). Claude skills should always pass `--json`.
@@ -56,7 +56,7 @@ Python 3.12+, managed with `uv`. Deliberately small and stdlib-friendly.
 | Packaging | `uv` + `pyproject.toml`, installable globally with `uv tool install .` |
 | CLI | [Typer](https://typer.tiangolo.com/) |
 | HTTP | [httpx](https://www.python-httpx.org/) (sync) |
-| Store + search | stdlib `sqlite3` + FTS5 (unicode61, diacritic-insensitive) |
+| Store + search | stdlib `sqlite3` + FTS5 (`unicode61` for ranked search, `trigram` mirror for `search --fuzzy`) + [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) |
 | Markdown parsing | [markdown-it-py](https://markdown-it-py.readthedocs.io/) |
 | Terminal output | [rich](https://rich.readthedocs.io/) |
 | Config | [environs](https://pypi.org/project/environs/) + `.env` |
@@ -80,8 +80,8 @@ tests/             <- mirror the app layout
 
 Read rules:
 
-- **Reads never hit the network.** `search`, `read`, `list`, `backlinks`, `tags`, `kinds`, `status` all resolve against the local mirror + sqlite. If the mirror is stale, Claude sees stale data until the next explicit `sync` — a deliberate choice for predictable latency.
-- **Writes always hit the network.** `create`, `edit`, `delete`, `rename`, `restore` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
+- **Reads never hit the network.** Every command except `sync`, `verify`, and the write / attachment operations below resolves against the local mirror + sqlite. If the mirror is stale, Claude sees stale data until the next explicit `sync` — a deliberate choice for predictable latency. (`search --remote` is the single opt-in exception.)
+- **Writes always hit the network.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
 
 ## Install
 
@@ -194,4 +194,4 @@ All design and investigation notes for this project live in the conception repo:
 
 ## Status
 
-v0.1 — initial CLI and local index. No GUI. No attachment upload. See the design notes and the project README for roadmap and open questions.
+v0.1 — initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI. See the design notes and the project README for roadmap and open questions.

@@ -234,10 +234,10 @@ def summarize_note(store: Store, vault_dir: Path, target: str) -> dict[str, Any]
     """Build the minimal post-write payload for a target.
 
     Unlike `read_note_full`, this skips the body file read, the
-    wikilinks/backlinks/tags lookups, and frontmatter parsing. Returned
-    dict size is independent of the note's body length — suited for write
-    commands whose caller already has the content and only needs to
-    confirm the identity/metadata of the resulting note.
+    wikilinks/backlinks lookups, and frontmatter parsing. Tags are
+    included so a caller can verify `--add-tag` / `--remove-tag` landed
+    without paying for `--fields full`. Returned dict size is independent
+    of the note's body length.
     """
     row = resolve_target(store, target)
     absolute_path = (vault_dir / row["path"]).resolve()
@@ -252,6 +252,7 @@ def summarize_note(store: Store, vault_dir: Path, target: str) -> dict[str, Any]
         "absolute_path": str(absolute_path),
         "restricted": bool(row.get("restricted", 0)),
         "mcp_permissions": row.get("mcp_permissions") or "ALL",
+        "tags": list(store.tags_for_note(row["id"])),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -295,7 +296,7 @@ def list_summaries_to_dicts(
 
 
 def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": hit.id,
         "title": hit.title,
         "family": hit.family,
@@ -309,6 +310,9 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
         "updated_at": hit.updated_at,
         "mcp_permissions": hit.mcp_permissions,
     }
+    if hit.explain is not None:
+        payload["explain"] = dict(hit.explain)
+    return payload
 
 
 # ---- Write-path (remote-first) ------------------------------------------

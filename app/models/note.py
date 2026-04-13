@@ -110,3 +110,10 @@ class SearchHit:
     snippet: str
     updated_at: str
     mcp_permissions: str = "ALL"
+    explain: tuple[tuple[str, float], ...] | None = None
+    """Per-column bm25 contributions when `search --explain` is set.
+
+    Tuple of (column_name, score) pairs — tuple (not dict) because
+    SearchHit is frozen and dicts are not hashable. None when the caller
+    did not ask for an explanation.
+    """

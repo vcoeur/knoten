@@ -18,7 +18,9 @@ from __future__ import annotations
 import sys
 from dataclasses import asdict
 from datetime import UTC
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -79,6 +81,19 @@ app = typer.Typer(
 )
 
 
+class Fields(StrEnum):
+    """Post-write response shape for mutation commands.
+
+    `minimal` returns identity + metadata + tags only (no body, no
+    wikilinks, no backlinks). `full` returns the same shape as `kasten
+    read` — body, frontmatter, wikilinks, backlinks. Default is `minimal`
+    because most callers only need to confirm the note identity.
+    """
+
+    minimal = "minimal"
+    full = "full"
+
+
 # ---- global state -------------------------------------------------------
 
 
@@ -95,40 +110,71 @@ def _require_token(settings: Settings) -> None:
         )
 
 
-def _fail(exc: Exception) -> None:
-    """Print an error and exit with the appropriate code."""
-    message = str(exc)
+def _classify_error(exc: Exception) -> tuple[int, str]:
+    """Map an exception to (exit_code, error_kind).
+
+    Order matters — subclasses are checked before their bases so the most
+    specific classification wins. `error_kind` is the machine-parseable
+    string that goes into the JSON error envelope's `error` field.
+    """
     if isinstance(exc, ConfigError):
-        code = 4
-    elif isinstance(exc, (AuthError, NetworkError)):
-        code = 2
-    elif isinstance(exc, StoreError):
-        code = 3
-    elif isinstance(exc, LockTimeoutError):
-        code = 5
-    elif isinstance(exc, LocalPermissionError):
-        code = 1
-        payload = {
-            "error": "permission_denied",
-            "message": message,
+        return 4, "config"
+    if isinstance(exc, AuthError):
+        return 2, "auth"
+    if isinstance(exc, NetworkError):
+        return 2, "network"
+    if isinstance(exc, StoreError):
+        return 3, "store"
+    if isinstance(exc, LockTimeoutError):
+        return 5, "lock_timeout"
+    if isinstance(exc, LocalPermissionError):
+        return 1, "permission_denied"
+    if isinstance(exc, AmbiguousTargetError):
+        return 1, "ambiguous_target"
+    if isinstance(exc, NotFoundError):
+        return 1, "not_found"
+    if isinstance(exc, UserError):
+        return 1, "user"
+    if isinstance(exc, KastenError):
+        return 1, "kasten"
+    return 1, "unknown"
+
+
+def _error_extras(exc: Exception) -> dict[str, Any]:
+    """Error-specific fields that go into the JSON error envelope."""
+    if isinstance(exc, LocalPermissionError):
+        return {
             "note_id": exc.note_id,
             "filename": exc.filename,
             "current_level": exc.current_level,
             "required_level": exc.required_level,
             "operation": exc.operation,
         }
+    if isinstance(exc, AmbiguousTargetError):
+        return {"candidates": exc.candidates}
+    return {}
+
+
+def _fail(exc: Exception, *, mode: OutputMode | None = None) -> None:
+    """Print an error and exit with the appropriate code.
+
+    When `mode.json` is true, emits a structured error envelope to stdout
+    so Claude can parse it with jq. Otherwise writes a plain-text line to
+    stderr, preserving the existing UX for humans on a TTY. Commands that
+    have no `--json` flag (`path`, `reset`) pass `mode=None` and always
+    go through the stderr path.
+    """
+    code, kind = _classify_error(exc)
+    if mode is not None and mode.json:
+        payload: dict[str, Any] = {
+            "error": kind,
+            "message": str(exc),
+            "code": code,
+            **_error_extras(exc),
+        }
         emit_json(payload)
-        raise typer.Exit(code)
-    elif isinstance(exc, AmbiguousTargetError):
-        code = 1
-        payload = {"error": "ambiguous_target", "message": message, "candidates": exc.candidates}
-        emit_json(payload)
-        raise typer.Exit(code)
-    elif isinstance(exc, (UserError, NotFoundError, KastenError)):
-        code = 1
     else:
-        code = 1
-    sys.stderr.write(f"error: {message}\n")
+        sys.stderr.write(f"error: {exc}\n")
     raise typer.Exit(code)
 
 
@@ -184,7 +230,7 @@ def cmd_sync(
             payload = asdict(result)
             render_sync_result(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("verify")
@@ -283,7 +329,7 @@ def cmd_verify(
             if result.orphan_paths:
                 console.print(f"  orphans removed: {', '.join(result.orphan_paths[:10])}")
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("reindex")
@@ -342,7 +388,7 @@ def cmd_reindex(
                     f"{', '.join(result.missing_file_ids[:10])} — run `kasten verify`"
                 )
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 # ---- read-path ----------------------------------------------------------
@@ -373,13 +419,33 @@ def cmd_search(
         "--fuzzy",
         help="Typo-tolerant + substring search (trigram FTS + rapidfuzz on titles)",
     ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="Attach a per-column bm25 breakdown to each hit (title/body/filename). "
+        "Local, ranked search only.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Full-text search against the local index (or --remote for server search)."""
     mode = OutputMode.detect(json_output)
     try:
-        if fuzzy and remote:
-            raise UserError("--fuzzy is a local-only mode; drop --remote to use it")
+        if remote:
+            if fuzzy:
+                raise UserError("--fuzzy is a local-only mode; drop --remote to use it")
+            if explain:
+                raise UserError("--explain is a local-only mode; drop --remote to use it")
+            if min_permission or max_permission:
+                raise UserError(
+                    "--min-permission / --max-permission are local-only filters; "
+                    "drop --remote or drop the permission filter"
+                )
+            if offset:
+                raise UserError("--offset is not supported by the remote search endpoint")
+        if explain and fuzzy:
+            raise UserError(
+                "--explain only applies to ranked unicode61 search; drop --fuzzy to use it"
+            )
         settings = _load()
         if remote:
             _require_token(settings)
@@ -387,7 +453,14 @@ def cmd_search(
                 raw_hits = client.remote_search(
                     query, kind=kind, family=family, tag=tag, limit=limit
                 )
-            payload = {"query": query, "total": len(raw_hits), "hits": raw_hits, "source": "remote"}
+            payload = {
+                "query": query,
+                "total": len(raw_hits),
+                "limit": limit,
+                "offset": 0,
+                "hits": raw_hits,
+                "source": "remote",
+            }
             render_search_hits(payload, mode=mode)
             return
         with Store(settings.index_path) as store:
@@ -415,17 +488,20 @@ def cmd_search(
                     limit=limit,
                     offset=offset,
                     vault_dir=settings.vault_dir,
+                    explain=explain,
                 )
                 source = "local"
         payload = {
             "query": query,
             "total": total,
+            "limit": limit,
+            "offset": offset,
             "hits": [hit_to_dict(h) for h in hits],
             "source": source,
         }
         render_search_hits(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("read")
@@ -447,7 +523,7 @@ def cmd_read(
             )
         render_note(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("path")
@@ -505,12 +581,14 @@ def cmd_list(
         payload = {"total": total, "limit": limit, "offset": offset, "notes": notes}
         render_summary_list(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("backlinks")
 def cmd_backlinks(
     target: str = typer.Argument(..., help="Note UUID or filename (or prefix)"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """List notes that link to the given note."""
@@ -522,9 +600,20 @@ def cmd_backlinks(
             backlinks = store.backlinks_for_note(row["id"])
             for bl in backlinks:
                 bl["absolute_path"] = str((settings.vault_dir / bl["path"]).resolve())
-        render_backlinks({"id": row["id"], "backlinks": backlinks}, mode=mode)
+        total = len(backlinks)
+        page = backlinks[offset : offset + limit]
+        render_backlinks(
+            {
+                "id": row["id"],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "backlinks": page,
+            },
+            mode=mode,
+        )
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("tags")
@@ -539,7 +628,7 @@ def cmd_tags(
             rows = store.tag_counts()
         render_counts({"tags": rows}, "tags", mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("graph")
@@ -598,7 +687,7 @@ def cmd_graph(
             if broken:
                 console.print(f"[yellow]broken:[/yellow] {', '.join(broken)}")
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("kinds")
@@ -614,7 +703,7 @@ def cmd_kinds(
             rows = store.kind_counts(family=family)
         render_counts({"kinds": rows}, "kinds", mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 # ---- write-path ---------------------------------------------------------
@@ -642,6 +731,19 @@ def _wrap_ai(content: str) -> str:
     return f"#ai begin\n{content.strip(chr(10))}\n#ai end"
 
 
+def _write_response(store: Store, vault_dir: Path, note_id: str, fields: Fields) -> dict[str, Any]:
+    """Build the post-write payload for a mutation command.
+
+    `minimal` = identity + metadata + tags (via `summarize_note`).
+    `full`    = full read payload with body, frontmatter, wikilinks
+                — backlinks are skipped because they're irrelevant to a
+                just-written note and cost a DB scan.
+    """
+    if fields is Fields.full:
+        return read_note_full(store, vault_dir, note_id, include_backlinks=False)
+    return summarize_note(store, vault_dir, note_id)
+
+
 @app.command("create")
 def cmd_create(
     filename: str = typer.Option(
@@ -656,10 +758,12 @@ def cmd_create(
         "--ai",
         help="Wrap the body in `#ai begin` / `#ai end` markers (AI-authored content).",
     ),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -684,15 +788,10 @@ def cmd_create(
                     kind=kind,
                     tags=list(tag),
                 )
-            if with_body:
-                payload = read_note_full(
-                    store, settings.vault_dir, note.id, include_backlinks=False
-                )
-            else:
-                payload = summarize_note(store, settings.vault_dir, note.id)
-        render_note(payload, mode=mode, minimal=not with_body)
+            payload = _write_response(store, settings.vault_dir, note.id, fields)
+        render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("edit")
@@ -716,10 +815,12 @@ def cmd_edit(
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
     ),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -755,15 +856,10 @@ def cmd_edit(
                     remove_tags=list(remove_tag),
                     force=force,
                 )
-            if with_body:
-                payload = read_note_full(
-                    store, settings.vault_dir, note.id, include_backlinks=False
-                )
-            else:
-                payload = summarize_note(store, settings.vault_dir, note.id)
-        render_note(payload, mode=mode, minimal=not with_body)
+            payload = _write_response(store, settings.vault_dir, note.id, fields)
+        render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("append")
@@ -789,10 +885,12 @@ def cmd_append(
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
     ),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -832,15 +930,10 @@ def cmd_append(
                     content=text,
                     force=force,
                 )
-            if with_body:
-                payload = read_note_full(
-                    store, settings.vault_dir, note.id, include_backlinks=False
-                )
-            else:
-                payload = summarize_note(store, settings.vault_dir, note.id)
-        render_note(payload, mode=mode, minimal=not with_body)
+            payload = _write_response(store, settings.vault_dir, note.id, fields)
+        render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("delete")
@@ -880,16 +973,18 @@ def cmd_delete(
         else:
             log(f"deleted {note_id}", mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("restore")
 def cmd_restore(
     note_id: str = typer.Argument(...),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -903,15 +998,10 @@ def cmd_restore(
                 note = restore_note_remote(
                     client=client, store=store, vault_dir=settings.vault_dir, note_id=note_id
                 )
-            if with_body:
-                payload = read_note_full(
-                    store, settings.vault_dir, note.id, include_backlinks=False
-                )
-            else:
-                payload = summarize_note(store, settings.vault_dir, note.id)
-        render_note(payload, mode=mode, minimal=not with_body)
+            payload = _write_response(store, settings.vault_dir, note.id, fields)
+        render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("rename")
@@ -923,10 +1013,12 @@ def cmd_rename(
         "--force",
         help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
     ),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -947,7 +1039,7 @@ def cmd_rename(
         remove_tag=[],
         ai=False,
         force=force,
-        with_body=with_body,
+        fields=fields,
         json_output=json_output,
     )
 
@@ -981,10 +1073,12 @@ def cmd_upload(
         "(defaults to application/octet-stream)",
     ),
     tag: list[str] = typer.Option([], "--tag", help="Tag to add to the created note (repeatable)"),
-    with_body: bool = typer.Option(
-        False,
-        "--with-body",
-        help="Echo the full note body, frontmatter, tags, wikilinks, backlinks (off by default).",
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -1017,12 +1111,7 @@ def cmd_upload(
                     source=source,
                     content_type=content_type,
                 )
-            if with_body:
-                payload = read_note_full(
-                    store, settings.vault_dir, note.id, include_backlinks=False
-                )
-            else:
-                payload = summarize_note(store, settings.vault_dir, note.id)
+            payload = _write_response(store, settings.vault_dir, note.id, fields)
         payload["upload"] = {
             "storage_key": upload.get("storageKey"),
             "content_type": upload.get("contentType"),
@@ -1032,13 +1121,13 @@ def cmd_upload(
         if mode.json:
             emit_json(payload)
         else:
-            render_note(payload, mode=mode, minimal=not with_body)
+            render_note(payload, mode=mode, minimal=fields is Fields.minimal)
             log(
                 f"uploaded {upload.get('storageKey')} ({upload.get('sizeBytes')} bytes)",
                 mode=mode,
             )
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("download")
@@ -1086,7 +1175,7 @@ def cmd_download(
                 mode=mode,
             )
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 # ---- status / config / reset -------------------------------------------
@@ -1105,10 +1194,7 @@ def cmd_status(
             local_total = store.count_notes()
             restricted_total = store.count_restricted()
             cardinality = store.fts_cardinality_check()
-            # Read schema_version from the store (sync_meta) — the
-            # state.json value is a human-readable copy and can drift if a
-            # migration happened without updating state.json.
-            store_schema_version = int(store.get_meta("schema_version") or 0)
+            store_schema_version = store.schema_version
         since_sync = _seconds_since(state.last_sync_at)
         payload = {
             "api_url": settings.api_url,
@@ -1129,7 +1215,7 @@ def cmd_status(
         }
         render_status(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 def _seconds_since(iso_timestamp: str | None) -> int | None:
@@ -1162,7 +1248,7 @@ def cmd_config(
         }
         render_status(payload, mode=mode)
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("reset")

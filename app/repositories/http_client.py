@@ -129,10 +129,7 @@ class NotesClient:
         "forbidden" to avoid leaking existence. Sync catches this and
         falls back to a metadata-only placeholder.
         """
-        try:
-            return self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
-        except NoteForbiddenError:
-            raise
+        return self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
 
     def create_note(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST /api/notes — returns the created note (with body)."""
