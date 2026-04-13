@@ -5,7 +5,7 @@ description = "Local CLI mirror and search tool for notes.vcoeur.com, built for 
 requires-python = ">=3.12"
 dependencies = [
     "environs>=14.6.0",
-    "httpx>=0.28",
+    "httpx[socks]>=0.28",
     "markdown-it-py>=3.0",
     "rich>=13.9",
     "typer>=0.16",
