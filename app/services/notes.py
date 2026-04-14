@@ -121,9 +121,24 @@ def ingest_note(
     # 2. Write the mirror file atomically. If this fails, the store already
     #    points at `relative_path`; reconcile will detect the missing file
     #    and re-fetch from the remote.
-    write_note_file(vault_dir, relative_path, content)
+    destination = write_note_file(vault_dir, relative_path, content)
 
-    # 3. Remove any stale file left behind by a rename. If this fails, the
+    # 3. Record the mirror file's (mtime, size) so the LocalBackend drift
+    #    walk can tell "this is the content we ingested" from "user edited".
+    #    Failure here is self-correcting — the walk sees a mismatch and
+    #    re-parses the file.
+    try:
+        stat = destination.stat()
+    except OSError:
+        pass
+    else:
+        store.record_file_stat(
+            note.id,
+            path_mtime_ns=stat.st_mtime_ns,
+            path_size=stat.st_size,
+        )
+
+    # 4. Remove any stale file left behind by a rename. If this fails, the
     #    stale file becomes an orphan that reconcile will clean up.
     if previous_path and previous_path != relative_path:
         remove_note_file(vault_dir, previous_path)

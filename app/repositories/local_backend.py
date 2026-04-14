@@ -5,14 +5,18 @@ Operates on a markdown vault under `settings.vault_dir` with a local
 model — a standalone zettelkasten CLI for users who do not want to run
 their own `notes.vcoeur.com` instance.
 
-Phase 4: read path (`list_note_summaries`, `read_note`). Every mutation
-method raises `NotImplementedError` until Phase 6. The stat-walk drift
-detector `_refresh_index_if_stale` is a no-op until Phase 5.
+Phase 5: read path (`list_note_summaries`, `read_note`) plus a
+mtime-gated stat walk in `_refresh_index_if_stale` that detects external
+edits — files written by the user's editor, deleted via `rm`, etc. The
+walk runs at most once per CLI invocation. Mutation methods still raise
+`NotImplementedError` until Phase 6 lands writes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from pathlib import Path
 
 from app.models import Note, WikiLink
@@ -27,7 +31,15 @@ from app.repositories.backend import (
 )
 from app.repositories.errors import NotFoundError, UserError
 from app.repositories.store import Store
+from app.services.markdown_parser import parse_body
 from app.settings import Settings
+
+_LOG = logging.getLogger(__name__)
+
+# Top-level directories under the vault that the drift walk skips. These
+# hold machine-managed files (soft-deleted notes, attachment blobs) that
+# should not surface as note drift.
+_SKIP_TOP_LEVEL = frozenset({".trash", ".attachments"})
 
 
 class LocalBackend(Backend):
@@ -55,15 +67,83 @@ class LocalBackend(Backend):
         self._store.close()
 
     def _refresh_index_if_stale(self) -> None:
-        """Walk the vault and refresh drifted rows in the store.
+        """Stat-walk the vault and refresh drifted rows in the store.
 
-        Phase 4 stub — the real mtime-gated walk lands in Phase 5. Kept
-        here now so the read-path methods already call it, and the only
-        change in Phase 5 is the body of this method.
+        Runs at most once per `LocalBackend` instance — one walk per CLI
+        invocation. For each `.md` file under `vault_dir`:
+
+        - `(mtime_ns, size)` matches the store's recorded tuple → no-op.
+        - Tuple mismatches → re-parse the body and call
+          `Store.apply_drifted_body` to refresh FTS5, tags, wikilinks,
+          and the recorded stat values.
+        - File not known to the store (new file on disk) → logged and
+          skipped. Creating notes from unknown markdown files requires a
+          filename-to-family parser that lands with `create_note` in
+          Phase 6; until then, users who drop files into the vault by
+          hand need to re-run `kasten sync` after Phase 6.
+
+        Missing files — entries in the store whose path is no longer on
+        disk — are hard-deleted. External `rm foo.md` is a permanent
+        delete; only `kasten delete` moves files to `.trash/`.
         """
         if self._reindex_done:
             return
         self._reindex_done = True
+
+        try:
+            path_index = self._store.path_index()
+        except Exception as exc:
+            _LOG.debug("Skipping stat walk (store not ready): %s", exc)
+            return
+
+        seen_paths: set[str] = set()
+        vault_root = self._vault_dir.resolve()
+
+        for file_path in sorted(self._vault_dir.rglob("*.md")):
+            try:
+                relative = file_path.resolve().relative_to(vault_root)
+            except ValueError:
+                continue
+            if relative.parts and relative.parts[0] in _SKIP_TOP_LEVEL:
+                continue
+
+            relative_str = str(relative)
+            seen_paths.add(relative_str)
+
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+
+            indexed = path_index.get(relative_str)
+            if indexed is None:
+                _LOG.debug("Unknown vault file %s — Phase 5 skip; land in Phase 6", relative_str)
+                continue
+
+            recorded_mtime, recorded_size, note_id = indexed
+            if recorded_mtime == stat.st_mtime_ns and recorded_size == stat.st_size:
+                continue
+
+            try:
+                raw = file_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            body = _strip_frontmatter(raw)
+            parsed = parse_body(body)
+            body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            self._store.apply_drifted_body(
+                note_id,
+                body=body,
+                body_sha256=body_sha,
+                tags=parsed.tags,
+                wikilink_titles=parsed.wikilink_titles,
+                path_mtime_ns=stat.st_mtime_ns,
+                path_size=stat.st_size,
+            )
+
+        for missing_path in set(path_index) - seen_paths:
+            _, _, missing_id = path_index[missing_path]
+            self._store.delete_note(missing_id)
 
     def list_note_summaries(self, *, limit: int, offset: int) -> NotesPage:
         self._refresh_index_if_stale()
