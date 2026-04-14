@@ -413,7 +413,6 @@ def cmd_search(
     ),
     limit: int = typer.Option(20, "--limit", min=1, max=200),
     offset: int = typer.Option(0, "--offset", min=0),
-    remote: bool = typer.Option(False, "--remote", help="Bypass local index, hit the server"),
     fuzzy: bool = typer.Option(
         False,
         "--fuzzy",
@@ -427,42 +426,14 @@ def cmd_search(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Full-text search against the local index (or --remote for server search)."""
+    """Full-text search against the local index."""
     mode = OutputMode.detect(json_output)
     try:
-        if remote:
-            if fuzzy:
-                raise UserError("--fuzzy is a local-only mode; drop --remote to use it")
-            if explain:
-                raise UserError("--explain is a local-only mode; drop --remote to use it")
-            if min_permission or max_permission:
-                raise UserError(
-                    "--min-permission / --max-permission are local-only filters; "
-                    "drop --remote or drop the permission filter"
-                )
-            if offset:
-                raise UserError("--offset is not supported by the remote search endpoint")
         if explain and fuzzy:
             raise UserError(
                 "--explain only applies to ranked unicode61 search; drop --fuzzy to use it"
             )
         settings = _load()
-        if remote:
-            _require_token(settings)
-            with NotesClient(settings) as client:
-                raw_hits = client.remote_search(
-                    query, kind=kind, family=family, tag=tag, limit=limit
-                )
-            payload = {
-                "query": query,
-                "total": len(raw_hits),
-                "limit": limit,
-                "offset": 0,
-                "hits": raw_hits,
-                "source": "remote",
-            }
-            render_search_hits(payload, mode=mode)
-            return
         with Store(settings.index_path) as store:
             if fuzzy:
                 hits, total = store.search_fuzzy(

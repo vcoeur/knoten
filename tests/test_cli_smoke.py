@@ -81,18 +81,6 @@ def test_search_fuzzy_empty_store(monkeypatch, tmp_path) -> None:
     assert payload["hits"] == []
 
 
-def test_search_fuzzy_rejects_remote_combo(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
-    runner = CliRunner()
-    result = runner.invoke(app, ["search", "x", "--fuzzy", "--remote", "--json"])
-    assert result.exit_code != 0
-    payload = json.loads(result.stdout)
-    assert payload["error"] == "user"
-    assert "local-only" in payload["message"]
-    assert payload["code"] == 1
-
-
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
     # Explicitly set to "" so environs does not fall back to the repo-level
     # .env (which may or may not exist depending on the user's setup).
