@@ -493,10 +493,23 @@ def edit_note_remote(
     if not payload:
         raise UserError("Nothing to update — pass at least one --filename/--body/--tag/--set flag")
 
-    client.update_note(note_id, payload)
+    update_response = client.update_note(note_id, payload)
     fresh = client.read_note(note_id)
     note = note_from_api(fresh)
     ingest_note(note, store=store, vault_dir=vault_dir, previous_path=previous_path)
+
+    # Rename cascade: when the server rewrites [[old]] → [[new]] in other
+    # notes' bodies, it returns them in `affectedNotes`. Re-fetch each and
+    # re-ingest so the local mirror converges without a full sync.
+    affected = update_response.get("affectedNotes") or []
+    for entry in affected:
+        affected_id = entry.get("id") if isinstance(entry, dict) else None
+        if not affected_id or affected_id == note_id:
+            continue
+        affected_fresh = client.read_note(affected_id)
+        affected_note = note_from_api(affected_fresh)
+        ingest_note(affected_note, store=store, vault_dir=vault_dir)
+
     return note
 
 

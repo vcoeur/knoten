@@ -259,6 +259,85 @@ def test_rename_default_is_minimal(cli_env, httpx_mock: HTTPXMock) -> None:
     _assert_minimal(payload)
 
 
+def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None:
+    """When the server returns `affectedNotes`, the client re-fetches each
+    and re-ingests it so the local mirror converges without a full sync.
+    """
+    _seed_permanent(cli_env)
+    source_id = "33333333-3333-3333-3333-333333333333"
+    source_note = Note(
+        id=source_id,
+        filename="- Source",
+        title="Source",
+        family="fleeting",
+        kind="fleeting",
+        source=None,
+        body="See [[! Seed]] for context.",
+        frontmatter={},
+        tags=(),
+        wikilinks=(),
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+        mcp_permissions="ALL",
+    )
+    with Store(cli_env.index_path) as store:
+        source_path = ingest_note(source_note, store=store, vault_dir=cli_env.vault_dir)
+
+    # Sanity: the source file on disk currently points at [[! Seed]].
+    assert "[[! Seed]]" in (cli_env.vault_dir / source_path).read_text()
+
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{NOTE_ID}",
+        method="PUT",
+        json={
+            "id": NOTE_ID,
+            "affectedNotes": [
+                {
+                    "id": source_id,
+                    "filename": "- Source",
+                    "updatedAt": "2024-01-03T00:00:00Z",
+                }
+            ],
+        },
+    )
+    # Refresh the renamed note.
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{NOTE_ID}",
+        method="GET",
+        json=_full_note_payload(filename="! Seed renamed", title="Seed renamed"),
+    )
+    # Refresh the affected source note with its rewritten body.
+    rewritten_source_payload = {
+        "id": source_id,
+        "filename": "- Source",
+        "title": "Source",
+        "family": "fleeting",
+        "kind": "fleeting",
+        "source": None,
+        "body": "See [[! Seed renamed]] for context.",
+        "frontmatter": {},
+        "tags": [],
+        "linkMap": {},
+        "mcpPermissions": "ALL",
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": "2024-01-03T00:00:00Z",
+    }
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{source_id}",
+        method="GET",
+        json=rewritten_source_payload,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["rename", NOTE_ID, "! Seed renamed", "--json"])
+    assert result.exit_code == 0, result.output
+
+    # The local mirror of the source note must now contain the new wikilink.
+    refreshed_body = (cli_env.vault_dir / source_path).read_text()
+    assert "[[! Seed renamed]]" in refreshed_body
+    assert "[[! Seed]]" not in refreshed_body
+
+
 # ---- upload -------------------------------------------------------------
 
 
