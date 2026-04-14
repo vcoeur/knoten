@@ -753,6 +753,11 @@ def cmd_create(
     body_file: Path | None = typer.Option(None, "--body-file"),
     kind: str | None = typer.Option(None, "--kind"),
     tag: list[str] = typer.Option([], "--tag"),
+    frontmatter_file: Path | None = typer.Option(
+        None,
+        "--frontmatter-file",
+        help="JSON file whose top-level object is merged into the new note's frontmatter.",
+    ),
     ai: bool = typer.Option(
         False,
         "--ai",
@@ -777,6 +782,7 @@ def cmd_create(
             if body_text is None:
                 raise UserError("--ai requires --body or --body-file")
             body_text = _wrap_ai(body_text)
+        frontmatter = _load_frontmatter_file(frontmatter_file)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
             with NotesClient(settings) as client:
                 note = create_note_remote(
@@ -787,11 +793,31 @@ def cmd_create(
                     body=body_text,
                     kind=kind,
                     tags=list(tag),
+                    frontmatter=frontmatter,
                 )
             payload = _write_response(store, settings.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _load_frontmatter_file(path: Path | None) -> dict[str, object] | None:
+    """Load a JSON dict from a file, or return None if path is None."""
+    if path is None:
+        return None
+    import json as _json
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UserError(f"cannot read --frontmatter-file {path}: {exc}") from exc
+    try:
+        parsed = _json.loads(raw)
+    except _json.JSONDecodeError as exc:
+        raise UserError(f"--frontmatter-file {path} is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise UserError(f"--frontmatter-file {path} must contain a JSON object at the top level")
+    return parsed
 
 
 @app.command("edit")

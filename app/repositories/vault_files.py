@@ -170,9 +170,27 @@ def _yaml_inline(value: Any) -> str:
     return text
 
 
+def _safe_destination(vault_dir: Path, relative_path: str) -> Path:
+    """Return `vault_dir / relative_path`, refusing any path that escapes the vault.
+
+    The server is the source of truth for note paths, but we defend against the
+    case where an untrusted or broken server returns a filename containing `..`
+    or an absolute path: resolving the target and asserting it stays under the
+    resolved vault dir catches both.
+    """
+    destination = vault_dir / relative_path
+    vault_resolved = vault_dir.resolve()
+    destination_resolved = destination.resolve()
+    if destination_resolved != vault_resolved and not destination_resolved.is_relative_to(
+        vault_resolved
+    ):
+        raise ValueError(f"refusing to touch path outside vault: {relative_path!r}")
+    return destination
+
+
 def write_note_file(vault_dir: Path, relative_path: str, content: str) -> Path:
     """Atomically write `content` to `vault_dir/relative_path`."""
-    destination = vault_dir / relative_path
+    destination = _safe_destination(vault_dir, relative_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
@@ -182,7 +200,7 @@ def write_note_file(vault_dir: Path, relative_path: str, content: str) -> Path:
 
 def remove_note_file(vault_dir: Path, relative_path: str) -> None:
     """Remove a note file, ignoring "already gone" errors."""
-    destination = vault_dir / relative_path
+    destination = _safe_destination(vault_dir, relative_path)
     try:
         destination.unlink()
     except FileNotFoundError:

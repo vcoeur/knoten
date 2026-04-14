@@ -88,7 +88,7 @@ make tool-install  # install `kasten` globally via `uv tool install`
 1. After any code change: `make format` — enforced by ruff.
 2. Before committing: `make lint && make test`.
 3. When adding a new CLI command: add a test in `tests/test_cli_smoke.py` that at minimum runs it with `--json` on an empty store to catch wiring regressions.
-4. When changing the store schema: bump `SCHEMA_VERSION` in `app/repositories/store.py` and update the design note at `~/src/vcoeur/conception/projects/2026-04-12-kasten-manager/notes/index-schema.md`.
+4. When changing the store schema: bump `SCHEMA_VERSION` in `app/repositories/store.py` and document the migration in the commit message.
 
 ## Key code locations
 
@@ -98,16 +98,10 @@ make tool-install  # install `kasten` globally via `uv tool install`
 - FTS5 search: `Store.search()` — weights `(1.0, 10.0, 1.0, 5.0)` map to (note_id, title, body, filename). Keep the UNINDEXED `note_id` weight in the list or bm25 silently mis-weights.
 - Fuzzy search: `Store.search_fuzzy()` — combines a second FTS5 virtual table `notes_fts_trigram` (tokenize='trigram', used for substring matching) with a `rapidfuzz.process.extract` pass over titles+filenames. Both FTS tables must stay in sync: `upsert_note`, `upsert_placeholder`, and `delete_note` all write to both, and `fts_cardinality_check` covers both. Combined score = rapidfuzz WRatio (0..100) + 30 if the note is also a trigram substring hit.
 - Sync orchestration: `app/services/sync.py` — `incremental_sync` is the real work; `full_sync` delegates to it with a cleared cursor.
-- File writing: `app/repositories/vault_files.py` — atomic writes via tmp + rename, path derivation in `path_for_note`.
+- File writing: `app/repositories/vault_files.py` — atomic writes via tmp + rename, path derivation in `path_for_note`. The writer validates that the server-provided relative path stays inside the vault before touching disk.
 
 ## Testing conventions
 
 - pytest-httpx to mock the remote. The fixture `_clear_proxy_env` in `tests/conftest.py` strips system proxy env vars so httpx.Client doesn't try to wire up SOCKS during tests.
 - SQLite tests run against a real per-test sqlite file in a `tmp_path` — no mocks.
 - Ingest tests verify both the file on disk and the store row in one go (`tests/test_ingest_and_files.py`).
-
-## Related projects
-
-- `~/src/vcoeur/notes.vcoeur.com/` — the remote source of truth (TypeScript, Hono, Drizzle, Postgres). Docs under `docs/api.md`, `docs/auth.md`, `docs/datamodel.md`.
-- `~/src/vcoeur/PaintingManager/` — Python CLI with the same architectural conventions (layered app, uv, atomic writes). Copy patterns from there first before inventing new ones.
-- `~/src/vcoeur/conception/projects/2026-04-12-kasten-manager/` — conception project with all design notes.

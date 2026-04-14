@@ -2,7 +2,7 @@
 
 Local CLI mirror and search tool for [notes.vcoeur.com](https://notes.vcoeur.com), designed to be driven by **Claude Code via skills**. Reads are fast and offline against a local SQLite FTS5 index; writes go to the remote first and are then refreshed locally, so the remote is always the source of truth.
 
-> **Not deployed anywhere.** This is a per-laptop tool. Install it on each machine you use, point it at the same `notes.vcoeur.com`, and let each local mirror catch up independently.
+> **Not deployed anywhere.** This is a per-laptop client for your own `notes.vcoeur.com` instance — you need to run the server to use it. Install it on each machine you use, point it at the same `notes.vcoeur.com`, and let each local mirror catch up independently.
 
 ## What it does
 
@@ -62,11 +62,9 @@ Python 3.12+, managed with `uv`. Deliberately small and stdlib-friendly.
 | Config | [environs](https://pypi.org/project/environs/) + `.env` |
 | Tests | pytest + pytest-httpx |
 
-Full rationale in `~/src/vcoeur/conception/projects/2026-04-12-kasten-manager/notes/tech-stack.md`.
-
 ## Architecture
 
-Layered, mirrors PaintingManager's conventions:
+Layered — models / repositories / services / CLI, the usual Python CLI layout.
 
 ```
 app/
@@ -87,7 +85,7 @@ Read rules:
 
 ```bash
 # Clone to your preferred location.
-git clone git@github.com:vcoeur/KastenManager.git
+git clone https://github.com/vcoeur/KastenManager.git
 cd KastenManager
 
 # Install dev deps into a local .venv for tests.
@@ -109,7 +107,7 @@ kasten --help
 
 `make tool-uninstall` removes the global command (does not delete the repo or `.env`).
 
-Getting an API token: open `notes.vcoeur.com`, go to settings → tokens, create a new one with the `api` scope, paste it into `.env` as `KASTEN_API_TOKEN`. The token is shown only once.
+Getting an API token: open your `notes.vcoeur.com` instance, go to settings → tokens, create a new one with the `api` scope, paste it into `.env` as `KASTEN_API_TOKEN`. The token is shown only once.
 
 ## First sync
 
@@ -161,7 +159,7 @@ kasten rename "! New idea" "! Core insight" --json
 **Installed globally** (`uv tool install . → ~/.local/bin/kasten`): the installed copy can't find the source tree, so it reads **`~/.config/kasten/.env`** first. That file is typically a two-line pointer:
 
 ```ini
-KASTEN_HOME=/home/alice/src/vcoeur/KastenManager
+KASTEN_HOME=~/src/KastenManager
 ```
 
 Once `KASTEN_HOME` is known, the CLI layers on `$KASTEN_HOME/.env` automatically to pick up the API URL + token — no secret duplication. Fallback if nothing is configured: `~/.kasten/` (state) + `~/.kasten/.env` (config).
@@ -180,18 +178,14 @@ make sync-full  # full rebuild
 
 Tests use pytest-httpx to mock `notes.vcoeur.com` — there is no dependency on a running server for the unit test suite.
 
-## Design notes
-
-All design and investigation notes for this project live in the conception repo:
-
-- `~/src/vcoeur/conception/projects/2026-04-12-kasten-manager/README.md` — project overview
-- `notes/notes-api-surface.md` — every notes.vcoeur.com endpoint the CLI uses
-- `notes/tech-stack.md` — stack decision + rationale
-- `notes/local-storage.md` — on-disk layout
-- `notes/index-schema.md` — SQLite + FTS5 schema
-- `notes/sync-strategy.md` — incremental vs full sync algorithm
-- `notes/cli-surface.md` — full CLI reference
-
 ## Status
 
-v0.1 — initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI. See the design notes and the project README for roadmap and open questions.
+v0.1 — initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
+
+## Questions or feedback
+
+This is a personal tool — I'm happy to hear from you, but there is no formal support. The best way to reach me is the contact form on [vcoeur.com](https://vcoeur.com).

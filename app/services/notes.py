@@ -424,6 +424,7 @@ def create_note_remote(
     body: str | None,
     kind: str | None,
     tags: list[str],
+    frontmatter: dict[str, Any] | None = None,
 ) -> Note:
     """POST to the remote, then fetch and mirror the created note locally."""
     payload: dict[str, Any] = {"filename": filename}
@@ -432,6 +433,8 @@ def create_note_remote(
         payload["body"] = composed_body
     if kind:
         payload["kind"] = kind
+    if frontmatter:
+        payload["frontmatter"] = frontmatter
 
     raw = client.create_note(payload)
     created_id = str(raw.get("id"))
