@@ -16,7 +16,7 @@ from pytest_httpx import HTTPXMock
 
 from app.models import Note
 from app.repositories.errors import PermissionError as LocalPermissionError
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.services.notes import append_note_remote, ingest_note
 from app.settings import Settings
@@ -42,7 +42,7 @@ def _seed_local(store: Store, tmp_settings: Settings, *, mcp_permissions: str = 
     return note
 
 
-def test_append_note_client_posts_to_append_endpoint(
+def test_append_to_note_backend_posts_to_append_endpoint(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     httpx_mock.add_response(
@@ -64,11 +64,10 @@ def test_append_note_client_posts_to_append_endpoint(
             "updatedAt": "2024-01-03T00:00:00Z",
         },
     )
-    with NotesClient(tmp_settings) as client:
-        updated = client.append_note("11111111-1111-1111-1111-111111111111", "second line")
-    assert updated["body"] == "first line\n\nsecond line"
+    with RemoteBackend(tmp_settings) as backend:
+        result = backend.append_to_note("11111111-1111-1111-1111-111111111111", "second line")
+    assert result is None
 
-    # Verify the request payload shape.
     requests = httpx_mock.get_requests()
     assert len(requests) == 1
     assert requests[0].method == "POST"
@@ -113,9 +112,9 @@ def test_append_note_remote_round_trips_through_store(
             },
         )
 
-        with NotesClient(tmp_settings) as client:
+        with RemoteBackend(tmp_settings) as backend:
             note = append_note_remote(
-                client=client,
+                backend=backend,
                 store=store,
                 vault_dir=tmp_settings.vault_dir,
                 target="11111111-1111-1111-1111-111111111111",
@@ -138,10 +137,10 @@ def test_append_note_remote_refuses_below_append_without_force(
     with Store(tmp_settings.index_path) as store:
         _seed_local(store, tmp_settings, mcp_permissions="READ")
 
-        with NotesClient(tmp_settings) as client:
+        with RemoteBackend(tmp_settings) as backend:
             with pytest.raises(LocalPermissionError) as exc_info:
                 append_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=tmp_settings.vault_dir,
                     target="11111111-1111-1111-1111-111111111111",
@@ -185,9 +184,9 @@ def test_append_note_remote_force_bypasses_precheck(
                 "updatedAt": "2024-01-03T00:00:00Z",
             },
         )
-        with NotesClient(tmp_settings) as client:
+        with RemoteBackend(tmp_settings) as backend:
             note = append_note_remote(
-                client=client,
+                backend=backend,
                 store=store,
                 vault_dir=tmp_settings.vault_dir,
                 target="11111111-1111-1111-1111-111111111111",

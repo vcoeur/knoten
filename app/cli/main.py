@@ -1,7 +1,7 @@
 """Typer CLI entrypoint for the `kasten` command.
 
 Each subcommand is a thin wrapper: parse flags, resolve Settings, open the
-Store (and NotesClient when remote access is needed), call into a service,
+Store (and RemoteBackend when remote access is needed), call into a service,
 render the result via `app.cli.output`.
 
 Exit codes (mapped from exception types in `app.repositories.errors`):
@@ -51,8 +51,8 @@ from app.repositories.errors import (
 from app.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.http_client import NotesClient
 from app.repositories.lock import acquire_lock
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.sync_state import load_state
 from app.services.notes import (
@@ -210,10 +210,10 @@ def cmd_sync(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 if full:
                     result = full_sync(
-                        client=client,
+                        backend=backend,
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
@@ -221,7 +221,7 @@ def cmd_sync(
                     )
                 else:
                     result = incremental_sync(
-                        client=client,
+                        backend=backend,
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
@@ -278,9 +278,9 @@ def cmd_verify(
             progress(
                 "→ Reconciling local mirror" + (" (with body-hash verification)" if hashes else "")
             )
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 result = reconcile_local(
-                    client=client,
+                    backend=backend,
                     store=store,
                     settings=settings,
                     verify_hashes=hashes,
@@ -755,9 +755,9 @@ def cmd_create(
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note = create_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     filename=filename,
@@ -838,9 +838,9 @@ def cmd_edit(
             key, _, value = pair.partition("=")
             fm_sets[key] = value
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note = edit_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -918,9 +918,9 @@ def cmd_append(
         if ai:
             text = _wrap_ai(text)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note = append_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -957,9 +957,9 @@ def cmd_delete(
                 log("aborted", mode=mode)
                 raise typer.Exit(0)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note_id = delete_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -991,9 +991,9 @@ def cmd_restore(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note = restore_note_remote(
-                    client=client, store=store, vault_dir=settings.vault_dir, note_id=note_id
+                    backend=backend, store=store, vault_dir=settings.vault_dir, note_id=note_id
                 )
             payload = _write_response(store, settings.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
@@ -1097,9 +1097,9 @@ def cmd_upload(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 note, upload = upload_file_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     source_path=path,
@@ -1149,9 +1149,9 @@ def cmd_download(
         settings = _load()
         _require_token(settings)
         with Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with RemoteBackend(settings) as backend:
                 result = download_file_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     target=target,
                     destination=output,

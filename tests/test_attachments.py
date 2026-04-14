@@ -21,7 +21,7 @@ from pytest_httpx import HTTPXMock
 
 from app.models import Note
 from app.repositories.errors import NotFoundError, UserError
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.services.notes import (
     download_file_remote,
@@ -84,10 +84,12 @@ def test_upload_attachment_posts_multipart(
         },
     )
 
-    with NotesClient(tmp_settings) as client:
-        result = client.upload_attachment(sample, content_type="application/pdf")
+    with RemoteBackend(tmp_settings) as backend:
+        result = backend.upload_attachment(sample, content_type="application/pdf")
 
-    assert result["storageKey"] == STORAGE_KEY
+    assert result.storage_key == STORAGE_KEY
+    assert result.content_type == "application/pdf"
+    assert result.size_bytes == 9
     requests = httpx_mock.get_requests()
     assert len(requests) == 1
     body = requests[0].content
@@ -109,8 +111,8 @@ def test_upload_attachment_includes_source_field(
         json={"storageKey": STORAGE_KEY, "sizeBytes": "1"},
     )
 
-    with NotesClient(tmp_settings) as client:
-        client.upload_attachment(sample, content_type="application/pdf", source="Scott2019")
+    with RemoteBackend(tmp_settings) as backend:
+        backend.upload_attachment(sample, content_type="application/pdf", source="Scott2019")
 
     requests = httpx_mock.get_requests()
     assert b'name="source"' in requests[0].content
@@ -134,13 +136,13 @@ def test_download_attachment_streams_to_disk(
     )
 
     dest = tmp_path / "out.pdf"
-    with NotesClient(tmp_settings) as client:
-        result = client.download_attachment(STORAGE_KEY, dest)
+    with RemoteBackend(tmp_settings) as backend:
+        result = backend.download_attachment(STORAGE_KEY, dest)
 
     assert dest.read_bytes() == b"PDFBLOB"
-    assert result["bytes_written"] == 7
-    assert result["content_type"] == "application/pdf"
-    assert result["filename"] == "scan.pdf"
+    assert result.bytes_written == 7
+    assert result.content_type == "application/pdf"
+    assert result.filename == "scan.pdf"
 
 
 def test_download_attachment_404_raises_not_found(
@@ -151,8 +153,8 @@ def test_download_attachment_404_raises_not_found(
         method="GET",
         status_code=404,
     )
-    with NotesClient(tmp_settings) as client, pytest.raises(NotFoundError):
-        client.download_attachment(STORAGE_KEY, tmp_path / "out.bin")
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(NotFoundError):
+        backend.download_attachment(STORAGE_KEY, tmp_path / "out.bin")
 
 
 # ---- upload_file_remote -------------------------------------------------
@@ -198,9 +200,9 @@ def test_upload_file_remote_two_step_flow(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
         note, upload = upload_file_remote(
-            client=client,
+            backend=backend,
             store=store,
             vault_dir=tmp_settings.vault_dir,
             source_path=sample,
@@ -235,11 +237,11 @@ def test_upload_file_remote_rejects_missing_storage_key(
     )
     with (
         Store(tmp_settings.index_path) as store,
-        NotesClient(tmp_settings) as client,
+        RemoteBackend(tmp_settings) as backend,
         pytest.raises(UserError, match="storageKey"),
     ):
         upload_file_remote(
-            client=client,
+            backend=backend,
             store=store,
             vault_dir=tmp_settings.vault_dir,
             source_path=sample,
@@ -265,9 +267,9 @@ def test_download_file_remote_happy_path(
     dest = tmp_path / "out.pdf"
     with Store(tmp_settings.index_path) as store:
         _seed_file_note(store, tmp_settings)
-        with NotesClient(tmp_settings) as client:
+        with RemoteBackend(tmp_settings) as backend:
             result = download_file_remote(
-                client=client,
+                backend=backend,
                 store=store,
                 target="2024-11-10+ scan.pdf",
                 destination=dest,
@@ -300,11 +302,11 @@ def test_download_file_remote_rejects_non_file_family(
         )
         ingest_note(non_file, store=store, vault_dir=tmp_settings.vault_dir)
         with (
-            NotesClient(tmp_settings) as client,
+            RemoteBackend(tmp_settings) as backend,
             pytest.raises(UserError, match="not a file-family note"),
         ):
             download_file_remote(
-                client=client,
+                backend=backend,
                 store=store,
                 target="! Permanent",
                 destination=tmp_path / "should-not-exist.bin",
@@ -317,11 +319,11 @@ def test_download_file_remote_rejects_missing_attachment_key(
     with Store(tmp_settings.index_path) as store:
         _seed_file_note(store, tmp_settings, frontmatter={})
         with (
-            NotesClient(tmp_settings) as client,
+            RemoteBackend(tmp_settings) as backend,
             pytest.raises(UserError, match="no `attachment` key"),
         ):
             download_file_remote(
-                client=client,
+                backend=backend,
                 store=store,
                 target="2024-11-10+ scan.pdf",
                 destination=tmp_path / "out.bin",

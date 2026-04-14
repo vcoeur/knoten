@@ -401,4 +401,4 @@ def test_upload_default_is_minimal_but_keeps_upload_block(
     # Upload metadata always survives — it is the whole point of the command.
     assert payload["upload"]["storage_key"] == STORAGE_KEY
     assert payload["upload"]["content_type"] == "application/pdf"
-    assert payload["upload"]["size_bytes"] == "7"
+    assert payload["upload"]["size_bytes"] == 7

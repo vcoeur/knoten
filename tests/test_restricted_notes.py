@@ -13,7 +13,7 @@ import json
 from pytest_httpx import HTTPXMock
 
 from app.repositories.errors import NoteForbiddenError
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.services.sync import incremental_sync
 from app.settings import Settings
@@ -59,9 +59,9 @@ def test_http_client_raises_note_forbidden_on_404(
         status_code=404,
         json={"error": "not_found"},
     )
-    with NotesClient(tmp_settings) as client:
+    with RemoteBackend(tmp_settings) as backend:
         try:
-            client.read_note(note_id)
+            backend.read_note(note_id)
             raise AssertionError("expected NoteForbiddenError")
         except NoteForbiddenError as exc:
             assert exc.note_id == note_id
@@ -106,8 +106,8 @@ def test_sync_creates_placeholder_for_404_note(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
-        result = incremental_sync(client=client, store=store, settings=tmp_settings)
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1
         assert result.restricted_placeholders == 1
         assert result.local_total == 2  # placeholder counts toward local
@@ -201,8 +201,8 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
         json=_note_payload(never_seen_id, "! NeverSeen"),
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
-        result = incremental_sync(client=client, store=store, settings=tmp_settings)
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1  # the never-seen note was pulled
         assert store.find_by_id(never_seen_id) is not None
         assert store.count_notes() == 2

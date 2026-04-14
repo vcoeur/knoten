@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models import Note, NoteSummary, SearchHit, permission_at_least
+from app.repositories.backend import NoteDraft, NotePatch
 from app.repositories.errors import (
     AmbiguousTargetError,
     NotFoundError,
@@ -21,7 +22,7 @@ from app.repositories.errors import (
 from app.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.vault_files import (
     path_for_note,
@@ -31,7 +32,6 @@ from app.repositories.vault_files import (
     render_placeholder_markdown,
     write_note_file,
 )
-from app.services.note_mapper import note_from_api
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -320,7 +320,7 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
 
 def upload_file_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     vault_dir: Path,
     source_path: Path,
@@ -347,35 +347,37 @@ def upload_file_remote(
     if not source_path.is_file():
         raise UserError(f"Not a file: {source_path}")
 
-    upload = client.upload_attachment(
+    upload = backend.upload_attachment(
         source_path,
         content_type=content_type,
         source=source,
     )
-    storage_key = upload.get("storageKey")
-    if not storage_key:
-        raise UserError(f"Upload response missing storageKey: {upload}")
+    if not upload.storage_key:
+        raise UserError("Upload response missing storageKey")
 
-    payload: dict[str, Any] = {
-        "filename": filename,
-        "kind": "file",
-        "frontmatter": {"attachment": storage_key},
-    }
     composed_body = _compose_body("", add_tags=tags, remove_tags=[])
-    if composed_body:
-        payload["body"] = composed_body
+    draft = NoteDraft(
+        filename=filename,
+        body=composed_body,
+        kind="file",
+        frontmatter={"attachment": upload.storage_key},
+    )
 
-    raw = client.create_note(payload)
-    created_id = str(raw.get("id"))
-    fresh = client.read_note(created_id)
-    note = note_from_api(fresh)
-    ingest_note(note, store=store, vault_dir=vault_dir)
-    return note, upload
+    created_id = backend.create_note(draft)
+    fresh = backend.read_note(created_id)
+    ingest_note(fresh, store=store, vault_dir=vault_dir)
+    upload_meta: dict[str, Any] = {
+        "storageKey": upload.storage_key,
+        "contentType": upload.content_type,
+        "sizeBytes": upload.size_bytes,
+        "url": upload.url,
+    }
+    return fresh, upload_meta
 
 
 def download_file_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     target: str,
     destination: Path | None,
@@ -408,16 +410,20 @@ def download_file_remote(
         )
 
     chosen = destination if destination is not None else Path.cwd() / row["filename"]
-    result = client.download_attachment(storage_key, chosen)
-    result["note_id"] = row["id"]
-    result["filename"] = row["filename"]
-    result["storage_key"] = storage_key
-    return result
+    download = backend.download_attachment(storage_key, chosen)
+    return {
+        "path": download.path,
+        "bytes_written": download.bytes_written,
+        "content_type": download.content_type,
+        "note_id": row["id"],
+        "filename": row["filename"],
+        "storage_key": storage_key,
+    }
 
 
 def create_note_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     vault_dir: Path,
     filename: str,
@@ -427,26 +433,22 @@ def create_note_remote(
     frontmatter: dict[str, Any] | None = None,
 ) -> Note:
     """POST to the remote, then fetch and mirror the created note locally."""
-    payload: dict[str, Any] = {"filename": filename}
     composed_body = _compose_body(body or "", add_tags=tags, remove_tags=[])
-    if composed_body:
-        payload["body"] = composed_body
-    if kind:
-        payload["kind"] = kind
-    if frontmatter:
-        payload["frontmatter"] = frontmatter
-
-    raw = client.create_note(payload)
-    created_id = str(raw.get("id"))
-    fresh = client.read_note(created_id)
-    note = note_from_api(fresh)
-    ingest_note(note, store=store, vault_dir=vault_dir)
-    return note
+    draft = NoteDraft(
+        filename=filename,
+        body=composed_body,
+        kind=kind,
+        frontmatter=dict(frontmatter) if frontmatter else {},
+    )
+    created_id = backend.create_note(draft)
+    fresh = backend.read_note(created_id)
+    ingest_note(fresh, store=store, vault_dir=vault_dir)
+    return fresh
 
 
 def edit_note_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -476,46 +478,45 @@ def edit_note_remote(
     if new_filename is not None:
         _assert_same_family_prefix(row["filename"], new_filename)
 
-    # Assemble payload with only the fields that changed.
-    payload: dict[str, Any] = {}
-    if new_filename is not None:
-        payload["filename"] = new_filename
-    if new_title is not None:
-        payload["title"] = new_title
-    if body_to_send is not None:
-        payload["body"] = body_to_send
+    patch_frontmatter: dict[str, Any] | None = None
     if set_frontmatter or unset_frontmatter:
-        frontmatter = _apply_frontmatter_changes(
+        patch_frontmatter = _apply_frontmatter_changes(
             row["frontmatter_json"], set_frontmatter, unset_frontmatter
         )
-        payload["frontmatter"] = frontmatter
 
-    if not payload:
+    patch = NotePatch(
+        filename=new_filename,
+        title=new_title,
+        body=body_to_send,
+        frontmatter=patch_frontmatter,
+    )
+    if (
+        patch.filename is None
+        and patch.title is None
+        and patch.body is None
+        and patch.frontmatter is None
+    ):
         raise UserError("Nothing to update — pass at least one --filename/--body/--tag/--set flag")
 
-    update_response = client.update_note(note_id, payload)
-    fresh = client.read_note(note_id)
-    note = note_from_api(fresh)
-    ingest_note(note, store=store, vault_dir=vault_dir, previous_path=previous_path)
+    update_result = backend.update_note(note_id, patch)
+    fresh = backend.read_note(note_id)
+    ingest_note(fresh, store=store, vault_dir=vault_dir, previous_path=previous_path)
 
     # Rename cascade: when the server rewrites [[old]] → [[new]] in other
-    # notes' bodies, it returns them in `affectedNotes`. Re-fetch each and
+    # notes' bodies, it returns them in `affected_notes`. Re-fetch each and
     # re-ingest so the local mirror converges without a full sync.
-    affected = update_response.get("affectedNotes") or []
-    for entry in affected:
-        affected_id = entry.get("id") if isinstance(entry, dict) else None
-        if not affected_id or affected_id == note_id:
+    for affected_id in update_result.affected_notes:
+        if affected_id == note_id:
             continue
-        affected_fresh = client.read_note(affected_id)
-        affected_note = note_from_api(affected_fresh)
+        affected_note = backend.read_note(affected_id)
         ingest_note(affected_note, store=store, vault_dir=vault_dir)
 
-    return note
+    return fresh
 
 
 def delete_note_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -524,14 +525,14 @@ def delete_note_remote(
     row = resolve_target(store, target)
     _assert_permission(row, required_level="ALL", operation="delete", force=force)
     note_id = row["id"]
-    client.delete_note(note_id)
+    backend.delete_note(note_id)
     delete_ingested(store, vault_dir, note_id)
     return note_id
 
 
 def append_note_remote(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -549,23 +550,21 @@ def append_note_remote(
     _assert_permission(row, required_level="APPEND", operation="append", force=force)
     note_id = row["id"]
     previous_path = row["path"]
-    client.append_note(note_id, content)
-    fresh = client.read_note(note_id)
-    note = note_from_api(fresh)
-    ingest_note(note, store=store, vault_dir=vault_dir, previous_path=previous_path)
-    return note
+    backend.append_to_note(note_id, content)
+    fresh = backend.read_note(note_id)
+    ingest_note(fresh, store=store, vault_dir=vault_dir, previous_path=previous_path)
+    return fresh
 
 
 def restore_note_remote(
-    *, client: NotesClient, store: Store, vault_dir: Path, note_id: str
+    *, backend: RemoteBackend, store: Store, vault_dir: Path, note_id: str
 ) -> Note:
     if not is_uuid(note_id):
         raise UserError("restore only accepts UUIDs (trash lookups are by id)")
-    client.restore_note(note_id)
-    fresh = client.read_note(note_id)
-    note = note_from_api(fresh)
-    ingest_note(note, store=store, vault_dir=vault_dir)
-    return note
+    backend.restore_note(note_id)
+    fresh = backend.read_note(note_id)
+    ingest_note(fresh, store=store, vault_dir=vault_dir)
+    return fresh
 
 
 # ---- helpers -----------------------------------------------------------

@@ -1,4 +1,4 @@
-"""HTTP client smoke tests via pytest-httpx."""
+"""RemoteBackend HTTP smoke tests via pytest-httpx."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from app.repositories.errors import AuthError, NetworkError
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
+from app.services.sync import iter_all_summaries
 from app.settings import Settings
 
 
@@ -25,10 +26,10 @@ def test_client_requires_token(tmp_settings: Settings) -> None:
         tmp_dir=tmp_settings.tmp_dir,
     )
     with pytest.raises(AuthError):
-        NotesClient(bad)
+        RemoteBackend(bad)
 
 
-def test_list_notes_parses_response(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+def test_list_note_summaries_parses_response(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
         json={
@@ -50,10 +51,13 @@ def test_list_notes_parses_response(tmp_settings: Settings, httpx_mock: HTTPXMoc
             "offset": 0,
         },
     )
-    with NotesClient(tmp_settings) as client:
-        page = client.list_notes(limit=100, offset=0)
-    assert page["total"] == 1
-    assert page["data"][0]["id"] == "id-1"
+    with RemoteBackend(tmp_settings) as backend:
+        page = backend.list_note_summaries(limit=100, offset=0)
+    assert page.total == 1
+    assert len(page.data) == 1
+    assert page.data[0].id == "id-1"
+    assert page.data[0].filename == "! One"
+    assert page.data[0].updated_at == "2024-01-02T00:00:00Z"
 
 
 def test_read_note_401_raises_auth_error(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
@@ -62,16 +66,16 @@ def test_read_note_401_raises_auth_error(tmp_settings: Settings, httpx_mock: HTT
         status_code=401,
         json={"error": "UNAUTHORIZED"},
     )
-    with NotesClient(tmp_settings) as client, pytest.raises(AuthError):
-        client.read_note("abc")
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(AuthError):
+        backend.read_note("abc")
 
 
 def test_network_failure_raises_network_error(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     httpx_mock.add_exception(httpx.ConnectError("boom"))
-    with NotesClient(tmp_settings) as client, pytest.raises(NetworkError):
-        client.read_note("abc")
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(NetworkError):
+        backend.read_note("abc")
 
 
 def test_iter_all_summaries_stops_on_short_page(
@@ -87,6 +91,6 @@ def test_iter_all_summaries_stops_on_short_page(
             "total": 2,
         },
     )
-    with NotesClient(tmp_settings) as client:
-        ids = [item["id"] for item in client.iter_all_summaries()]
+    with RemoteBackend(tmp_settings) as backend:
+        ids = [item.id for item in iter_all_summaries(backend)]
     assert ids == ["a", "b"]

@@ -16,16 +16,15 @@ wants an offline archive; that is out of scope for v1.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
+from app.models import NoteSummary
 from app.repositories.errors import NoteForbiddenError
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.sync_state import load_state, save_state
-from app.services.note_mapper import note_from_api, summary_from_api
 from app.services.notes import delete_ingested, ingest_note, ingest_placeholder
 from app.services.reconcile import reconcile_local
 from app.settings import Settings
@@ -35,6 +34,36 @@ ProgressCallback = Callable[[str], None]
 
 def _noop(_: str) -> None:
     pass
+
+
+def iter_all_summaries(
+    backend: RemoteBackend,
+    *,
+    page_size: int = 200,
+    stop_when_older_than: str | None = None,
+) -> Iterator[NoteSummary]:
+    """Yield every active note summary, newest-first.
+
+    Caller-side glue over `Backend.list_note_summaries`. Kept out of the
+    backend protocol because pagination belongs in the service layer — the
+    protocol only needs "give me one page".
+
+    If `stop_when_older_than` is set (ISO-8601), pagination stops once a
+    page's newest item has `updated_at <= stop_when_older_than` — the
+    caller is using this for incremental sync and no longer cares about
+    older items.
+    """
+    offset = 0
+    while True:
+        page = backend.list_note_summaries(limit=page_size, offset=offset)
+        if not page.data:
+            return
+        yield from page.data
+        if stop_when_older_than is not None and page.data[-1].updated_at <= stop_when_older_than:
+            return
+        if len(page.data) < page_size:
+            return
+        offset += page_size
 
 
 @dataclass
@@ -72,7 +101,7 @@ def _utcnow_iso() -> str:
 
 def incremental_sync(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     settings: Settings,
     cursor_override: str | None = None,
@@ -123,13 +152,13 @@ def incremental_sync(
     page_num = 0
     while True:
         page_num += 1
-        page = client.list_notes(limit=page_size, offset=offset)
-        remote_total = page.get("total", remote_total)
-        items = page.get("data", [])
+        page = backend.list_note_summaries(limit=page_size, offset=offset)
+        remote_total = page.total if page.total else remote_total
+        items = page.data
         if not items:
             break
 
-        new_on_page = sum(1 for item in items if _updated(item) > cursor)
+        new_on_page = sum(1 for item in items if item.updated_at > cursor)
         log(
             f"  page {page_num}: {len(items)} items, {new_on_page} newer than cursor"
             + (f" (remote total {remote_total})" if remote_total is not None else "")
@@ -137,14 +166,14 @@ def incremental_sync(
 
         page_has_stale = False
         for item in items:
-            item_id = str(item["id"])
-            updated = _updated(item)
+            item_id = item.id
+            updated = item.updated_at
             if updated > cursor:
-                filename = item.get("filename") or item_id
+                filename = item.filename or item_id
                 log(f"    ↓ fetching '{filename}'")
                 fetched_count, restricted_count = _fetch_or_placeholder(
                     item,
-                    client=client,
+                    backend=backend,
                     store=store,
                     settings=settings,
                     log=log,
@@ -183,8 +212,8 @@ def incremental_sync(
     catch_up_restricted = 0
     already_local = 0
     catch_up_started = False
-    for item in client.iter_all_summaries(page_size=200):
-        item_id = str(item["id"])
+    for item in iter_all_summaries(backend, page_size=200):
+        item_id = item.id
         remote_ids_seen.add(item_id)
         if item_id in local_ids_after_main:
             already_local += 1
@@ -192,11 +221,11 @@ def incremental_sync(
         if not catch_up_started:
             log("  catching up on never-seen-locally notes")
             catch_up_started = True
-        filename = item.get("filename") or item_id
+        filename = item.filename or item_id
         log(f"    ↓ fetching '{filename}' (never seen locally)")
         fetched_count, restricted_count = _fetch_or_placeholder(
             item,
-            client=client,
+            backend=backend,
             store=store,
             settings=settings,
             log=log,
@@ -248,7 +277,7 @@ def incremental_sync(
     # Reconciliation — always existence + orphan check, hashes only on opt-in.
     log("→ Reconciling local mirror" + (" (with body-hash verification)" if verify_hashes else ""))
     reconcile = reconcile_local(
-        client=client,
+        backend=backend,
         store=store,
         settings=settings,
         verify_hashes=verify_hashes,
@@ -292,7 +321,7 @@ def incremental_sync(
 
 def full_sync(
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     settings: Settings,
     verify_hashes: bool = False,
@@ -306,7 +335,7 @@ def full_sync(
     can offer.
     """
     result = incremental_sync(
-        client=client,
+        backend=backend,
         store=store,
         settings=settings,
         progress=progress,
@@ -322,9 +351,9 @@ def full_sync(
 
 
 def _fetch_or_placeholder(
-    item: dict[str, Any],
+    item: NoteSummary,
     *,
-    client: NotesClient,
+    backend: RemoteBackend,
     store: Store,
     settings: Settings,
     log: ProgressCallback,
@@ -334,22 +363,20 @@ def _fetch_or_placeholder(
     Returns `(fetched_full_count, placeholder_count)` — one of them is 0 and
     the other is 1 depending on whether the body was readable.
     """
-    item_id = str(item["id"])
+    item_id = item.id
     try:
-        note_payload = client.read_note(item_id)
+        note = backend.read_note(item_id)
     except NoteForbiddenError:
-        summary = summary_from_api(item)
         previous = store.get_row(item_id)
         ingest_placeholder(
-            summary,
+            item,
             store=store,
             vault_dir=settings.vault_dir,
             previous_path=previous.path if previous else None,
         )
-        log(f"    ⚠ '{summary.filename}' is restricted (LIST but not READ) — stored as placeholder")
+        log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
         return (0, 1)
 
-    note = note_from_api(note_payload)
     previous = store.get_row(note.id)
     ingest_note(
         note,
@@ -358,7 +385,3 @@ def _fetch_or_placeholder(
         previous_path=previous.path if previous else None,
     )
     return (1, 0)
-
-
-def _updated(item: dict[str, Any]) -> str:
-    return str(item.get("updatedAt") or item.get("updated_at", ""))
