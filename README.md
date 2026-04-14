@@ -80,6 +80,7 @@ Read rules:
 
 - **Reads never hit the network.** Every command except `sync`, `verify`, and the write / attachment operations below resolves against the local mirror + sqlite. If the mirror is stale, Claude sees stale data until the next explicit `sync` — a deliberate choice for predictable latency. (`search --remote` is the single opt-in exception.)
 - **Writes always hit the network.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
+- **Rename cascades across referencing notes.** On `notes.vcoeur.com` v2.9.0+, `kasten rename` (and `kasten edit --filename`) triggers a server-side rewrite of `[[old-filename]]` → `[[new-filename]]` in every other note that referenced the renamed one. The server returns the affected notes in an `affectedNotes` array on the PUT response; KastenManager re-fetches each and re-ingests it into the local mirror in the same command, so bodies stay consistent without a full `kasten sync`. Pre-v2.9.0 servers return no `affectedNotes` field — the client then leaves referencing bodies untouched, matching the old silent-breakage behaviour until the server is upgraded.
 
 ## Install
 
