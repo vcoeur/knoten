@@ -37,6 +37,7 @@ from app.cli.output import (
     render_summary_list,
     render_sync_result,
 )
+from app.repositories.backend import Backend
 from app.repositories.errors import (
     AmbiguousTargetError,
     AuthError,
@@ -108,6 +109,23 @@ def _require_token(settings: Settings) -> None:
         raise ConfigError(
             "KASTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
         )
+
+
+def _build_backend(settings: Settings) -> Backend:
+    """Construct the backend implementation selected by settings.
+
+    Phase 3 stub — every path goes to `RemoteBackend`. The `KASTEN_API_URL`
+    / local-mode branch lands in Phase 7 (attachments + mode selection +
+    CLI wiring) once `LocalBackend` exists. Keeping the helper here now
+    means command sites only ever reference `Backend` at the type level
+    and the switch is a one-line change when local mode lands.
+    """
+    if not settings.api_url:
+        raise ConfigError(
+            "KASTEN_API_URL is not set. Local mode is not yet supported — "
+            "point at a notes.vcoeur.com instance in .env for now."
+        )
+    return RemoteBackend(settings)
 
 
 def _classify_error(exc: Exception) -> tuple[int, str]:
@@ -210,7 +228,7 @@ def cmd_sync(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 if full:
                     result = full_sync(
                         backend=backend,
@@ -278,7 +296,7 @@ def cmd_verify(
             progress(
                 "→ Reconciling local mirror" + (" (with body-hash verification)" if hashes else "")
             )
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 result = reconcile_local(
                     backend=backend,
                     store=store,
@@ -755,7 +773,7 @@ def cmd_create(
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note = create_note_remote(
                     backend=backend,
                     store=store,
@@ -838,7 +856,7 @@ def cmd_edit(
             key, _, value = pair.partition("=")
             fm_sets[key] = value
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note = edit_note_remote(
                     backend=backend,
                     store=store,
@@ -918,7 +936,7 @@ def cmd_append(
         if ai:
             text = _wrap_ai(text)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note = append_note_remote(
                     backend=backend,
                     store=store,
@@ -957,7 +975,7 @@ def cmd_delete(
                 log("aborted", mode=mode)
                 raise typer.Exit(0)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note_id = delete_note_remote(
                     backend=backend,
                     store=store,
@@ -991,7 +1009,7 @@ def cmd_restore(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note = restore_note_remote(
                     backend=backend, store=store, vault_dir=settings.vault_dir, note_id=note_id
                 )
@@ -1097,7 +1115,7 @@ def cmd_upload(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 note, upload = upload_file_remote(
                     backend=backend,
                     store=store,
@@ -1149,7 +1167,7 @@ def cmd_download(
         settings = _load()
         _require_token(settings)
         with Store(settings.index_path) as store:
-            with RemoteBackend(settings) as backend:
+            with _build_backend(settings) as backend:
                 result = download_file_remote(
                     backend=backend,
                     store=store,

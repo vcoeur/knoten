@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models import Note, NoteSummary, SearchHit, permission_at_least
-from app.repositories.backend import NoteDraft, NotePatch
+from app.repositories.backend import Backend, NoteDraft, NotePatch
 from app.repositories.errors import (
     AmbiguousTargetError,
     NotFoundError,
@@ -22,7 +22,6 @@ from app.repositories.errors import (
 from app.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.vault_files import (
     path_for_note,
@@ -320,7 +319,7 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
 
 def upload_file_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     vault_dir: Path,
     source_path: Path,
@@ -377,7 +376,7 @@ def upload_file_remote(
 
 def download_file_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     target: str,
     destination: Path | None,
@@ -423,7 +422,7 @@ def download_file_remote(
 
 def create_note_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     vault_dir: Path,
     filename: str,
@@ -448,7 +447,7 @@ def create_note_remote(
 
 def edit_note_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -516,7 +515,7 @@ def edit_note_remote(
 
 def delete_note_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -532,7 +531,7 @@ def delete_note_remote(
 
 def append_note_remote(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     vault_dir: Path,
     target: str,
@@ -556,9 +555,7 @@ def append_note_remote(
     return fresh
 
 
-def restore_note_remote(
-    *, backend: RemoteBackend, store: Store, vault_dir: Path, note_id: str
-) -> Note:
+def restore_note_remote(*, backend: Backend, store: Store, vault_dir: Path, note_id: str) -> Note:
     if not is_uuid(note_id):
         raise UserError("restore only accepts UUIDs (trash lookups are by id)")
     backend.restore_note(note_id)

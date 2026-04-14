@@ -25,8 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.repositories.backend import Backend
 from app.repositories.errors import NoteForbiddenError
-from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store, StoreNoteRow
 from app.services.notes import ingest_note, ingest_placeholder
 from app.settings import Settings
@@ -54,7 +54,7 @@ class ReconcileResult:
 
 def reconcile_local(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     settings: Settings,
     verify_hashes: bool = False,
@@ -144,7 +144,7 @@ def reconcile_local(
 def _refetch(
     row: StoreNoteRow,
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     settings: Settings,
 ) -> None:

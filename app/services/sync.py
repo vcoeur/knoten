@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.models import NoteSummary
+from app.repositories.backend import Backend
 from app.repositories.errors import NoteForbiddenError
-from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.sync_state import load_state, save_state
 from app.services.notes import delete_ingested, ingest_note, ingest_placeholder
@@ -37,7 +37,7 @@ def _noop(_: str) -> None:
 
 
 def iter_all_summaries(
-    backend: RemoteBackend,
+    backend: Backend,
     *,
     page_size: int = 200,
     stop_when_older_than: str | None = None,
@@ -101,7 +101,7 @@ def _utcnow_iso() -> str:
 
 def incremental_sync(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     settings: Settings,
     cursor_override: str | None = None,
@@ -321,7 +321,7 @@ def incremental_sync(
 
 def full_sync(
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     settings: Settings,
     verify_hashes: bool = False,
@@ -353,7 +353,7 @@ def full_sync(
 def _fetch_or_placeholder(
     item: NoteSummary,
     *,
-    backend: RemoteBackend,
+    backend: Backend,
     store: Store,
     settings: Settings,
     log: ProgressCallback,
