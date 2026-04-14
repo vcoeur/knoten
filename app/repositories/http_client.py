@@ -68,26 +68,13 @@ class NotesClient:
         *,
         limit: int = 100,
         offset: int = 0,
-        kind: str | None = None,
-        family: str | None = None,
-        tag: str | None = None,
-        ref: str | None = None,
     ) -> dict[str, Any]:
         """GET /api/notes — returns {data, total, limit, offset}.
 
         Items are sorted by updated_at DESC. Body is NOT included — fetch with
         `read_note(id)` to get the full content.
         """
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if kind:
-            params["kind"] = kind
-        if family:
-            params["family"] = family
-        if tag:
-            params["tag"] = tag
-        if ref:
-            params["ref"] = ref
-        return self._get_json("/api/notes", params=params)
+        return self._get_json("/api/notes", params={"limit": limit, "offset": offset})
 
     def iter_all_summaries(
         self,
@@ -121,7 +108,7 @@ class NotesClient:
             offset += page_size
 
     def read_note(self, note_id: str) -> dict[str, Any]:
-        """GET /api/notes/{id} — full note with body, linkMap, imageMap.
+        """GET /api/notes/{id} — full note with body and linkMap.
 
         Raises `NoteForbiddenError` on 404. The server deliberately returns
         404 for notes the current token cannot READ (restricted viewer +
@@ -157,40 +144,6 @@ class NotesClient:
     def restore_note(self, note_id: str) -> dict[str, Any]:
         """POST /api/notes/{id}/restore."""
         return self._post_json(f"/api/notes/{note_id}/restore", json={}, expected=(200, 201))
-
-    # ---- Backlinks / graph / metadata ------------------------------------
-
-    def backlinks(self, note_id: str) -> list[dict[str, Any]]:
-        data = self._get_json(f"/api/backlinks/{note_id}")
-        return data if isinstance(data, list) else data.get("data", [])
-
-    def tags(self) -> list[dict[str, Any]]:
-        data = self._get_json("/api/tags")
-        return data if isinstance(data, list) else data.get("data", [])
-
-    def kinds(self, family: str | None = None) -> list[dict[str, Any]] | list[str]:
-        path = f"/api/kinds/{family}" if family else "/api/kinds"
-        data = self._get_json(path)
-        return data if isinstance(data, list) else data.get("data", [])
-
-    def remote_search(
-        self,
-        query: str,
-        *,
-        kind: str | None = None,
-        family: str | None = None,
-        tag: str | None = None,
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"q": query, "limit": limit}
-        if kind:
-            params["kind"] = kind
-        if family:
-            params["family"] = family
-        if tag:
-            params["tag"] = tag
-        data = self._get_json("/api/search", params=params)
-        return data if isinstance(data, list) else data.get("data", [])
 
     # ---- Attachments -----------------------------------------------------
 
@@ -269,24 +222,6 @@ class NotesClient:
             "content_type": content_type,
             "filename": disposition_filename,
         }
-
-    # ---- Export / bulk ---------------------------------------------------
-
-    def download_export(self, destination: Path) -> Path:
-        """GET /api/export — stream the full vault zip to `destination`."""
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with self._client.stream("GET", "/api/export") as response:
-                if response.status_code == 401 or response.status_code == 403:
-                    raise AuthError(f"Auth failed on /api/export: {response.status_code}")
-                if response.status_code >= 400:
-                    raise NetworkError(f"GET /api/export returned {response.status_code}")
-                with destination.open("wb") as handle:
-                    for chunk in response.iter_bytes():
-                        handle.write(chunk)
-        except httpx.HTTPError as exc:
-            raise NetworkError(f"Cannot reach {self._settings.api_url}: {exc}") from exc
-        return destination
 
     # ---- Internal helpers -------------------------------------------------
 
