@@ -24,6 +24,7 @@ from typing import Any
 
 import typer
 
+from knoten import __version__
 from knoten.cli.config import config_app, init_command
 from knoten.cli.output import (
     OutputMode,
@@ -87,6 +88,27 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(config_app, name="config")
+
+
+@app.callback(invoke_without_command=True)
+def _root(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Print version and exit.",
+        is_eager=True,
+    ),
+) -> None:
+    """Root callback — handles the global `--version` flag.
+
+    The `invoke_without_command=True` + `no_args_is_help=True` combo lets
+    `knoten --version` short-circuit without triggering the usage text; a
+    bare `knoten` with no subcommand still falls through to the help view.
+    """
+    if version:
+        typer.echo(f"knoten {__version__}")
+        raise typer.Exit(0)
 
 
 @app.command("init")
