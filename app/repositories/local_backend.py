@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ from app.repositories.errors import NotFoundError, UserError
 from app.repositories.store import Store
 from app.services.kasten_filename import parse_kasten_filename
 from app.services.markdown_parser import parse_body
-from app.services.notes import ingest_note
+from app.services.notes import _assert_same_family_prefix, ingest_note
 from app.settings import Settings
 
 _LOG = logging.getLogger(__name__)
@@ -252,10 +253,7 @@ class LocalBackend(Backend):
             raise NotFoundError(f"No note with id {note_id}")
 
         if patch.filename is not None and patch.filename != row["filename"]:
-            raise NotImplementedError(
-                "LocalBackend rename cascade lands in the next commit (Phase 6b) — "
-                "rename currently unavailable in local mode."
-            )
+            return self._rename_with_cascade(row, patch)
 
         previous_path = row["path"]
         absolute = self._vault_dir / previous_path
@@ -309,6 +307,166 @@ class LocalBackend(Backend):
             previous_path=previous_path,
         )
         return NoteUpdateResult(note_id=note_id, affected_notes=())
+
+    def _rename_with_cascade(
+        self,
+        row: dict,
+        patch: NotePatch,
+    ) -> NoteUpdateResult:
+        """Rename a note and rewrite every incoming `[[old]]` wikilink.
+
+        Mirrors the server-side `cascadeRename` in notes.vcoeur.com so a
+        local vault stays consistent after a filename change. Rollback on
+        partial failure: every rewritten file is restored to its original
+        bytes before the exception propagates.
+        """
+        note_id = row["id"]
+        old_filename = row["filename"]
+        new_filename = patch.filename
+        assert new_filename is not None
+
+        _assert_same_family_prefix(old_filename, new_filename)
+
+        if new_filename == old_filename:
+            return NoteUpdateResult(note_id=note_id, affected_notes=())
+
+        collision = self._store.find_by_filename(new_filename)
+        if collision is not None and collision["id"] != note_id:
+            raise UserError(
+                f"Cannot rename to {new_filename!r}: another note already uses that name."
+            )
+
+        source_rows = self._store.conn.execute(
+            "SELECT DISTINCT source_id FROM wikilinks WHERE target_title = ?",
+            (old_filename,),
+        ).fetchall()
+        source_ids = [str(r["source_id"]) for r in source_rows if str(r["source_id"]) != note_id]
+
+        rewrite_re = re.compile(rf"\[\[{re.escape(old_filename)}(\]\]|#|\|)")
+        replacement = rf"[[{new_filename}\1"
+
+        backups: list[tuple[Path, bytes]] = []
+
+        def _save_backup(absolute: Path) -> None:
+            try:
+                backups.append((absolute, absolute.read_bytes()))
+            except OSError:
+                pass
+
+        def _rollback() -> None:
+            for absolute, original in reversed(backups):
+                try:
+                    absolute.write_bytes(original)
+                except OSError:
+                    _LOG.exception("Rollback failed for %s", absolute)
+
+        try:
+            source_updates: list[tuple[dict, str]] = []
+            for source_id in source_ids:
+                source_row = self._store.find_by_id(source_id)
+                if source_row is None:
+                    continue
+                source_abs = self._vault_dir / source_row["path"]
+                try:
+                    raw = source_abs.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                new_raw, count = rewrite_re.subn(replacement, raw)
+                if count == 0:
+                    continue
+                _save_backup(source_abs)
+                source_abs.write_text(new_raw, encoding="utf-8")
+                source_updates.append((source_row, new_raw))
+
+            target_abs = self._vault_dir / row["path"]
+            _save_backup(target_abs)
+
+            body_raw = target_abs.read_text(encoding="utf-8")
+            body_only = _strip_frontmatter(body_raw)
+            if patch.body is not None:
+                body_only = patch.body
+            if patch.add_tags or patch.remove_tags:
+                body_only = _apply_tag_edits(
+                    body_only,
+                    add_tags=patch.add_tags,
+                    remove_tags=patch.remove_tags,
+                )
+
+            try:
+                current_fm = json.loads(row.get("frontmatter_json") or "{}")
+                if not isinstance(current_fm, dict):
+                    current_fm = {}
+            except (TypeError, ValueError):
+                current_fm = {}
+            new_fm = dict(patch.frontmatter) if patch.frontmatter is not None else current_fm
+
+            parsed_new = parse_kasten_filename(new_filename)
+            parsed_body = parse_body(body_only)
+            renamed_note = Note(
+                id=note_id,
+                filename=new_filename,
+                title=patch.title or parsed_new.title or new_filename,
+                family=row["family"],
+                kind=row["kind"],
+                source=parsed_new.source or row.get("source"),
+                body=body_only,
+                frontmatter=new_fm,
+                tags=tuple(sorted(set(parsed_body.tags))),
+                wikilinks=tuple(
+                    WikiLink(target_title=title, target_id=None)
+                    for title in parsed_body.wikilink_titles
+                ),
+                created_at=row.get("created_at") or _utcnow_iso(),
+                updated_at=_utcnow_iso(),
+                mcp_permissions=row.get("mcp_permissions") or "ALL",
+            )
+            ingest_note(
+                renamed_note,
+                store=self._store,
+                vault_dir=self._vault_dir,
+                previous_path=row["path"],
+            )
+
+            affected_ids: list[str] = []
+            for source_row, new_source_raw in source_updates:
+                source_body = _strip_frontmatter(new_source_raw)
+                parsed_source_body = parse_body(source_body)
+                try:
+                    source_fm = json.loads(source_row.get("frontmatter_json") or "{}")
+                    if not isinstance(source_fm, dict):
+                        source_fm = {}
+                except (TypeError, ValueError):
+                    source_fm = {}
+                source_note = Note(
+                    id=source_row["id"],
+                    filename=source_row["filename"],
+                    title=source_row["title"],
+                    family=source_row["family"],
+                    kind=source_row["kind"],
+                    source=source_row.get("source"),
+                    body=source_body,
+                    frontmatter=source_fm,
+                    tags=tuple(sorted(set(parsed_source_body.tags))),
+                    wikilinks=tuple(
+                        WikiLink(target_title=title, target_id=None)
+                        for title in parsed_source_body.wikilink_titles
+                    ),
+                    created_at=source_row.get("created_at") or _utcnow_iso(),
+                    updated_at=_utcnow_iso(),
+                    mcp_permissions=source_row.get("mcp_permissions") or "ALL",
+                )
+                ingest_note(
+                    source_note,
+                    store=self._store,
+                    vault_dir=self._vault_dir,
+                )
+                affected_ids.append(source_row["id"])
+
+        except Exception:
+            _rollback()
+            raise
+
+        return NoteUpdateResult(note_id=note_id, affected_notes=tuple(affected_ids))
 
     def append_to_note(self, note_id: str, content: str) -> None:
         self._refresh_index_if_stale()

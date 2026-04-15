@@ -105,15 +105,21 @@ def test_update_note_body_only(tmp_settings: Settings) -> None:
     assert "old body" not in refreshed.body
 
 
-def test_update_note_rename_raises_until_phase_6b(tmp_settings: Settings) -> None:
+def test_update_note_rename_round_trip(tmp_settings: Settings) -> None:
     seed = _seed_permanent(
         tmp_settings,
         "44444444-4444-4444-4444-444444444444",
         "! Seed",
         "body",
     )
-    with LocalBackend(tmp_settings) as backend, pytest.raises(NotImplementedError):
-        backend.update_note(seed.id, NotePatch(filename="! Renamed"))
+    with LocalBackend(tmp_settings) as backend:
+        result = backend.update_note(seed.id, NotePatch(filename="! Renamed"))
+        refreshed = backend.read_note(seed.id)
+
+    assert result.affected_notes == ()
+    assert refreshed.filename == "! Renamed"
+    assert (tmp_settings.vault_dir / "note" / "! Renamed.md").exists()
+    assert not (tmp_settings.vault_dir / "note" / "! Seed.md").exists()
 
 
 def test_delete_note_moves_file_to_trash(tmp_settings: Settings) -> None:
