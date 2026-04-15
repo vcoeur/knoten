@@ -1,7 +1,7 @@
 """End-to-end CLI tests in local mode — no network, no httpx mocks.
 
-Drives `kasten` commands against a disposable vault under `tmp_path`
-with `KASTEN_API_URL=""` so the CLI picks `LocalBackend`. Covers every
+Drives `knoten` commands against a disposable vault under `tmp_path`
+with `KNOTEN_API_URL=""` so the CLI picks `LocalBackend`. Covers every
 mutation + read path so a regression in `_build_backend` wiring or the
 LocalBackend implementation surfaces immediately.
 """
@@ -13,16 +13,16 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from app.cli.main import app
+from knoten.cli.main import app
 
 
 @pytest.fixture
 def local_env(monkeypatch, tmp_path):
-    """Point KASTEN_* at a per-test tmp dir with no API URL — forces local mode."""
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "")
-    monkeypatch.setenv("KASTEN_MODE", "local")
+    """Point KNOTEN_* at a per-test tmp dir with no API URL — forces local mode."""
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
+    monkeypatch.setenv("KNOTEN_MODE", "local")
     return tmp_path
 
 

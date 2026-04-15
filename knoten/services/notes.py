@@ -12,18 +12,18 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.models import Note, NoteSummary, SearchHit, permission_at_least
-from app.repositories.backend import Backend, NoteDraft, NotePatch
-from app.repositories.errors import (
+from knoten.models import Note, NoteSummary, SearchHit, permission_at_least
+from knoten.repositories.backend import Backend, NoteDraft, NotePatch
+from knoten.repositories.errors import (
     AmbiguousTargetError,
     NotFoundError,
     UserError,
 )
-from app.repositories.errors import (
+from knoten.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.store import Store
-from app.repositories.vault_files import (
+from knoten.repositories.store import Store
+from knoten.repositories.vault_files import (
     path_for_note,
     path_for_summary,
     remove_note_file,
@@ -167,7 +167,7 @@ def ingest_placeholder(
     The placeholder file explains that the body is not fetchable; the store
     row is flagged `restricted=1` so other commands can treat it accordingly.
     """
-    from app.models import NoteSummary as _Summary  # local alias for clarity
+    from knoten.models import NoteSummary as _Summary  # local alias for clarity
 
     assert isinstance(summary, _Summary)
     relative_path = path_for_summary(summary)
@@ -187,7 +187,7 @@ def ingest_placeholder(
 def read_note_full(
     store: Store, vault_dir: Path, target: str, *, include_backlinks: bool = True
 ) -> dict[str, Any]:
-    """Build the `kasten read` payload for a target."""
+    """Build the `knoten read` payload for a target."""
     row = resolve_target(store, target)
     absolute_path = (vault_dir / row["path"]).resolve()
     try:
@@ -555,7 +555,7 @@ def append_note_remote(
 ) -> Note:
     """POST to `/api/notes/{id}/append` and refresh the local mirror.
 
-    `kasten append` is distinct from `kasten edit --body` because the
+    `knoten append` is distinct from `knoten edit --body` because the
     server endpoint accepts the weaker `APPEND` permission (body extended,
     never truncated). The content is joined with a blank-line separator
     on the server side.

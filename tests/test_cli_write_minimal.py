@@ -17,11 +17,11 @@ import pytest
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
-from app.cli.main import app
-from app.models import Note
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.settings import load_settings
+from knoten.cli.main import app
+from knoten.models import Note
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.settings import load_settings
 
 NOTE_ID = "11111111-1111-1111-1111-111111111111"
 FILE_NOTE_ID = "22222222-2222-2222-2222-222222222222"
@@ -53,9 +53,9 @@ def _assert_minimal(payload: dict) -> None:
 @pytest.fixture
 def cli_env(monkeypatch, tmp_path):
     """Env wiring that lets the CLI find a per-test vault + mock server."""
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", API_URL)
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test_token")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", API_URL)
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test_token")
     settings = load_settings()
     settings.vault_dir.mkdir(parents=True, exist_ok=True)
     settings.state_dir.mkdir(parents=True, exist_ok=True)

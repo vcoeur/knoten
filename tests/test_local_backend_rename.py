@@ -1,7 +1,7 @@
 """LocalBackend rename cascade — Phase 6b.
 
 Mirrors the server-side cascade tests in notes.vcoeur.com's
-`notes.test.ts` so that `kasten rename` behaves identically whether the
+`notes.test.ts` so that `knoten rename` behaves identically whether the
 backend is `LocalBackend` or `RemoteBackend`.
 """
 
@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.repositories.backend import NoteDraft, NotePatch
-from app.repositories.errors import UserError
-from app.repositories.local_backend import LocalBackend
-from app.settings import Settings
+from knoten.repositories.backend import NoteDraft, NotePatch
+from knoten.repositories.errors import UserError
+from knoten.repositories.local_backend import LocalBackend
+from knoten.settings import Settings
 
 
 def _create(backend: LocalBackend, filename: str, body: str = "") -> str:

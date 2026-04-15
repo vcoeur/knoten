@@ -277,7 +277,7 @@ def render_status(payload: dict[str, Any], *, mode: OutputMode) -> None:
         emit_json(payload)
         return
     if mode.tty:
-        table = Table(title="KastenManager status", show_header=False, box=None, padding=(0, 1))
+        table = Table(title="knoten status", show_header=False, box=None, padding=(0, 1))
         table.add_column(style="bold")
         table.add_column()
         for key, value in payload.items():
@@ -333,7 +333,7 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
     # "In sync" means scanned == local AND scanned == remote_total AND nothing
     # repaired. Drift is measured against what the server's `total` field
     # claims (which is what the user sees) AND against what we could actually
-    # walk (the ground truth for anything KastenManager can do).
+    # walk (the ground truth for anything knoten can do).
     total_vs_scanned_drift = remote_total - scanned_remote_ids
     scanned_vs_local_drift = scanned_remote_ids - local_total
     in_sync = (
@@ -371,7 +371,7 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
         f"[bold]{remote_total}[/bold]",
     )
     counts.add_row(
-        "Remote — scanned by KastenManager",
+        "Remote — scanned by knoten",
         f"[bold]{scanned_remote_ids}[/bold]",
     )
     counts.add_row("Local store", f"[bold]{local_total}[/bold]")
@@ -449,7 +449,7 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
             f"This should not happen after the 2026-04-12 "
             f"[cyan]notes.vcoeur.com[/cyan] fix — the pagination walk and the "
             f"count query are seeing different row sets.\n"
-            f"  Try [bold]`kasten sync --full`[/bold] to confirm the drift is "
+            f"  Try [bold]`knoten sync --full`[/bold] to confirm the drift is "
             f"stable; if it is, it is likely a regression in the server's "
             f"list endpoint (unstable sort, or an asymmetric filter between "
             f"the count and data queries). See incident "
@@ -459,7 +459,7 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
         _console.print(
             f"[yellow]⚠[/yellow] Scanned {scanned_remote_ids} remote IDs but local "
             f"store only has {local_total}. A subsequent sync should close this — "
-            f"if it does not, run [bold]`kasten sync --full`[/bold]."
+            f"if it does not, run [bold]`knoten sync --full`[/bold]."
         )
     elif in_sync:
         _console.print(

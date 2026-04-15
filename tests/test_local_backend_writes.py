@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.models import Note
-from app.repositories.backend import NoteDraft, NotePatch, NoteUpdateResult
-from app.repositories.errors import NotFoundError, UserError
-from app.repositories.local_backend import LocalBackend
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.settings import Settings
+from knoten.models import Note
+from knoten.repositories.backend import NoteDraft, NotePatch, NoteUpdateResult
+from knoten.repositories.errors import NotFoundError, UserError
+from knoten.repositories.local_backend import LocalBackend
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.settings import Settings
 
 
 def _seed_permanent(settings: Settings, note_id: str, filename: str, body: str) -> Note:

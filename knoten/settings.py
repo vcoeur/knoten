@@ -1,17 +1,17 @@
 """Runtime configuration loaded from environment and .env files.
 
-All local state lives under `KASTEN_HOME`. Discovery order for the root
+All local state lives under `KNOTEN_HOME`. Discovery order for the root
 and the `.env` file is designed so the same codebase works in three
 different runtime contexts:
 
-  1. **Dev from the repo** (`uv run kasten …`, `make sync`): `_default_home()`
+  1. **Dev from the repo** (`uv run knoten …`, `make sync`): `_default_home()`
      walks up from `__file__` and finds the repo root via `pyproject.toml`.
      The repo's `.env` is picked up automatically.
-  2. **Installed globally** (`uv tool install .` → `~/.local/bin/kasten`):
+  2. **Installed globally** (`uv tool install .` → `~/.local/bin/knoten`):
      `__file__` is inside a uv tools venv's `site-packages/`, so the
      pyproject walk would match nothing useful. `_default_home()` detects
-     that case and falls back to `~/.kasten`, and `.env` is picked up from
-     `~/.config/kasten/.env` so the installed CLI can find the user's real
+     that case and falls back to `~/.knoten`, and `.env` is picked up from
+     `~/.config/knoten/.env` so the installed CLI can find the user's real
      vault without per-invocation env vars.
   3. **Tests**: `tmp_settings` fixture constructs `Settings` explicitly;
      the discovery helpers are bypassed entirely.
@@ -25,12 +25,14 @@ from pathlib import Path
 from environs import Env
 
 # Stable user-level config path, read before the source-tree fallback so an
-# installed CLI can find a repo vault via `KASTEN_HOME=…` inside this file.
-USER_CONFIG_ENV = Path.home() / ".config" / "kasten" / ".env"
+# installed CLI can find a repo vault via `KNOTEN_HOME=…` inside this file.
+USER_CONFIG_ENV = Path.home() / ".config" / "knoten" / ".env"
 
 # Final fallback home when no other anchor is available. Matches the layout
-# expected by `ensure_dirs` — `kasten/` + `.kasten-state/` as siblings.
-FALLBACK_HOME = Path.home() / ".kasten"
+# expected by `ensure_dirs` — `kasten/` + `.knoten-state/` as siblings.
+# The vault subdir keeps its historical `kasten/` name (configurable via
+# KNOTEN_VAULT_DIR) because that's what the dev mirror is called.
+FALLBACK_HOME = Path.home() / ".knoten"
 
 
 def _looks_like_installed_location(path: Path) -> bool:
@@ -45,12 +47,12 @@ def _looks_like_installed_location(path: Path) -> bool:
 
 
 def _default_home() -> Path:
-    """Return the best guess for `KASTEN_HOME` when nothing overrides it.
+    """Return the best guess for `KNOTEN_HOME` when nothing overrides it.
 
     Walks up from this file looking for a `pyproject.toml` — that path
     matches the dev workflow (`uv run` / `make` from the repo). If the
     walk finishes without finding one, or if `__file__` is inside a uv
-    tools install, returns `~/.kasten` so the installed CLI has a real,
+    tools install, returns `~/.knoten` so the installed CLI has a real,
     writable place to put its state.
     """
     here = Path(__file__).resolve()
@@ -110,20 +112,20 @@ def _env_file_candidates(explicit: Path | None) -> list[Path]:
 
     `environs.read_env(override=False)` implements "first value wins", so
     files later in the list only fill in keys the earlier files did not
-    set. This means an installed CLI can keep a tiny `~/.config/kasten/.env`
-    that just points `KASTEN_HOME` at a repo, and still pick up the
+    set. This means an installed CLI can keep a tiny `~/.config/knoten/.env`
+    that just points `KNOTEN_HOME` at a repo, and still pick up the
     token from that repo's own `.env` — no secret duplication.
 
     Order:
       1. `explicit` — caller-supplied, for tests or advanced callers.
-      2. `~/.config/kasten/.env` — user-level config. The canonical
-         location for an installed CLI's `KASTEN_HOME` pointer.
-      3. `$KASTEN_HOME/.env` — if `KASTEN_HOME` was set by the shell
+      2. `~/.config/knoten/.env` — user-level config. The canonical
+         location for an installed CLI's `KNOTEN_HOME` pointer.
+      3. `$KNOTEN_HOME/.env` — if `KNOTEN_HOME` was set by the shell
          (or by an earlier layer), its sibling `.env` is layered next.
          This is what lets the user-level pointer cascade into the repo's
          own `.env`.
       4. `_default_home() / .env` — dev workflow (repo via pyproject walk
-         or `~/.kasten`). Only added when it's not already in the list.
+         or `~/.knoten`). Only added when it's not already in the list.
     """
     candidates: list[Path] = []
 
@@ -138,15 +140,15 @@ def _env_file_candidates(explicit: Path | None) -> list[Path]:
     add(USER_CONFIG_ENV)
 
     # Second pass: re-read the environment so a layer-1/2 hit that set
-    # KASTEN_HOME is visible for candidate 3.
+    # KNOTEN_HOME is visible for candidate 3.
     import os
 
-    env_home_value = os.environ.get("KASTEN_HOME")
+    env_home_value = os.environ.get("KNOTEN_HOME")
     if candidates:
-        # Pre-parse candidates already collected so KASTEN_HOME that lives
+        # Pre-parse candidates already collected so KNOTEN_HOME that lives
         # only inside those files still activates candidate 3.
         for candidate in candidates:
-            env_home_value = _peek_env_var(candidate, "KASTEN_HOME", env_home_value)
+            env_home_value = _peek_env_var(candidate, "KNOTEN_HOME", env_home_value)
     if env_home_value:
         add(Path(env_home_value) / ".env")
 
@@ -158,7 +160,7 @@ def _peek_env_var(env_file: Path, key: str, current: str | None) -> str | None:
     """Return the first definition of `key` in `env_file`, or `current` if absent.
 
     A minimal parser — we only care about simple `KEY=value` lines at the
-    top of a `.env`, which is enough to look up `KASTEN_HOME` before fully
+    top of a `.env`, which is enough to look up `KNOTEN_HOME` before fully
     loading the layered config via environs.
     """
     if current:
@@ -181,28 +183,28 @@ def _peek_env_var(env_file: Path, key: str, current: str | None) -> str | None:
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load settings from process env and optional .env file.
 
-    Missing KASTEN_API_TOKEN is tolerated here — commands that need it raise
-    later with a clear exit-4 config error. This keeps `kasten config --show`
+    Missing KNOTEN_API_TOKEN is tolerated here — commands that need it raise
+    later with a clear exit-4 config error. This keeps `knoten config --show`
     usable even when the token is not yet set.
     """
     env = Env()
     for candidate in _env_file_candidates(env_file):
         env.read_env(str(candidate), override=False)
 
-    home = Path(env.str("KASTEN_HOME", str(_default_home()))).expanduser().resolve()
-    vault_dir = home / env.str("KASTEN_VAULT_DIR", "kasten")
-    state_dir = home / env.str("KASTEN_STATE_DIR", ".kasten-state")
+    home = Path(env.str("KNOTEN_HOME", str(_default_home()))).expanduser().resolve()
+    vault_dir = home / env.str("KNOTEN_VAULT_DIR", "kasten")
+    state_dir = home / env.str("KNOTEN_STATE_DIR", ".knoten-state")
 
-    mode = env.str("KASTEN_MODE", MODE_AUTO).strip().lower() or MODE_AUTO
+    mode = env.str("KNOTEN_MODE", MODE_AUTO).strip().lower() or MODE_AUTO
     if mode not in _VALID_MODES:
-        from app.repositories.errors import ConfigError
+        from knoten.repositories.errors import ConfigError
 
-        raise ConfigError(f"KASTEN_MODE must be one of {sorted(_VALID_MODES)}, got {mode!r}")
+        raise ConfigError(f"KNOTEN_MODE must be one of {sorted(_VALID_MODES)}, got {mode!r}")
 
     return Settings(
-        api_url=env.str("KASTEN_API_URL", "").rstrip("/"),
-        api_token=env.str("KASTEN_API_TOKEN", ""),
-        http_timeout=env.float("KASTEN_HTTP_TIMEOUT", 30.0),
+        api_url=env.str("KNOTEN_API_URL", "").rstrip("/"),
+        api_token=env.str("KNOTEN_API_TOKEN", ""),
+        http_timeout=env.float("KNOTEN_HTTP_TIMEOUT", 30.0),
         home=home,
         vault_dir=vault_dir,
         state_dir=state_dir,

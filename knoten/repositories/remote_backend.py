@@ -15,8 +15,8 @@ from typing import Any
 
 import httpx
 
-from app.models import Note
-from app.repositories.backend import (
+from knoten.models import Note
+from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,
@@ -25,9 +25,9 @@ from app.repositories.backend import (
     NotesPage,
     NoteUpdateResult,
 )
-from app.repositories.errors import AuthError, NetworkError, NoteForbiddenError, NotFoundError
-from app.services.note_mapper import note_from_api, summary_from_api
-from app.settings import Settings
+from knoten.repositories.errors import AuthError, NetworkError, NoteForbiddenError, NotFoundError
+from knoten.services.note_mapper import note_from_api, summary_from_api
+from knoten.settings import Settings
 
 
 def _parse_disposition_filename(header: str) -> str | None:
@@ -59,7 +59,7 @@ class RemoteBackend(Backend):
     def __init__(self, settings: Settings) -> None:
         if not settings.api_token:
             raise AuthError(
-                "KASTEN_API_TOKEN is not set. Copy .env.example to .env and add a token.",
+                "KNOTEN_API_TOKEN is not set. Copy .env.example to .env and add a token.",
             )
         self._settings = settings
         self._client = httpx.Client(
@@ -67,7 +67,7 @@ class RemoteBackend(Backend):
             headers={
                 "Authorization": f"Bearer {settings.api_token}",
                 "Accept": "application/json",
-                "User-Agent": "kasten-manager/0.1",
+                "User-Agent": "knoten/0.1",
             },
             timeout=settings.http_timeout,
         )
@@ -167,7 +167,7 @@ class RemoteBackend(Backend):
         if response.status_code in (401, 403):
             raise AuthError(
                 f"POST /api/attachments returned {response.status_code} — "
-                "check KASTEN_API_TOKEN scope (needs web, api, or mcp)."
+                "check KNOTEN_API_TOKEN scope (needs web, api, or mcp)."
             )
         if response.status_code not in (200, 201):
             raise NetworkError(
@@ -196,7 +196,7 @@ class RemoteBackend(Backend):
                 if response.status_code in (401, 403):
                     raise AuthError(
                         f"GET /api/attachments/{storage_key} returned {response.status_code} — "
-                        "check KASTEN_API_TOKEN scope."
+                        "check KNOTEN_API_TOKEN scope."
                     )
                 if response.status_code == 404:
                     raise NotFoundError(f"Attachment {storage_key} not found or deleted on remote")
@@ -248,7 +248,7 @@ class RemoteBackend(Backend):
             raise NetworkError(f"{method} {path} failed: {exc}") from exc
         if response.status_code in (401, 403):
             raise AuthError(
-                f"{method} {path} returned {response.status_code} — check KASTEN_API_TOKEN scope."
+                f"{method} {path} returned {response.status_code} — check KNOTEN_API_TOKEN scope."
             )
         if response.status_code == 503:
             raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")

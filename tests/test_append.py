@@ -1,4 +1,4 @@
-"""`kasten append` — http client, service, and write-path integration.
+"""`knoten append` — http client, service, and write-path integration.
 
 Covers:
   * `NotesClient.append_note` hits `POST /api/notes/{id}/append` with
@@ -14,12 +14,12 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from app.models import Note
-from app.repositories.errors import PermissionError as LocalPermissionError
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.services.notes import append_note_remote, ingest_note
-from app.settings import Settings
+from knoten.models import Note
+from knoten.repositories.errors import PermissionError as LocalPermissionError
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.services.notes import append_note_remote, ingest_note
+from knoten.settings import Settings
 
 
 def _seed_local(store: Store, tmp_settings: Settings, *, mcp_permissions: str = "ALL") -> Note:

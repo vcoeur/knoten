@@ -11,13 +11,13 @@ import json
 
 from typer.testing import CliRunner
 
-from app.cli.main import app
+from knoten.cli.main import app
 
 
 def test_status_json(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0, result.output
@@ -27,8 +27,8 @@ def test_status_json(monkeypatch, tmp_path) -> None:
 
 
 def test_config_json_redacts_token(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_secret_xyz")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_secret_xyz")
     runner = CliRunner()
     result = runner.invoke(app, ["config", "--json"])
     assert result.exit_code == 0, result.output
@@ -38,8 +38,8 @@ def test_config_json_redacts_token(monkeypatch, tmp_path) -> None:
 
 
 def test_list_empty_store(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(app, ["list", "--json"])
     assert result.exit_code == 0, result.output
@@ -49,9 +49,9 @@ def test_list_empty_store(monkeypatch, tmp_path) -> None:
 
 
 def test_upload_smoke_missing_file_is_user_error(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(
         app,
@@ -62,17 +62,17 @@ def test_upload_smoke_missing_file_is_user_error(monkeypatch, tmp_path) -> None:
 
 
 def test_download_smoke_no_such_note(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(app, ["download", "nonexistent", "--json"])
     assert result.exit_code == 1
 
 
 def test_search_fuzzy_empty_store(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(app, ["search", "anything", "--fuzzy", "--json"])
     assert result.exit_code == 0, result.output
@@ -84,31 +84,31 @@ def test_search_fuzzy_empty_store(monkeypatch, tmp_path) -> None:
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
     # Explicitly set to "" so environs does not fall back to the repo-level
     # .env (which may or may not exist depending on the user's setup).
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 4, result.output
-    assert "KASTEN_API_TOKEN" in result.output or "KASTEN_API_TOKEN" in (result.stderr or "")
+    assert "KNOTEN_API_TOKEN" in result.output or "KNOTEN_API_TOKEN" in (result.stderr or "")
 
 
 def test_error_envelope_config_error_json(monkeypatch, tmp_path) -> None:
     """ConfigError with --json must emit a parseable error envelope on stdout."""
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync", "--json"])
     assert result.exit_code == 4, result.output
     payload = json.loads(result.stdout)
     assert payload["error"] == "config"
     assert payload["code"] == 4
-    assert "KASTEN_API_TOKEN" in payload["message"]
+    assert "KNOTEN_API_TOKEN" in payload["message"]
 
 
 def test_error_envelope_not_found_json(monkeypatch, tmp_path) -> None:
     """A NotFoundError from `read` with --json emits a structured envelope."""
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     runner = CliRunner()
     result = runner.invoke(app, ["read", "definitely-not-a-real-note", "--json"])
     assert result.exit_code == 1, result.output
@@ -120,11 +120,11 @@ def test_error_envelope_not_found_json(monkeypatch, tmp_path) -> None:
 
 def test_error_envelope_plaintext_without_json(monkeypatch, tmp_path) -> None:
     """Without --json, errors emit plain text and no JSON envelope."""
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_TOKEN", "")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 4
     # The error message is present, but not wrapped in a JSON envelope.
-    assert "KASTEN_API_TOKEN" in result.output
+    assert "KNOTEN_API_TOKEN" in result.output
     assert '"error":' not in result.output

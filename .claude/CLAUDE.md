@@ -1,12 +1,12 @@
-# CLAUDE.md — KastenManager
+# CLAUDE.md — knoten
 
-Standalone zettelkasten CLI. Primary consumer is Claude itself (via a `kasten` skill); humans are a secondary audience.
+Standalone zettelkasten CLI. Primary consumer is Claude itself (via a `knoten` skill); humans are a secondary audience.
 
 ## Project type
 
 - **Not deployed.** Per-laptop tool, installed globally via `uv tool install .`.
 - **No daemon / server.** Every invocation is a short-lived CLI process.
-- **Two modes** (see `## Backends` below): `local` operates on an on-disk vault as the source of truth; `remote` mirrors a `notes.vcoeur.com` instance with the server as authority. `KASTEN_MODE=auto` (default) picks local when `KASTEN_API_URL` is empty and remote otherwise.
+- **Two modes** (see `## Backends` below): `local` operates on an on-disk vault as the source of truth; `remote` mirrors a `notes.vcoeur.com` instance with the server as authority. `KNOTEN_MODE=auto` (default) picks local when `KNOTEN_API_URL` is empty and remote otherwise.
 
 ## Stack
 
@@ -19,7 +19,7 @@ Standalone zettelkasten CLI. Primary consumer is Claude itself (via a `kasten` s
 Strict layers — imports only go downward.
 
 ```
-app/
+knoten/
   models/        <- pure dataclasses, no I/O
   repositories/  <- http_client, store, vault_files, lock, sync_state, errors
   services/      <- sync, notes (read/write), markdown_parser, note_mapper
@@ -32,30 +32,30 @@ Layer rules:
 - **Models** import nothing from this project.
 - **Repositories** import from models.
 - **Services** import from models + repositories. No I/O of their own beyond calling a repository.
-- **CLI** is the wiring layer: Typer command → load Settings → open Store → build a `Backend` via `_build_backend(settings)` → call service → render via `app/cli/output.py`. Commands never reach into `RemoteBackend` / `LocalBackend` directly.
+- **CLI** is the wiring layer: Typer command → load Settings → open Store → build a `Backend` via `_build_backend(settings)` → call service → render via `knoten/cli/output.py`. Commands never reach into `RemoteBackend` / `LocalBackend` directly.
 
 ## Backends
 
-Every CLI command talks to a single `Backend` protocol defined in `app/repositories/backend.py`. Two implementations live side by side:
+Every CLI command talks to a single `Backend` protocol defined in `knoten/repositories/backend.py`. Two implementations live side by side:
 
 | Backend | File | Source of truth | Network | Auth |
 |---|---|---|---|---|
-| `RemoteBackend` | `app/repositories/remote_backend.py` | `notes.vcoeur.com` server | every mutation + sync | `KASTEN_API_TOKEN` (Bearer) |
-| `LocalBackend` | `app/repositories/local_backend.py` | the on-disk markdown vault | never | none |
+| `RemoteBackend` | `knoten/repositories/remote_backend.py` | `notes.vcoeur.com` server | every mutation + sync | `KNOTEN_API_TOKEN` (Bearer) |
+| `LocalBackend` | `knoten/repositories/local_backend.py` | the on-disk markdown vault | never | none |
 
-The protocol has 8 business methods: `list_note_summaries`, `read_note`, `create_note`, `update_note` (returns `NoteUpdateResult` with the rename cascade's `affected_notes` list), `append_to_note`, `delete_note`, `restore_note`, `upload_attachment`, `download_attachment`, plus `close`. Shapes live in `app/repositories/backend.py` as frozen dataclasses — `NotesPage`, `NoteDraft`, `NotePatch`, `NoteUpdateResult`, `AttachmentUploadResult`, `AttachmentDownloadResult`. Services depend on the protocol, not on either implementation, so the same `edit_note_remote` / `create_note_remote` helpers drive both backends.
+The protocol has 8 business methods: `list_note_summaries`, `read_note`, `create_note`, `update_note` (returns `NoteUpdateResult` with the rename cascade's `affected_notes` list), `append_to_note`, `delete_note`, `restore_note`, `upload_attachment`, `download_attachment`, plus `close`. Shapes live in `knoten/repositories/backend.py` as frozen dataclasses — `NotesPage`, `NoteDraft`, `NotePatch`, `NoteUpdateResult`, `AttachmentUploadResult`, `AttachmentDownloadResult`. Services depend on the protocol, not on either implementation, so the same `edit_note_remote` / `create_note_remote` helpers drive both backends.
 
-Selection: `app/cli/main.py:_build_backend` reads `settings.effective_mode` — `auto` resolves to `local` when `KASTEN_API_URL` is empty and `remote` otherwise; explicit `KASTEN_MODE=local` / `remote` overrides the URL-based inference.
+Selection: `knoten/cli/main.py:_build_backend` reads `settings.effective_mode` — `auto` resolves to `local` when `KNOTEN_API_URL` is empty and `remote` otherwise; explicit `KNOTEN_MODE=local` / `remote` overrides the URL-based inference.
 
 **LocalBackend specifics** (the ones Claude most often needs to know when debugging):
 
-- **Stat-walk reindex.** `LocalBackend._refresh_index_if_stale` runs at most once per CLI invocation at the top of every read method. It walks `vault_dir/*.md` (skipping `.trash/` and `.attachments/`), compares each file's `(mtime_ns, size)` against the `notes.path_mtime_ns / path_size` columns, re-parses drifted files via `parse_body`, and hard-deletes store rows whose path is missing on disk. External `rm foo.md` is a permanent delete in local mode — there is no trash copy to restore from, only `kasten delete` moves to `.trash/`.
-- **Soft delete.** `kasten delete` moves the file from `<vault>/<path>` to `<vault>/.trash/<path>` and shifts the store row from `notes` into the separate `trashed_notes` table (schema v6). `kasten restore` is the inverse, with a collision check — if a new note was created under the same filename while this one was in the trash, restore raises `UserError` asking the user to rename one of them first.
-- **Attachments.** `kasten upload` writes the blob to `<vault>/.attachments/<uuid><ext>` and records a row in the `attachments` table (schema v7). `kasten download` streams it back. Storage keys are plain UUIDs with the original extension preserved — no content hashing, no dedup (v0.1 simplicity).
+- **Stat-walk reindex.** `LocalBackend._refresh_index_if_stale` runs at most once per CLI invocation at the top of every read method. It walks `vault_dir/*.md` (skipping `.trash/` and `.attachments/`), compares each file's `(mtime_ns, size)` against the `notes.path_mtime_ns / path_size` columns, re-parses drifted files via `parse_body`, and hard-deletes store rows whose path is missing on disk. External `rm foo.md` is a permanent delete in local mode — there is no trash copy to restore from, only `knoten delete` moves to `.trash/`.
+- **Soft delete.** `knoten delete` moves the file from `<vault>/<path>` to `<vault>/.trash/<path>` and shifts the store row from `notes` into the separate `trashed_notes` table (schema v6). `knoten restore` is the inverse, with a collision check — if a new note was created under the same filename while this one was in the trash, restore raises `UserError` asking the user to rename one of them first.
+- **Attachments.** `knoten upload` writes the blob to `<vault>/.attachments/<uuid><ext>` and records a row in the `attachments` table (schema v7). `knoten download` streams it back. Storage keys are plain UUIDs with the original extension preserved — no content hashing, no dedup (v0.1 simplicity).
 - **Rename cascade.** `LocalBackend._rename_with_cascade` queries `wikilinks WHERE target_title = <old_filename>` for every source note referencing the renamed one, regex-rewrites `[[old]]` and `[[old|alias]]` forms in each source body, and re-ingests both the target and the sources. Rollback on partial failure restores the original bytes of every file it touched before re-raising. Heading-form wikilinks (`[[target#heading]]`) are a documented limitation — the local markdown parser regex does not capture the heading suffix, so they are invisible to the cascade (see `tests/test_local_backend_rename.py::test_rename_heading_wikilink_is_not_cascaded`).
 - **No permission model.** `NoteForbiddenError` cannot happen in local mode — the placeholder branch in the sync path is dead code for local-only users and is kept only for symmetry with `RemoteBackend`.
 
-**Tests**: `tests/test_cli_local_mode.py` is the integration anchor — drives every CLI command end-to-end against a `tmp_path` vault with `KASTEN_MODE=local` and zero network. Read-path and write-path unit tests live in `tests/test_local_backend_reads.py`, `tests/test_local_backend_reindex.py`, `tests/test_local_backend_writes.py`, and `tests/test_local_backend_rename.py`.
+**Tests**: `tests/test_cli_local_mode.py` is the integration anchor — drives every CLI command end-to-end against a `tmp_path` vault with `KNOTEN_MODE=local` and zero network. Read-path and write-path unit tests live in `tests/test_local_backend_reads.py`, `tests/test_local_backend_reindex.py`, `tests/test_local_backend_writes.py`, and `tests/test_local_backend_rename.py`.
 
 ## Read vs write
 
@@ -64,33 +64,33 @@ The single most important rule for anyone (especially Claude) using this CLI:
 - **Reads never touch the network** in either mode. Reads resolve against the local mirror + SQLite index. The only commands that might touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`) — and even those go through the `Backend` protocol so they become filesystem ops in local mode.
 - **In remote mode, writes always touch the network first.** Mutations call the REST API first; only after a 2xx do they re-fetch and mirror locally. The local mirror is never authoritative in remote mode.
 - **In local mode, writes go straight to disk.** The vault is authoritative; SQLite is derived. `_refresh_index_if_stale` catches up to external edits at the top of every read method.
-- **Sync never runs implicitly.** If the remote-mode mirror is stale, the user (or Claude) must run `kasten sync`. In local mode `kasten sync` is a shortcut for the stat-walk reindex.
+- **Sync never runs implicitly.** If the remote-mode mirror is stale, the user (or Claude) must run `knoten sync`. In local mode `knoten sync` is a shortcut for the stat-walk reindex.
 
 ## Paths
 
-Default layout — `KASTEN_HOME` anchors a vault + state pair:
+Default layout — `KNOTEN_HOME` anchors a vault + state pair:
 
-- `$KASTEN_HOME/kasten/` — markdown mirror (gitignored)
-- `$KASTEN_HOME/.kasten-state/index.sqlite` — metadata + FTS5 (gitignored)
-- `$KASTEN_HOME/.kasten-state/state.json` — sync cursor, schema version (gitignored)
-- `$KASTEN_HOME/.kasten-state/sync.lock` — fcntl lock held during sync / writes
-- `$KASTEN_HOME/.env` — API URL + token (gitignored)
+- `$KNOTEN_HOME/kasten/` — markdown mirror (gitignored). Subdir name is configurable via `KNOTEN_VAULT_DIR`; the historical `kasten/` default is the only place the old name survives.
+- `$KNOTEN_HOME/.knoten-state/index.sqlite` — metadata + FTS5 (gitignored)
+- `$KNOTEN_HOME/.knoten-state/state.json` — sync cursor, schema version (gitignored)
+- `$KNOTEN_HOME/.knoten-state/sync.lock` — fcntl lock held during sync / writes
+- `$KNOTEN_HOME/.env` — API URL + token (gitignored)
 
-### How `KASTEN_HOME` is resolved
+### How `KNOTEN_HOME` is resolved
 
-The resolution tries, in order: shell env → any `.env` layer that sets it → source-tree walk → `~/.kasten` fallback. Two runtime contexts matter:
+The resolution tries, in order: shell env → any `.env` layer that sets it → source-tree walk → `~/.knoten` fallback. Two runtime contexts matter:
 
-- **Dev** (`uv run kasten …`, `make sync` from the repo): `_default_home()` walks up from `__file__` and finds the repo root via its `pyproject.toml`. The repo's `.env` is read automatically. No user config needed.
-- **Installed** (`uv tool install .` → `~/.local/bin/kasten`): `__file__` lives in a uv tools venv's `site-packages/`, so the pyproject walk is skipped. The CLI reads `~/.config/kasten/.env` first — that file typically only carries `KASTEN_HOME=/path/to/repo`, which then triggers a second layer read of `$KASTEN_HOME/.env` for the API URL + token. No secret duplication.
+- **Dev** (`uv run knoten …`, `make sync` from the repo): `_default_home()` walks up from `__file__` and finds the repo root via its `pyproject.toml`. The repo's `.env` is read automatically. No user config needed.
+- **Installed** (`uv tool install .` → `~/.local/bin/knoten`): `__file__` lives in a uv tools venv's `site-packages/`, so the pyproject walk is skipped. The CLI reads `~/.config/knoten/.env` first — that file typically only carries `KNOTEN_HOME=/path/to/repo`, which then triggers a second layer read of `$KNOTEN_HOME/.env` for the API URL + token. No secret duplication.
 
 ### `.env` layering
 
 `load_settings()` reads multiple `.env` files in priority order with `override=False` — **first value wins**, later files fill in missing keys:
 
 1. `env_file` arg — explicit, tests / advanced callers
-2. `~/.config/kasten/.env` — user-level pointer (installed CLI)
-3. `$KASTEN_HOME/.env` — once `KASTEN_HOME` is known from layer 2 or the process env
-4. `_default_home() / .env` — dev workflow (repo or `~/.kasten`)
+2. `~/.config/knoten/.env` — user-level pointer (installed CLI)
+3. `$KNOTEN_HOME/.env` — once `KNOTEN_HOME` is known from layer 2 or the process env
+4. `_default_home() / .env` — dev workflow (repo or `~/.knoten`)
 
 Process env vars always win over any file layer (environs `override=False`).
 
@@ -103,7 +103,7 @@ make lint          # ruff check + format --check
 make format        # ruff check --fix + format
 make sync          # incremental sync
 make sync-full     # full refetch
-make tool-install  # install `kasten` globally via `uv tool install`
+make tool-install  # install `knoten` globally via `uv tool install`
 ```
 
 ## Workflow
@@ -111,20 +111,20 @@ make tool-install  # install `kasten` globally via `uv tool install`
 1. After any code change: `make format` — enforced by ruff.
 2. Before committing: `make lint && make test`.
 3. When adding a new CLI command: add a test in `tests/test_cli_smoke.py` that at minimum runs it with `--json` on an empty store to catch wiring regressions.
-4. When changing the store schema: bump `SCHEMA_VERSION` in `app/repositories/store.py` and document the migration in the commit message.
+4. When changing the store schema: bump `SCHEMA_VERSION` in `knoten/repositories/store.py` and document the migration in the commit message.
 
 ## Key code locations
 
-- CLI entrypoint: `app/cli/main.py` — one Typer function per subcommand, all wiring identical (load → lock → Store → `_build_backend` → service → render).
-- Backend protocol + data types: `app/repositories/backend.py`.
-- Remote implementation: `app/repositories/remote_backend.py` — bearer-token httpx wrapper. All exceptions inherit from `app/repositories/errors.py`.
-- Local implementation: `app/repositories/local_backend.py` — filesystem + Store. See the `## Backends` section for the LocalBackend-specific gotchas (stat walk, trash, rename cascade).
-- Filename parser: `app/services/kasten_filename.py` — Python port of `notes.vcoeur.com/packages/shared/src/kasten.ts`. LocalBackend uses it to derive family + source from a `NoteDraft.filename` on create and rename.
-- Store: `app/repositories/store.py` — schema in `_SCHEMA`, all queries are explicit SQL strings (no ORM).
+- CLI entrypoint: `knoten/cli/main.py` — one Typer function per subcommand, all wiring identical (load → lock → Store → `_build_backend` → service → render).
+- Backend protocol + data types: `knoten/repositories/backend.py`.
+- Remote implementation: `knoten/repositories/remote_backend.py` — bearer-token httpx wrapper. All exceptions inherit from `knoten/repositories/errors.py`.
+- Local implementation: `knoten/repositories/local_backend.py` — filesystem + Store. See the `## Backends` section for the LocalBackend-specific gotchas (stat walk, trash, rename cascade).
+- Filename parser: `knoten/services/knoten_filename.py` — Python port of `notes.vcoeur.com/packages/shared/src/kasten.ts`. LocalBackend uses it to derive family + source from a `NoteDraft.filename` on create and rename.
+- Store: `knoten/repositories/store.py` — schema in `_SCHEMA`, all queries are explicit SQL strings (no ORM).
 - FTS5 search: `Store.search()` — weights `(1.0, 10.0, 1.0, 5.0)` map to (note_id, title, body, filename). Keep the UNINDEXED `note_id` weight in the list or bm25 silently mis-weights.
 - Fuzzy search: `Store.search_fuzzy()` — combines a second FTS5 virtual table `notes_fts_trigram` (tokenize='trigram', used for substring matching) with a `rapidfuzz.process.extract` pass over titles+filenames. Both FTS tables must stay in sync: `upsert_note`, `upsert_placeholder`, and `delete_note` all write to both, and `fts_cardinality_check` covers both. Combined score = rapidfuzz WRatio (0..100) + 30 if the note is also a trigram substring hit.
-- Sync orchestration: `app/services/sync.py` — `incremental_sync` is the real work; `full_sync` delegates to it with a cleared cursor.
-- File writing: `app/repositories/vault_files.py` — atomic writes via tmp + rename, path derivation in `path_for_note`. The writer validates that the server-provided relative path stays inside the vault before touching disk.
+- Sync orchestration: `knoten/services/sync.py` — `incremental_sync` is the real work; `full_sync` delegates to it with a cleared cursor.
+- File writing: `knoten/repositories/vault_files.py` — atomic writes via tmp + rename, path derivation in `path_for_note`. The writer validates that the server-provided relative path stays inside the vault before touching disk.
 
 ## Testing conventions
 

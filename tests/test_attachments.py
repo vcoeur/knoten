@@ -1,4 +1,4 @@
-"""`kasten upload` and `kasten download` — http client + service tests.
+"""`knoten upload` and `knoten download` — http client + service tests.
 
 Covers:
   * `NotesClient.upload_attachment` posts multipart form data to
@@ -19,16 +19,16 @@ from pathlib import Path
 import pytest
 from pytest_httpx import HTTPXMock
 
-from app.models import Note
-from app.repositories.errors import NotFoundError, UserError
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.services.notes import (
+from knoten.models import Note
+from knoten.repositories.errors import NotFoundError, UserError
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.services.notes import (
     download_file_remote,
     ingest_note,
     upload_file_remote,
 )
-from app.settings import Settings
+from knoten.settings import Settings
 
 FILE_NOTE_ID = "22222222-2222-2222-2222-222222222222"
 STORAGE_KEY = "att_abc123"

@@ -1,6 +1,6 @@
 """Tag and wiki-link extraction from markdown bodies."""
 
-from app.services.markdown_parser import parse_body
+from knoten.services.markdown_parser import parse_body
 
 
 def test_extracts_simple_tags_and_wikilinks() -> None:

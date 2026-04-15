@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from pytest_httpx import HTTPXMock
 
-from app.models import Note
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.services.reconcile import reconcile_local
-from app.services.sync import incremental_sync
-from app.settings import Settings
+from knoten.models import Note
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.services.reconcile import reconcile_local
+from knoten.services.sync import incremental_sync
+from knoten.settings import Settings
 
 
 def _seed_note(store: Store, settings: Settings, note_id: str, body: str = "Body one.") -> None:

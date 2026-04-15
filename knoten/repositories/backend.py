@@ -1,4 +1,4 @@
-"""Backend abstraction — the contract KastenManager depends on.
+"""Backend abstraction — the contract knoten depends on.
 
 Two implementations will live side by side:
 
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from app.models import Note, NoteSummary
+from knoten.models import Note, NoteSummary
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ class AttachmentDownloadResult:
 
 @runtime_checkable
 class Backend(Protocol):
-    """The full contract KastenManager needs from a notes backend.
+    """The full contract knoten needs from a notes backend.
 
     Eight business methods plus `close()` for resource release. Everything
     outside this Protocol is caller-side glue that does not belong on the

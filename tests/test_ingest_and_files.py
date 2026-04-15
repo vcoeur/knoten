@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from app.models import Note, WikiLink
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.settings import Settings
+from knoten.models import Note, WikiLink
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.settings import Settings
 
 
 def _note(filename: str, family: str, body: str) -> Note:

@@ -1,6 +1,6 @@
 """Pure data models. No I/O, no framework imports."""
 
-from app.models.note import (
+from knoten.models.note import (
     MCP_PERMISSIONS,
     Note,
     NoteSummary,

@@ -2,12 +2,14 @@
 .env
 .env.local
 
-# Local vault mirror (rebuilt from notes.vcoeur.com via `kasten sync`)
+# Local vault mirror (rebuilt from notes.vcoeur.com via `knoten sync`).
+# The vault subdirectory keeps its historical name — it's configurable via
+# KNOTEN_VAULT_DIR, but dev-mode defaults to `kasten/`.
 kasten/
 kasten.bak-*/
 
 # Runtime state (index, sync cursor, scratch)
-.kasten-state/
+.knoten-state/
 
 # Python build artefacts
 __pycache__/

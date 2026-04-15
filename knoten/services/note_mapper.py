@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models import Note, NoteSummary, WikiLink
+from knoten.models import Note, NoteSummary, WikiLink
 
 
 def summary_from_api(payload: dict[str, Any]) -> NoteSummary:

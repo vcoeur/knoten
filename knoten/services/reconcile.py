@@ -25,11 +25,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.repositories.backend import Backend
-from app.repositories.errors import NoteForbiddenError
-from app.repositories.store import Store, StoreNoteRow
-from app.services.notes import ingest_note, ingest_placeholder
-from app.settings import Settings
+from knoten.repositories.backend import Backend
+from knoten.repositories.errors import NoteForbiddenError
+from knoten.repositories.store import Store, StoreNoteRow
+from knoten.services.notes import ingest_note, ingest_placeholder
+from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
 
@@ -157,7 +157,7 @@ def _refetch(
     try:
         note = backend.read_note(row.id)
     except NoteForbiddenError:
-        from app.models import NoteSummary
+        from knoten.models import NoteSummary
 
         current = store.find_by_id(row.id)
         if current is None:

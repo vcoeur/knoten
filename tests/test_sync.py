@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pytest_httpx import HTTPXMock
 
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.repositories.sync_state import load_state
-from app.services.sync import incremental_sync
-from app.settings import Settings
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.repositories.sync_state import load_state
+from knoten.services.sync import incremental_sync
+from knoten.settings import Settings
 
 
 def _list_payload(items: list[dict], total: int) -> dict:
@@ -82,8 +82,8 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
         encoding="utf-8",
     )
 
-    from app.models import Note
-    from app.services.notes import ingest_note
+    from knoten.models import Note
+    from knoten.services.notes import ingest_note
 
     with Store(tmp_settings.index_path) as store:
         pre = Note(

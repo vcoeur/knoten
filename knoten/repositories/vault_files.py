@@ -1,7 +1,7 @@
 """Filesystem mirror: writes note markdown files with YAML frontmatter.
 
 Mirrors the format of notes.vcoeur.com's export endpoint so that the local
-vault is a superset of what `kasten sync --full` can ingest directly.
+vault is a superset of what `knoten sync --full` can ingest directly.
 
 One file per note. Atomic writes (tmp + rename). Old files at a stale path
 are removed when a note is renamed.
@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from app.models import Note, NoteSummary
+from knoten.models import Note, NoteSummary
 
 # Mirrors notes.vcoeur.com's export layout — see
 # `packages/shared/src/kasten.ts:FAMILY_TO_DIRECTORY` and

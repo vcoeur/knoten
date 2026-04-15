@@ -66,7 +66,7 @@ class ParsedFilename:
     date: str | None
 
 
-def parse_kasten_filename(filename: str) -> ParsedFilename:
+def parse_knoten_filename(filename: str) -> ParsedFilename:
     """Parse a Kasten filename into `(family, title, source, date)`.
 
     Mirrors `parseKastenFilename` in `notes.vcoeur.com/packages/shared/src/kasten.ts`.
@@ -120,7 +120,7 @@ def parse_kasten_filename(filename: str) -> ParsedFilename:
 def has_valid_prefix(filename: str) -> bool:
     """True if `filename` starts with a recognised Kasten prefix.
 
-    Unprefixed filenames are *accepted* by `parse_kasten_filename` (they
+    Unprefixed filenames are *accepted* by `parse_knoten_filename` (they
     fall back to `fleeting`), but they do not have a valid prefix. Use
     this when you want to warn the user before defaulting silently.
     """

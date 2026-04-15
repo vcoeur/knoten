@@ -1,7 +1,7 @@
 [project]
-name = "kasten-manager"
+name = "knoten"
 version = "0.1.0"
-description = "Local CLI mirror and search tool for notes.vcoeur.com, built for Claude skills"
+description = "Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index; can also mirror a notes.vcoeur.com instance"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Alice Voland" }]
@@ -14,16 +14,32 @@ dependencies = [
     "rich>=13.9",
     "typer>=0.16",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Text Processing :: Markup",
+]
+
+[project.urls]
+Homepage = "https://github.com/vcoeur/knoten"
+Repository = "https://github.com/vcoeur/knoten"
+Issues = "https://github.com/vcoeur/knoten/issues"
 
 [project.scripts]
-kasten = "app.cli.main:app"
+knoten = "knoten.cli.main:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+packages = ["knoten"]
 
 [dependency-groups]
 dev = [
@@ -47,4 +63,4 @@ ignore = ["SIM105", "SIM117"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer's Option(...) default-arg pattern is idiomatic; B008 flags it.
-"app/cli/main.py" = ["B008"]
+"knoten/cli/main.py" = ["B008"]

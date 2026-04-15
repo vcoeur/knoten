@@ -22,8 +22,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.models import Note, WikiLink
-from app.repositories.backend import (
+from knoten.models import Note, WikiLink
+from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,
@@ -32,12 +32,12 @@ from app.repositories.backend import (
     NotesPage,
     NoteUpdateResult,
 )
-from app.repositories.errors import NotFoundError, UserError
-from app.repositories.store import Store
-from app.services.kasten_filename import parse_kasten_filename
-from app.services.markdown_parser import parse_body
-from app.services.notes import _assert_same_family_prefix, ingest_note
-from app.settings import Settings
+from knoten.repositories.errors import NotFoundError, UserError
+from knoten.repositories.store import Store
+from knoten.services.knoten_filename import parse_knoten_filename
+from knoten.services.markdown_parser import parse_body
+from knoten.services.notes import _assert_same_family_prefix, ingest_note
+from knoten.settings import Settings
 
 _LOG = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class LocalBackend(Backend):
         if not settings.vault_dir.exists():
             raise UserError(
                 f"Vault directory does not exist: {settings.vault_dir} — "
-                "create it or set KASTEN_HOME to a directory with a `kasten/` subdir."
+                "create it or set KNOTEN_HOME to a directory with a `kasten/` subdir."
             )
         self._settings = settings
         self._vault_dir = settings.vault_dir
@@ -85,11 +85,11 @@ class LocalBackend(Backend):
           skipped. Creating notes from unknown markdown files requires a
           filename-to-family parser that lands with `create_note` in
           Phase 6; until then, users who drop files into the vault by
-          hand need to re-run `kasten sync` after Phase 6.
+          hand need to re-run `knoten sync` after Phase 6.
 
         Missing files — entries in the store whose path is no longer on
         disk — are hard-deleted. External `rm foo.md` is a permanent
-        delete; only `kasten delete` moves files to `.trash/`.
+        delete; only `knoten delete` moves files to `.trash/`.
         """
         if self._reindex_done:
             return
@@ -210,7 +210,7 @@ class LocalBackend(Backend):
     def create_note(self, draft: NoteDraft) -> str:
         self._refresh_index_if_stale()
 
-        parsed = parse_kasten_filename(draft.filename)
+        parsed = parse_knoten_filename(draft.filename)
         if not parsed.family:
             raise UserError(f"Could not derive family from filename {draft.filename!r}")
         if self._store.find_by_filename(draft.filename) is not None:
@@ -400,7 +400,7 @@ class LocalBackend(Backend):
                 current_fm = {}
             new_fm = dict(patch.frontmatter) if patch.frontmatter is not None else current_fm
 
-            parsed_new = parse_kasten_filename(new_filename)
+            parsed_new = parse_knoten_filename(new_filename)
             parsed_body = parse_body(body_only)
             renamed_note = Note(
                 id=note_id,
@@ -650,7 +650,7 @@ def _apply_tag_edits(
     add_tags: tuple[str, ...],
     remove_tags: tuple[str, ...],
 ) -> str:
-    """Port of the remote-path tag-edit routine used by `kasten edit --add-tag`."""
+    """Port of the remote-path tag-edit routine used by `knoten edit --add-tag`."""
     import re
 
     new_body = body

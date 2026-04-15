@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.repositories.errors import LockTimeoutError
+from knoten.repositories.errors import LockTimeoutError
 
 
 @contextmanager
@@ -34,7 +34,7 @@ def acquire_lock(lock_path: Path, *, timeout: float = 30.0) -> Iterator[None]:
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(
-                        f"Another kasten process is holding {lock_path}. Waited {timeout:.0f}s."
+                        f"Another knoten process is holding {lock_path}. Waited {timeout:.0f}s."
                     ) from exc
                 time.sleep(0.2)
         os.ftruncate(fd, 0)

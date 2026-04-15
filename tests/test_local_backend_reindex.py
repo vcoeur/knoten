@@ -11,12 +11,12 @@ import os
 
 import pytest
 
-from app.models import Note
-from app.repositories.errors import NotFoundError
-from app.repositories.local_backend import LocalBackend
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.settings import Settings
+from knoten.models import Note
+from knoten.repositories.errors import NotFoundError
+from knoten.repositories.local_backend import LocalBackend
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.settings import Settings
 
 
 def _make_note(

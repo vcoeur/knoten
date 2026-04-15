@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.models import Note
-from app.repositories.backend import (
+from knoten.models import Note
+from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,

@@ -7,11 +7,11 @@ rewrites the derived rows. No network required.
 
 Composition with other commands:
 
-- `kasten verify` — catches drift between disk, store, and remote. Needs
+- `knoten verify` — catches drift between disk, store, and remote. Needs
   the network to re-fetch missing/drifted files.
-- `kasten reindex` — catches drift between the derived index and the
+- `knoten reindex` — catches drift between the derived index and the
   `notes` table. No network. Trusts on-disk content.
-- `kasten sync --verify` — the nuclear option: re-fetch every note from
+- `knoten sync --verify` — the nuclear option: re-fetch every note from
   the remote and re-ingest, which rebuilds everything from scratch.
 
 `reindex` and `verify` are complementary: run `reindex` first (offline, fast),
@@ -25,10 +25,10 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from app.models import Note, WikiLink
-from app.repositories.store import Store
-from app.services.markdown_parser import parse_body
-from app.settings import Settings
+from knoten.models import Note, WikiLink
+from knoten.repositories.store import Store
+from knoten.services.markdown_parser import parse_body
+from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
 
@@ -58,7 +58,7 @@ def reindex_from_files(
     derived tables (FTS5, tags, wikilinks, frontmatter_fields).
 
     Notes whose mirror file is missing are skipped and reported — run
-    `kasten verify` after to pull them back from the remote.
+    `knoten verify` after to pull them back from the remote.
     """
     log = progress or _noop
     result = ReindexResult()

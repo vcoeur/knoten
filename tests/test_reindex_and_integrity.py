@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from app.models import Note
-from app.repositories.store import Store
-from app.services.notes import ingest_note
-from app.services.reindex import reindex_from_files
-from app.settings import Settings
+from knoten.models import Note
+from knoten.repositories.store import Store
+from knoten.services.notes import ingest_note
+from knoten.services.reindex import reindex_from_files
+from knoten.settings import Settings
 
 
 def _seed(store: Store, settings: Settings, note_id: str, body: str) -> None:

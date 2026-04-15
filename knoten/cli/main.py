@@ -1,8 +1,8 @@
-"""Typer CLI entrypoint for the `kasten` command.
+"""Typer CLI entrypoint for the `knoten` command.
 
 Each subcommand is a thin wrapper: parse flags, resolve Settings, open the
 Store (and RemoteBackend when remote access is needed), call into a service,
-render the result via `app.cli.output`.
+render the result via `knoten.cli.output`.
 
 Exit codes (mapped from exception types in `app.repositories.errors`):
     0 success
@@ -24,7 +24,7 @@ from typing import Any
 
 import typer
 
-from app.cli.output import (
+from knoten.cli.output import (
     OutputMode,
     emit_json,
     log,
@@ -37,27 +37,27 @@ from app.cli.output import (
     render_summary_list,
     render_sync_result,
 )
-from app.repositories.backend import Backend
-from app.repositories.errors import (
+from knoten.repositories.backend import Backend
+from knoten.repositories.errors import (
     AmbiguousTargetError,
     AuthError,
     ConfigError,
-    KastenError,
+    KnotenError,
     LockTimeoutError,
     NetworkError,
     NotFoundError,
     StoreError,
     UserError,
 )
-from app.repositories.errors import (
+from knoten.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.local_backend import LocalBackend
-from app.repositories.lock import acquire_lock
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.repositories.sync_state import load_state
-from app.services.notes import (
+from knoten.repositories.local_backend import LocalBackend
+from knoten.repositories.lock import acquire_lock
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.repositories.sync_state import load_state
+from knoten.services.notes import (
     append_note_remote,
     create_note_remote,
     delete_note_remote,
@@ -71,10 +71,10 @@ from app.services.notes import (
     summarize_note,
     upload_file_remote,
 )
-from app.services.reconcile import reconcile_local
-from app.services.reindex import reindex_from_files
-from app.services.sync import full_sync, incremental_sync
-from app.settings import Settings, ensure_dirs, load_settings
+from knoten.services.reconcile import reconcile_local
+from knoten.services.reindex import reindex_from_files
+from knoten.services.sync import full_sync, incremental_sync
+from knoten.settings import Settings, ensure_dirs, load_settings
 
 app = typer.Typer(
     help="Local CLI mirror and search for notes.vcoeur.com. Designed for Claude.",
@@ -87,7 +87,7 @@ class Fields(StrEnum):
     """Post-write response shape for mutation commands.
 
     `minimal` returns identity + metadata + tags only (no body, no
-    wikilinks, no backlinks). `full` returns the same shape as `kasten
+    wikilinks, no backlinks). `full` returns the same shape as `knoten
     read` — body, frontmatter, wikilinks, backlinks. Default is `minimal`
     because most callers only need to confirm the note identity.
     """
@@ -112,24 +112,24 @@ def _require_token(settings: Settings) -> None:
         return
     if not settings.api_token:
         raise ConfigError(
-            "KASTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
+            "KNOTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
         )
 
 
 def _build_backend(settings: Settings) -> Backend:
     """Construct the backend implementation selected by settings.
 
-    Selection: `effective_mode` resolves `KASTEN_MODE=auto` to `local` when
-    `KASTEN_API_URL` is empty and `remote` otherwise. Explicit `remote` /
+    Selection: `effective_mode` resolves `KNOTEN_MODE=auto` to `local` when
+    `KNOTEN_API_URL` is empty and `remote` otherwise. Explicit `remote` /
     `local` are honoured as-is. Local mode requires no network and no
-    token — any user can run KastenManager against a plain on-disk vault.
+    token — any user can run knoten against a plain on-disk vault.
     """
     if settings.effective_mode == "local":
         return LocalBackend(settings)
     if not settings.api_url:
         raise ConfigError(
-            "KASTEN_MODE=remote requires KASTEN_API_URL to be set "
-            "(or unset KASTEN_MODE to fall back to local mode)."
+            "KNOTEN_MODE=remote requires KNOTEN_API_URL to be set "
+            "(or unset KNOTEN_MODE to fall back to local mode)."
         )
     return RemoteBackend(settings)
 
@@ -159,8 +159,8 @@ def _classify_error(exc: Exception) -> tuple[int, str]:
         return 1, "not_found"
     if isinstance(exc, UserError):
         return 1, "user"
-    if isinstance(exc, KastenError):
-        return 1, "kasten"
+    if isinstance(exc, KnotenError):
+        return 1, "knoten"
     return 1, "unknown"
 
 
@@ -233,7 +233,7 @@ def cmd_sync(
     try:
         settings = _load()
         if settings.effective_mode == "local":
-            # Local mode has no server to sync from. `kasten sync` becomes
+            # Local mode has no server to sync from. `knoten sync` becomes
             # a stat-walk reindex: the backend walks the vault on its
             # first read-path call and catches up external edits.
             progress("→ Local mode: running reindex walk (no network)")
@@ -294,7 +294,7 @@ def cmd_verify(
     With `--hashes`, additionally re-reads every file and compares its body
     hash against the recorded `body_sha256`. Mismatches are re-fetched.
 
-    If the FTS5 cardinality check shows drift, run `kasten reindex` to
+    If the FTS5 cardinality check shows drift, run `knoten reindex` to
     rebuild the derived tables from the on-disk files without a network hit.
     """
     mode = OutputMode.detect(json_output)
@@ -359,7 +359,7 @@ def cmd_verify(
             )
             if not cardinality["consistent"]:
                 console.print(
-                    "[yellow]FTS5 drift detected — run `kasten reindex` to rebuild "
+                    "[yellow]FTS5 drift detected — run `knoten reindex` to rebuild "
                     "the derived tables from on-disk files.[/yellow]"
                 )
             if result.missing_ids:
@@ -377,12 +377,12 @@ def cmd_reindex(
     """Rebuild the derived index (FTS5, tags, wikilinks, frontmatter_fields)
     from the `notes` rows and the on-disk mirror files. No network.
 
-    Use this when `kasten verify` reports FTS5 drift, when SQLite's integrity
+    Use this when `knoten verify` reports FTS5 drift, when SQLite's integrity
     check complains about derived tables, or when you want a quick offline
     rebuild without re-fetching every note from the remote.
 
     Notes whose mirror file is missing are skipped and reported — follow up
-    with `kasten verify` (which has network access) to pull them back.
+    with `knoten verify` (which has network access) to pull them back.
     """
     mode = OutputMode.detect(json_output)
     progress = make_progress_callback(mode)
@@ -423,7 +423,7 @@ def cmd_reindex(
             if result.missing_file_ids:
                 console.print(
                     f"[yellow]skipped (missing file):[/yellow] "
-                    f"{', '.join(result.missing_file_ids[:10])} — run `kasten verify`"
+                    f"{', '.join(result.missing_file_ids[:10])} — run `knoten verify`"
                 )
     except Exception as exc:
         _fail(exc, mode=mode)

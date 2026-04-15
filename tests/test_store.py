@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from app.models import Note, WikiLink
-from app.repositories.store import SCHEMA_VERSION, Store
+from knoten.models import Note, WikiLink
+from knoten.repositories.store import SCHEMA_VERSION, Store
 
 
 def _make_note(

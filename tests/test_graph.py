@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.models import Note, WikiLink
-from app.repositories.store import Store
+from knoten.models import Note, WikiLink
+from knoten.repositories.store import Store
 
 
 def _note(

@@ -18,8 +18,8 @@ from typing import Any
 
 from rapidfuzz import fuzz, process
 
-from app.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
-from app.repositories.errors import NotFoundError, StoreError, UserError
+from knoten.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
+from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
 SCHEMA_VERSION = 7
 
@@ -260,8 +260,8 @@ class Store:
                 self._write_meta("schema_version", str(SCHEMA_VERSION))
             elif current > SCHEMA_VERSION:
                 raise StoreError(
-                    f"Index schema_version={current} is newer than this KastenManager "
-                    f"(expects {SCHEMA_VERSION}). Upgrade the tool or delete .kasten-state/."
+                    f"Index schema_version={current} is newer than this knoten "
+                    f"(expects {SCHEMA_VERSION}). Upgrade the tool or delete .knoten-state/."
                 )
             elif current < SCHEMA_VERSION:
                 self._migrate_from(current)

@@ -1,6 +1,6 @@
 """API-dict → domain model conversion."""
 
-from app.services.note_mapper import note_from_api, summary_from_api
+from knoten.services.note_mapper import note_from_api, summary_from_api
 
 
 def test_summary_from_api_handles_camel_case_dates() -> None:

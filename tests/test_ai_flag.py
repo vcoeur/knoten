@@ -12,7 +12,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
-from app.cli.main import _wrap_ai, app
+from knoten.cli.main import _wrap_ai, app
 
 
 def test_wrap_ai_basic() -> None:
@@ -65,9 +65,9 @@ def _mock_note_response(httpx_mock: HTTPXMock, *, body: str) -> None:
 def test_cli_create_ai_wraps_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
     _mock_note_response(httpx_mock, body="#ai begin\nhello world\n#ai end")
 
     runner = CliRunner()
@@ -82,9 +82,9 @@ def test_cli_create_ai_wraps_body(
 
 
 def test_cli_create_ai_without_body_errors(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
 
     runner = CliRunner()
     result = runner.invoke(app, ["create", "--filename", "- ai test", "--ai", "--json"])
@@ -94,16 +94,16 @@ def test_cli_create_ai_without_body_errors(monkeypatch: pytest.MonkeyPatch, tmp_
 def test_cli_append_ai_wraps_content(
     monkeypatch: pytest.MonkeyPatch, tmp_path, httpx_mock: HTTPXMock
 ) -> None:
-    from app.models import Note
-    from app.repositories.store import Store
-    from app.services.notes import ingest_note
+    from knoten.models import Note
+    from knoten.repositories.store import Store
+    from knoten.services.notes import ingest_note
 
-    monkeypatch.setenv("KASTEN_HOME", str(tmp_path))
-    monkeypatch.setenv("KASTEN_API_URL", "https://notes.test")
-    monkeypatch.setenv("KASTEN_API_TOKEN", "nt_test")
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
 
     vault_dir = tmp_path / "kasten"
-    state_dir = tmp_path / ".kasten-state"
+    state_dir = tmp_path / ".knoten-state"
     vault_dir.mkdir(exist_ok=True)
     state_dir.mkdir(exist_ok=True)
 

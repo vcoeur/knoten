@@ -1,6 +1,6 @@
 """Exception hierarchy used across repositories and services.
 
-These are mapped to CLI exit codes in `app.cli.main`:
+These are mapped to CLI exit codes in `knoten.cli.main`:
 
     UserError       -> 1
     NetworkError    -> 2
@@ -12,11 +12,11 @@ These are mapped to CLI exit codes in `app.cli.main`:
 from __future__ import annotations
 
 
-class KastenError(Exception):
-    """Base class for all KastenManager errors."""
+class KnotenError(Exception):
+    """Base class for all knoten errors."""
 
 
-class UserError(KastenError):
+class UserError(KnotenError):
     """Invalid arguments, missing target, validation failure."""
 
 
@@ -24,7 +24,7 @@ class NotFoundError(UserError):
     """The requested target does not exist locally or remotely."""
 
 
-class NoteForbiddenError(KastenError):
+class NoteForbiddenError(KnotenError):
     """Per-note 404 from the remote during a read.
 
     The server deliberately conflates "note does not exist" and "viewer
@@ -76,7 +76,7 @@ class PermissionError(UserError):
         self.operation = operation
 
 
-class NetworkError(KastenError):
+class NetworkError(KnotenError):
     """Remote API unreachable, authentication failed, or returned 5xx."""
 
 
@@ -84,13 +84,13 @@ class AuthError(NetworkError):
     """Token missing, invalid, or lacks required scope."""
 
 
-class StoreError(KastenError):
+class StoreError(KnotenError):
     """Local SQLite or filesystem failure."""
 
 
-class ConfigError(KastenError):
-    """Missing or unreadable config (e.g. KASTEN_API_TOKEN not set)."""
+class ConfigError(KnotenError):
+    """Missing or unreadable config (e.g. KNOTEN_API_TOKEN not set)."""
 
 
-class LockTimeoutError(KastenError):
-    """Another kasten process is holding the sync lock."""
+class LockTimeoutError(KnotenError):
+    """Another knoten process is holding the sync lock."""

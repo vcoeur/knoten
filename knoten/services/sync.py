@@ -9,7 +9,7 @@ Full: same algorithm but with an empty cursor and forced delete detection —
 effectively "refetch everything, reconcile both sides". The `/api/export`
 endpoint is not used because the export zip is filename-keyed and carries
 no UUIDs, so we'd still need the per-note read path to get the canonical IDs.
-A dedicated `kasten export` command can still use /api/export when someone
+A dedicated `knoten export` command can still use /api/export when someone
 wants an offline archive; that is out of scope for v1.
 """
 
@@ -20,14 +20,14 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.models import NoteSummary
-from app.repositories.backend import Backend
-from app.repositories.errors import NoteForbiddenError
-from app.repositories.store import Store
-from app.repositories.sync_state import load_state, save_state
-from app.services.notes import delete_ingested, ingest_note, ingest_placeholder
-from app.services.reconcile import reconcile_local
-from app.settings import Settings
+from knoten.models import NoteSummary
+from knoten.repositories.backend import Backend
+from knoten.repositories.errors import NoteForbiddenError
+from knoten.repositories.store import Store
+from knoten.repositories.sync_state import load_state, save_state
+from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
+from knoten.services.reconcile import reconcile_local
+from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
 
@@ -79,7 +79,7 @@ class SyncResult:
     # diagnostic tripwire: any future disagreement points at a regression —
     # a stable-sort regression in the list endpoint, an asymmetric filter
     # between the count query and the data query, or a server-side schema
-    # change that KastenManager's pagination does not yet understand.
+    # change that knoten's pagination does not yet understand.
     remote_total: int | None
     scanned_remote_ids: int
     local_total: int

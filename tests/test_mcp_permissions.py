@@ -18,12 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from app.models import MCP_PERMISSIONS, Note, NoteSummary, permission_at_least
-from app.repositories.errors import PermissionError as LocalPermissionError
-from app.repositories.errors import UserError
-from app.repositories.store import SCHEMA_VERSION, Store
-from app.services.note_mapper import note_from_api, summary_from_api
-from app.services.notes import _assert_permission
+from knoten.models import MCP_PERMISSIONS, Note, NoteSummary, permission_at_least
+from knoten.repositories.errors import PermissionError as LocalPermissionError
+from knoten.repositories.errors import UserError
+from knoten.repositories.store import SCHEMA_VERSION, Store
+from knoten.services.note_mapper import note_from_api, summary_from_api
+from knoten.services.notes import _assert_permission
 
 
 def _make_note(note_id: str, filename: str, level: str = "ALL") -> Note:

@@ -1,4 +1,4 @@
-"""Pytest fixtures shared across KastenManager tests."""
+"""Pytest fixtures shared across knoten tests."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from app.repositories.store import Store
-from app.settings import Settings
+from knoten.repositories.store import Store
+from knoten.settings import Settings
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,7 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def tmp_settings(tmp_path: Path) -> Settings:
     """A Settings instance rooted under a per-test temp directory."""
     vault_dir = tmp_path / "kasten"
-    state_dir = tmp_path / ".kasten-state"
+    state_dir = tmp_path / ".knoten-state"
     vault_dir.mkdir()
     state_dir.mkdir()
     return Settings(

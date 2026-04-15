@@ -12,11 +12,11 @@ import json
 
 from pytest_httpx import HTTPXMock
 
-from app.repositories.errors import NoteForbiddenError
-from app.repositories.remote_backend import RemoteBackend
-from app.repositories.store import Store
-from app.services.sync import incremental_sync
-from app.settings import Settings
+from knoten.repositories.errors import NoteForbiddenError
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.repositories.store import Store
+from knoten.services.sync import incremental_sync
+from knoten.settings import Settings
 
 
 def _list_item(note_id: str, filename: str, updated_at: str) -> dict:
@@ -158,7 +158,7 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
         '{"schema_version": 2, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
         encoding="utf-8",
     )
-    from app.models import Note
+    from knoten.models import Note
 
     with Store(tmp_settings.index_path) as store:
         pre = Note(
@@ -175,7 +175,7 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
             created_at="2020-01-01T00:00:00Z",
             updated_at="2020-01-02T00:00:00Z",
         )
-        from app.services.notes import ingest_note
+        from knoten.services.notes import ingest_note
 
         ingest_note(pre, store=store, vault_dir=tmp_settings.vault_dir)
 

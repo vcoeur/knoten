@@ -6,10 +6,10 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from app.repositories.errors import AuthError, NetworkError
-from app.repositories.remote_backend import RemoteBackend
-from app.services.sync import iter_all_summaries
-from app.settings import Settings
+from knoten.repositories.errors import AuthError, NetworkError
+from knoten.repositories.remote_backend import RemoteBackend
+from knoten.services.sync import iter_all_summaries
+from knoten.settings import Settings
 
 
 def test_client_requires_token(tmp_settings: Settings) -> None:
