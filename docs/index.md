@@ -1,61 +1,54 @@
 ---
 title: knoten — CLI zettelkasten
-description: Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index. Offline-first, with an optional pluggable remote backend for multi-device sync.
+description: Standalone CLI zettelkasten with a local Markdown vault and SQLite FTS5 index. Offline-first, optional pluggable remote backend, built for Claude Code skills and day-to-day research.
 ---
 
 # knoten
 
 <p class="tagline">Notes, knotted together.</p>
 
-Standalone CLI zettelkasten with a local Markdown vault and SQLite FTS5 index. Runs offline as a self-contained notes system, and can optionally plug into a remote backend for multi-device sync.
+`knoten` is a CLI zettelkasten for people who already live in a terminal and a text editor, and who want their notes to behave like code: plain Markdown on disk, fast full-text search, wiki-links, and a clean scriptable interface for Claude Code and shell tooling.
+
+## What it is
+
+- A **local Markdown vault** — one `.md` file per note, editable in any editor you already use, trackable in git.
+- A **SQLite FTS5 index** built from the vault, so search across thousands of notes returns in milliseconds.
+- A **CLI** — every operation is a `knoten <verb>` command, every command returns JSON when asked, every command is safe to call from a script or an agent.
+- An **optional remote backend** for multi-device sync. Never required — local mode is fully featured on its own.
+
+## What it does
+
+- **Offline-first.** The Markdown vault is the source of truth; SQLite is a derived index that catches up to external edits on every invocation. Edit `.md` files in Neovim, VS Code, or Obsidian and the next `knoten` call picks up the changes via an mtime-gated stat walk.
+- **Ranked full-text search.** Title > filename > body, with snippets, tag/family/kind filters, and an opt-in `--fuzzy` mode for typo-tolerant and substring queries (trigram FTS + rapidfuzz on titles).
+- **Wiki-link graph.** `knoten graph <note> --depth 2 --direction both` returns the BFS neighbourhood of any note — nodes with distances, plus edges — for broadened search without guessing exact titles.
+- **Soft delete and rename cascade.** `knoten delete` moves files to `<vault>/.trash/` (reversible via `knoten restore`). `knoten rename` rewrites `[[old]]` wiki-links in every referencing note and rolls back on partial failure.
+- **Pluggable remote backend (optional).** Point `KNOTEN_API_URL` at a compatible HTTP backend and the vault becomes a multi-device mirror. Reads stay local; writes hit the remote first, then refresh the local copy. No public backend is bundled — local mode is fully featured without one.
+
+## Who it's for
+
+- A solo researcher or developer who wants **wiki-linked Markdown without a heavyweight app** — no Electron, no browser, no daemon.
+- Anyone building **Claude Code skills** that need a queryable knowledge base — every command takes `--json`, the envelopes are stable, and a generic example skill ships in the repo at [`SKILL.md`](https://github.com/vcoeur/knoten/blob/main/SKILL.md).
+- Users who **already version their notes in git** and want the index to catch up to whatever they edit outside the CLI.
 
 ## Install
 
 ```bash
 pipx install knoten
-# or
-uv tool install knoten
+# or: uv tool install knoten
 ```
 
-Both install `knoten` into its own isolated venv and put it on your `$PATH`. See [Install](install.md) for the long-form guide and cross-OS paths.
+That is enough to start. The vault, the SQLite index, and a commented `.env` are all created lazily on the first command — no `init` step required.
 
-## 60-second quickstart
+## Learn more, in order
 
-```bash
-# Create your first note — vault + SQLite index auto-create on demand.
-knoten create --filename "- First thought" --body "Hello from my new vault."
+The pages are written to be read top-to-bottom the first time:
 
-# Read, list, search — all offline.
-knoten list
-knoten search "hello"
-knoten read "- First thought"
-```
+1. **[Quick start](quick-start.md)** — install the CLI, drop the example Claude Code skill into place, and run your first session: create a note, search it, follow a wiki-link, rename with cascade — all through natural-language requests to `/knoten`.
+2. **[Vault structure](vault-structure.md)** — how I organise my own vault. Note families with prefixes (`@` person, `$` organization, `%` entity, `&` topic, `!` permanent, `-` fleeting, `YYYY-MM-DD` day/journal, `Key=` reference, `Key.` literature), filename conventions, wiki-links, entity stubs, the journal-vs-permanent distinction, and how [`quelle`](https://quelle.vcoeur.com) feeds literature notes from DOIs and arXiv IDs.
+3. **Reference** — the long form: [Install](install.md) (cross-OS paths, remote mode, upgrade notes) and [Commands](commands.md) (every verb, every flag, every envelope).
 
-Example output:
+## Links
 
-```
-$ knoten search "hello"
-1. - First thought                         2026-04-15  [ ]
-   "… **Hello** from my new vault. …"
-```
-
-All commands accept `--json` for machine-readable output. See [Commands](commands.md) for the full reference.
-
-## What it does
-
-- **Offline-first.** The local Markdown vault is the source of truth; SQLite is a derived FTS5 index that catches up to external edits on every invocation. Edit `.md` files in any editor — the next `knoten` invocation picks up the changes via a mtime-gated stat walk.
-- **Fast search.** Ranked full-text search (title > filename > body), with `--fuzzy` for typo-tolerant queries (trigram FTS + rapidfuzz on titles) and `--tag` / `--family` / `--kind` filters.
-- **Wiki-link graph.** `knoten graph <target> --depth 2 --direction both` returns the BFS neighbourhood of a note — nodes with their distance from the start, plus edges — for broadened search.
-- **Soft delete and rename cascade.** `knoten delete` moves files to `<vault>/.trash/` (reversible via `knoten restore`); `knoten rename` rewrites `[[old]]` wiki-links in every referencing note and rolls back on partial failure.
-- **Pluggable remote backend (optional).** Set `KNOTEN_API_URL` to a compatible backend and knoten becomes a multi-device mirror: reads stay offline, writes hit the remote first and refresh the local copy. The author runs an experimental backend instance used to validate the sync protocol — no public backend is bundled, and the CLI is fully usable without one.
-
-## Why knoten
-
-A zettelkasten you can run without a server, without a browser, and without losing the plot: the vault is just Markdown files, the index rebuilds itself, and the CLI is scriptable (every command takes `--json`). Good for personal research notes, Claude skills that need to query a knowledge base, and anyone who wants wiki-linked Markdown without a heavyweight app.
-
-## Learn more
-
-- [Install guide](install.md) — prerequisites, first-run config, cross-OS paths, remote-mode setup
-- [Commands](commands.md) — full CLI reference
 - [Source on GitHub](https://github.com/vcoeur/knoten)
 - [`knoten` on PyPI](https://pypi.org/project/knoten/)
+- [Author](https://vcoeur.com)

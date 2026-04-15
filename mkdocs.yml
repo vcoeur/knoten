@@ -71,6 +71,9 @@ markdown_extensions:
       custom_checkbox: true
 
 nav:
-  - Home: index.md
-  - Install: install.md
-  - Commands: commands.md
+  - Overview: index.md
+  - Quick start: quick-start.md
+  - Vault structure: vault-structure.md
+  - Reference:
+      - Install: install.md
+      - Commands: commands.md
