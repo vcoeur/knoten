@@ -3,20 +3,22 @@
 Standalone CLI zettelkasten with a local markdown vault + SQLite FTS5 index. Runs in two modes:
 
 - **Local mode** (default): a self-contained zettelkasten. No server, no network, no token. The vault is the source of truth; SQLite is a derived index that catches up to external edits automatically on each CLI invocation. This is all you need if you just want a fast, text-editor-friendly notes system.
-- **Remote mode**: mirrors a [notes.vcoeur.com](https://notes.vcoeur.com) instance. Reads stay offline against the local index; writes go to the remote first and refresh the mirror.
+- **Remote mode**: syncs with a pluggable remote backend for multi-device mirroring. Reads stay offline against the local index; writes go to the backend first and refresh the mirror.
 
 Both modes share the same CLI surface — the only difference is where data lives. Set `KNOTEN_API_URL` in your environment to switch to remote mode; leave it empty (the default) for local mode.
 
+> **About the backend.** knoten does not bundle or host a public backend. The protocol is designed so anyone can run their own. The author is currently running an experimental instance to validate the sync contract — it is not a hosted product, not advertised, and not open to the public.
+
 ## What it does
 
-- **`knoten sync`** — pull new / changed notes from `notes.vcoeur.com` into a local markdown mirror and SQLite FTS5 index. Always runs delete detection and reconciliation (re-fetch missing files, remove orphans). Add `--verify` for full body-hash verification.
+- **`knoten sync`** — pull new / changed notes from the configured backend into a local markdown mirror and SQLite FTS5 index. Always runs delete detection and reconciliation (re-fetch missing files, remove orphans). Add `--verify` for full body-hash verification.
 - **`knoten verify`** — run SQLite integrity check, FTS5 / notes cardinality check, file existence + orphan cleanup. Add `--hashes` to compare every file against its recorded body hash.
 - **`knoten reindex`** — rebuild derived tables (FTS5, tags, wikilinks, frontmatter fields) from the `notes` table + on-disk files. No network. Use when `verify` reports FTS5 drift or when you are offline.
 - **`knoten search "query"`** — full-text search on the local index, with snippets, ranking (title > filename > body), filters (`--family`, `--kind`, `--tag`), JSON output. Pass `--fuzzy` for typo-tolerant + substring match (trigram FTS + rapidfuzz on titles).
 - **`knoten read <id|filename>`** — full note body + wiki-links + backlinks, resolved from the local mirror (no network hit).
 - **`knoten backlinks <target>`**, **`knoten list`**, **`knoten tags`**, **`knoten kinds`** — metadata queries, all offline.
 - **`knoten graph <target> --depth N --direction out|in|both`** — BFS wiki-link neighbourhood for broadened search. Returns nodes with their distance from the start, plus edges. Depth 0-5.
-- **`knoten create`**, **`knoten edit`**, **`knoten append`**, **`knoten delete`**, **`knoten restore`**, **`knoten rename`**, **`knoten upload`**, **`knoten download`** — write / attachment operations that hit `notes.vcoeur.com` first, then refresh the affected note locally. The local mirror is never authoritative.
+- **`knoten create`**, **`knoten edit`**, **`knoten append`**, **`knoten delete`**, **`knoten restore`**, **`knoten rename`**, **`knoten upload`**, **`knoten download`** — write / attachment operations that hit the configured backend first, then refresh the affected note locally. The local mirror is never authoritative.
 - **`knoten status`** / **`knoten config show`** / **`knoten config path`** / **`knoten config edit`** / **`knoten init`** — inspect the mirror, see the effective configuration, open the `.env` in your editor, or bootstrap the vault + state dirs. All offline.
 
 All commands accept `--json` for machine-parseable output. On a TTY without `--json`, output is rendered with rich (tables, snippet highlighting). Claude skills should always pass `--json`.
@@ -29,7 +31,7 @@ Example:
 
 ```
 $ knoten sync
-→ Syncing from https://notes.vcoeur.com
+→ Syncing from https://your-backend.example.com
   cursor: notes updated after 2026-04-12T08:25:54Z
   page 1: 100 items, 3 newer than cursor (remote total 2041)
     ↓ fetching '! New core insight'
@@ -82,9 +84,9 @@ tests/             <- mirror the knoten layout
 Read rules:
 
 - **Reads never hit the network.** Every command except `sync`, `verify`, and the write / attachment operations below resolves against the local mirror + sqlite. If the mirror is stale, Claude sees stale data until the next explicit `sync` — a deliberate choice for predictable latency.
-- **Writes always hit the network in remote mode.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
+- **Writes always hit the network in remote mode.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call the configured backend first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
 - **Local mode is filesystem-authoritative.** The vault is the source of truth; SQLite is derived. Every CLI invocation first runs a mtime-gated stat walk that picks up external edits (e.g. files you edited in your text editor), new files dropped into the vault, and external deletes. `knoten delete` moves files to `<vault>/.trash/` (reversible via `knoten restore`); `rm foo.md` in a shell is a permanent delete (the walk drops the store row and there is no trash copy to restore from).
-- **Rename cascades across referencing notes** in both modes. Rename rewrites `[[old-filename]]` to `[[new-filename]]` in every other note whose body referenced the renamed one. In remote mode the server does the rewrite and returns an `affectedNotes` envelope (notes.vcoeur.com v2.9.0+); in local mode knoten does the same rewrite by walking the `wikilinks` index. Rollback on partial failure restores the original bytes of every file it touched before re-raising.
+- **Rename cascades across referencing notes** in both modes. Rename rewrites `[[old-filename]]` to `[[new-filename]]` in every other note whose body referenced the renamed one. In remote mode the backend does the rewrite and returns an `affectedNotes` envelope (if the backend supports it); in local mode knoten does the same rewrite by walking the `wikilinks` index. Rollback on partial failure restores the original bytes of every file it touched before re-raising.
 
 ## Local-only mode — quickstart
 
@@ -151,13 +153,13 @@ Optional bootstrap — pre-seed a commented `.env` and create the vault dirs up 
 knoten init
 ```
 
-For remote mode (mirroring a `notes.vcoeur.com` instance), edit your `.env` and add `KNOTEN_API_URL` + `KNOTEN_API_TOKEN`:
+For remote mode (syncing with a compatible backend), edit your `.env` and add `KNOTEN_API_URL` + `KNOTEN_API_TOKEN`:
 
 ```bash
 knoten config edit          # opens your .env in $EDITOR
 ```
 
-Getting an API token: open your `notes.vcoeur.com` instance, go to settings → tokens, create a new one with the `api` scope, paste it into the `.env` as `KNOTEN_API_TOKEN`. The token is shown only once.
+Getting an API token depends on the backend. Whichever one you point `KNOTEN_API_URL` at needs to expose a way to issue a scoped token — typically a `settings → tokens` screen with an `api` scope, shown once at creation. Paste it into `.env` as `KNOTEN_API_TOKEN`.
 
 ### Development from a source checkout
 
@@ -256,7 +258,11 @@ make sync       # incremental sync
 make sync-full  # full rebuild
 ```
 
-Tests use pytest-httpx to mock `notes.vcoeur.com` — there is no dependency on a running server for the unit test suite.
+Tests use pytest-httpx to mock the backend — there is no dependency on a running server for the unit test suite.
+
+## Claude Code skill
+
+A minimal example [`SKILL.md`](SKILL.md) ships at the repo root — drop it into `~/.claude/skills/knoten/` (or `<project>/.claude/skills/knoten/`) to drive the CLI from a Claude Code session. It is deliberately generic: search, read, list, backlinks, graph, and the write commands, with no opinion about vault conventions. Fork it and add your own rules.
 
 ## Status
 

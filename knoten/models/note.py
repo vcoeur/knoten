@@ -1,4 +1,4 @@
-"""Core note models — pure dataclasses mirrored from the notes.vcoeur.com API."""
+"""Core note models — pure dataclasses mirrored from the remote-backend API."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 MCP_PERMISSIONS: tuple[str, ...] = ("NONE", "LIST", "READ", "APPEND", "WRITE", "ALL")
-"""Ordered (cumulative) MCP permission levels — mirrors notes.vcoeur.com.
+"""Ordered (cumulative) MCP permission levels — mirrors the remote backend.
 
 Each level grants all capabilities of the lower levels. `ALL` is the default
 for every note the server creates. A note at `APPEND` cannot be freely

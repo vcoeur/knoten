@@ -1,6 +1,6 @@
-"""Translate notes.vcoeur.com API payloads into domain models.
+"""Translate remote-backend API payloads into domain models.
 
-The remote returns raw dicts from the Hono routes. This module is the single
+The remote returns raw dicts from its HTTP routes. This module is the single
 place where that shape is interpreted — every other layer consumes the typed
 models from `app.models`.
 """

@@ -3,7 +3,7 @@
 Operates on a markdown vault under `settings.paths.vault_dir` with a local
 `Store` (SQLite + FTS5) as a derived index. No network, no permission
 model — a standalone zettelkasten CLI for users who do not want to run
-their own `notes.vcoeur.com` instance.
+their own remote backend.
 
 Phase 5: read path (`list_note_summaries`, `read_note`) plus a
 mtime-gated stat walk in `_refresh_index_if_stale` that detects external

@@ -1,6 +1,6 @@
 ---
 title: Install · knoten
-description: How to install knoten, bootstrap the vault, and configure optional remote-mode sync with notes.vcoeur.com.
+description: How to install knoten, bootstrap the vault, and configure optional remote-mode sync with a compatible backend.
 ---
 
 # Install
@@ -40,20 +40,25 @@ knoten status
 
 ## Remote mode
 
-To mirror a [`notes.vcoeur.com`](https://notes.vcoeur.com) instance, edit your `.env`:
+Remote mode turns the local vault into a mirror of a **compatible backend** — any HTTP service that implements the knoten sync protocol. Local mode is fully featured on its own; remote mode only adds multi-device sync.
+
+!!! note "About the backend"
+    knoten does not bundle or host a public backend. The protocol is designed so anyone can run their own. The author is currently running an experimental instance to validate the sync contract; it is not a hosted product, not advertised, and not open to the public.
+
+To enable remote mode, edit your `.env`:
 
 ```bash
 knoten config edit                # opens $KNOTEN_CONFIG_DIR/.env in $EDITOR
 ```
 
-Set:
+Set the URL of your backend and an API token:
 
 ```env
-KNOTEN_API_URL=https://notes.vcoeur.com
+KNOTEN_API_URL=https://your-backend.example.com
 KNOTEN_API_TOKEN=<paste your token here>
 ```
 
-**Getting an API token**: open your `notes.vcoeur.com` instance, go to **settings → tokens**, create a new one with the `api` scope, paste it into `.env`. The token is shown only once.
+**Getting an API token** depends on the backend. Whichever one you point `KNOTEN_API_URL` at needs to expose a way to issue a scoped token — typically a `settings → tokens` screen with an `api` scope, shown once at creation. Paste it into `.env`.
 
 First sync:
 

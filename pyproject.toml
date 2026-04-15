@@ -1,7 +1,7 @@
 [project]
 name = "knoten"
 version = "0.2.0"
-description = "Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index; can also mirror a notes.vcoeur.com instance"
+description = "Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index; optionally plugs into a remote backend for multi-device sync"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Alice Voland" }]
@@ -28,7 +28,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vcoeur/knoten"
+Homepage = "https://knoten.vcoeur.com/"
+Documentation = "https://knoten.vcoeur.com/"
 Repository = "https://github.com/vcoeur/knoten"
 Issues = "https://github.com/vcoeur/knoten/issues"
 

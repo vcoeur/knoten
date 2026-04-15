@@ -6,7 +6,7 @@ Standalone zettelkasten CLI. Primary consumer is Claude itself (via a `knoten` s
 
 - **Not deployed.** Per-laptop tool, installed globally via `uv tool install .`.
 - **No daemon / server.** Every invocation is a short-lived CLI process.
-- **Two modes** (see `## Backends` below): `local` operates on an on-disk vault as the source of truth; `remote` mirrors a `notes.vcoeur.com` instance with the server as authority. `KNOTEN_MODE=auto` (default) picks local when `KNOTEN_API_URL` is empty and remote otherwise.
+- **Two modes** (see `## Backends` below): `local` operates on an on-disk vault as the source of truth; `remote` mirrors a compatible remote backend with the server as authority. `KNOTEN_MODE=auto` (default) picks local when `KNOTEN_API_URL` is empty and remote otherwise.
 
 ## Stack
 
@@ -40,7 +40,7 @@ Every CLI command talks to a single `Backend` protocol defined in `knoten/reposi
 
 | Backend | File | Source of truth | Network | Auth |
 |---|---|---|---|---|
-| `RemoteBackend` | `knoten/repositories/remote_backend.py` | `notes.vcoeur.com` server | every mutation + sync | `KNOTEN_API_TOKEN` (Bearer) |
+| `RemoteBackend` | `knoten/repositories/remote_backend.py` | compatible remote HTTP backend | every mutation + sync | `KNOTEN_API_TOKEN` (Bearer) |
 | `LocalBackend` | `knoten/repositories/local_backend.py` | the on-disk markdown vault | never | none |
 
 The protocol has 8 business methods: `list_note_summaries`, `read_note`, `create_note`, `update_note` (returns `NoteUpdateResult` with the rename cascade's `affected_notes` list), `append_to_note`, `delete_note`, `restore_note`, `upload_attachment`, `download_attachment`, plus `close`. Shapes live in `knoten/repositories/backend.py` as frozen dataclasses — `NotesPage`, `NoteDraft`, `NotePatch`, `NoteUpdateResult`, `AttachmentUploadResult`, `AttachmentDownloadResult`. Services depend on the protocol, not on either implementation, so the same `edit_note_remote` / `create_note_remote` helpers drive both backends.
@@ -118,7 +118,7 @@ make tool-install  # install `knoten` globally via `uv tool install`
 - Backend protocol + data types: `knoten/repositories/backend.py`.
 - Remote implementation: `knoten/repositories/remote_backend.py` — bearer-token httpx wrapper. All exceptions inherit from `knoten/repositories/errors.py`.
 - Local implementation: `knoten/repositories/local_backend.py` — filesystem + Store. See the `## Backends` section for the LocalBackend-specific gotchas (stat walk, trash, rename cascade).
-- Filename parser: `knoten/services/knoten_filename.py` — Python port of `notes.vcoeur.com/packages/shared/src/kasten.ts`. LocalBackend uses it to derive family + source from a `NoteDraft.filename` on create and rename.
+- Filename parser: `knoten/services/knoten_filename.py` — Python port of the upstream backend's TypeScript filename parser. LocalBackend uses it to derive family + source from a `NoteDraft.filename` on create and rename.
 - Store: `knoten/repositories/store.py` — schema in `_SCHEMA`, all queries are explicit SQL strings (no ORM).
 - FTS5 search: `Store.search()` — weights `(1.0, 10.0, 1.0, 5.0)` map to (note_id, title, body, filename). Keep the UNINDEXED `note_id` weight in the list or bm25 silently mis-weights.
 - Fuzzy search: `Store.search_fuzzy()` — combines a second FTS5 virtual table `notes_fts_trigram` (tokenize='trigram', used for substring matching) with a `rapidfuzz.process.extract` pass over titles+filenames. Both FTS tables must stay in sync: `upsert_note`, `upsert_placeholder`, and `delete_note` all write to both, and `fts_cardinality_check` covers both. Combined score = rapidfuzz WRatio (0..100) + 30 if the note is also a trigram substring hit.

@@ -1,1 +1,1 @@
-"""knoten — local CLI mirror and search for notes.vcoeur.com."""
+"""knoten — standalone CLI zettelkasten with optional remote-backend sync."""

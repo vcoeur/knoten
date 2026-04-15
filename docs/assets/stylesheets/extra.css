@@ -116,7 +116,8 @@
   margin-bottom: 1.75rem;
 }
 
-/* Body typography matches vcoeur.com's 1.7 line-height */
+/* Body typography — compact 14.4px with vcoeur.com's 1.7 line-height */
 .md-typeset {
+  font-size: 0.72rem;
   line-height: 1.7;
 }

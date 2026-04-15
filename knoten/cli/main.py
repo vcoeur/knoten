@@ -78,7 +78,10 @@ from knoten.services.sync import full_sync, incremental_sync
 from knoten.settings import Settings, load_settings
 
 app = typer.Typer(
-    help="Local CLI mirror and search for notes.vcoeur.com. Designed for Claude.",
+    help=(
+        "Standalone CLI zettelkasten — local Markdown vault + SQLite FTS5 "
+        "search, with optional remote-backend sync."
+    ),
     no_args_is_help=True,
     add_completion=False,
 )
@@ -221,7 +224,7 @@ def cmd_sync(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON to stdout"),
 ) -> None:
-    """Pull new/changed notes from notes.vcoeur.com into the local mirror.
+    """Pull new/changed notes from the configured remote backend into the local mirror.
 
     Every sync (incremental or `--full`) always:
 
@@ -788,7 +791,7 @@ def cmd_create(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Create a new note on notes.vcoeur.com and mirror it locally."""
+    """Create a new note on the configured remote backend and mirror it locally."""
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
@@ -866,7 +869,7 @@ def cmd_edit(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Edit a note on notes.vcoeur.com and refresh the local mirror."""
+    """Edit a note on the configured remote backend and refresh the local mirror."""
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
@@ -989,7 +992,7 @@ def cmd_delete(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Soft-delete a note (move to trash on notes.vcoeur.com)."""
+    """Soft-delete a note (move to trash on the configured remote backend)."""
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()

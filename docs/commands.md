@@ -69,7 +69,7 @@ knoten kinds --json
 
 ## Write commands
 
-In remote mode, writes hit `notes.vcoeur.com` first and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
+In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_URL` points at) and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
 
 ### `knoten create`
 

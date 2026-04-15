@@ -1,13 +1,13 @@
 ---
 title: knoten — CLI zettelkasten
-description: Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index. Offline-first; optional sync with notes.vcoeur.com.
+description: Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index. Offline-first, with an optional pluggable remote backend for multi-device sync.
 ---
 
 # knoten
 
 <p class="tagline">Notes, knotted together.</p>
 
-Standalone CLI zettelkasten with a local Markdown vault and SQLite FTS5 index. Runs offline as a self-contained notes system; mirrors a [notes.vcoeur.com](https://notes.vcoeur.com) instance when you want it to.
+Standalone CLI zettelkasten with a local Markdown vault and SQLite FTS5 index. Runs offline as a self-contained notes system, and can optionally plug into a remote backend for multi-device sync.
 
 ## Install
 
@@ -47,7 +47,7 @@ All commands accept `--json` for machine-readable output. See [Commands](command
 - **Fast search.** Ranked full-text search (title > filename > body), with `--fuzzy` for typo-tolerant queries (trigram FTS + rapidfuzz on titles) and `--tag` / `--family` / `--kind` filters.
 - **Wiki-link graph.** `knoten graph <target> --depth 2 --direction both` returns the BFS neighbourhood of a note — nodes with their distance from the start, plus edges — for broadened search.
 - **Soft delete and rename cascade.** `knoten delete` moves files to `<vault>/.trash/` (reversible via `knoten restore`); `knoten rename` rewrites `[[old]]` wiki-links in every referencing note and rolls back on partial failure.
-- **Remote sync (optional).** Set `KNOTEN_API_URL` to mirror a `notes.vcoeur.com` instance. Reads stay offline; writes hit the remote first and refresh the local mirror.
+- **Pluggable remote backend (optional).** Set `KNOTEN_API_URL` to a compatible backend and knoten becomes a multi-device mirror: reads stay offline, writes hit the remote first and refresh the local copy. The author runs an experimental backend instance used to validate the sync protocol — no public backend is bundled, and the CLI is fully usable without one.
 
 ## Why knoten
 

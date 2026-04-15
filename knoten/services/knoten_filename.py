@@ -1,10 +1,10 @@
 """Parse and generate Kasten-style filenames.
 
-Python port of `notes.vcoeur.com/packages/shared/src/kasten.ts`. Kept
+Python port of the upstream backend's TypeScript filename parser. Kept
 behaviourally identical so a vault produced by either side parses the
-same way — the server is still authoritative for any remote note, but
-`LocalBackend` needs the same rules when a file is created or renamed
-against a local-only vault.
+same way — the remote backend is still authoritative for any remote
+note, but `LocalBackend` needs the same rules when a file is created or
+renamed against a local-only vault.
 
 Three-level hierarchy: *directory → family → kind*. Family is derived
 from the filename prefix symbol and is immutable. Kind is usually equal
@@ -69,8 +69,8 @@ class ParsedFilename:
 def parse_knoten_filename(filename: str) -> ParsedFilename:
     """Parse a Kasten filename into `(family, title, source, date)`.
 
-    Mirrors `parseKastenFilename` in `notes.vcoeur.com/packages/shared/src/kasten.ts`.
-    Falls back to the `fleeting` family for unprefixed filenames.
+    Mirrors the upstream backend's `parseKastenFilename`. Falls back to the
+    `fleeting` family for unprefixed filenames.
     """
     trimmed = filename.strip()
     if not trimmed:

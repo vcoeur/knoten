@@ -41,11 +41,11 @@ ENV_EXAMPLE_TEMPLATE = """\
 # Mode selection.
 #   auto   — local if KNOTEN_API_URL is empty, else remote (default)
 #   local  — operate on an on-disk vault only. No network, no token required.
-#   remote — mirror a notes.vcoeur.com instance (requires URL + token below).
+#   remote — mirror a compatible remote backend (requires URL + token below).
 # KNOTEN_MODE=auto
 
-# notes.vcoeur.com API base URL. Leave empty for local mode.
-# Example: KNOTEN_API_URL=https://notes.vcoeur.com
+# Remote backend base URL. Leave empty for local mode.
+# Example: KNOTEN_API_URL=https://your-backend.example.com
 KNOTEN_API_URL=
 
 # API token (Bearer). Only required in remote mode. Must have the `api` scope.
@@ -165,7 +165,7 @@ def init_command() -> None:
         typer.echo("")
         typer.echo(
             "Local mode works out of the box — just run `knoten list` on the empty "
-            "vault. For remote mode (mirror a notes.vcoeur.com instance), set "
+            "vault. For remote mode (sync with a compatible backend), set "
             "KNOTEN_API_URL + KNOTEN_API_TOKEN in the .env."
         )
         typer.echo("Run `knoten config edit` to open it in your editor.")

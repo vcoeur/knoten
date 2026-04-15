@@ -2,7 +2,7 @@
 
 Two implementations will live side by side:
 
-- `RemoteBackend` talks to `notes.vcoeur.com` over HTTP (current behaviour).
+- `RemoteBackend` talks to a compatible remote backend over HTTP.
 - `LocalBackend` operates on an on-disk markdown vault + local SQLite index.
 
 The service layer is typed against this `Protocol` and has no knowledge of

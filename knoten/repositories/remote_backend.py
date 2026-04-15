@@ -1,4 +1,4 @@
-"""HTTP-backed `Backend` implementation — talks to `notes.vcoeur.com`.
+"""HTTP-backed `Backend` implementation — talks to a compatible remote backend.
 
 Thin typed wrapper around httpx. All methods raise the exception types from
 `app.repositories.errors` so the service layer stays backend-agnostic. The
@@ -46,7 +46,7 @@ def _parse_disposition_filename(header: str) -> str | None:
 
 
 class RemoteBackend(Backend):
-    """Bearer-token client for the `notes.vcoeur.com` REST API.
+    """Bearer-token client for a knoten-compatible remote backend's REST API.
 
     Honours the `Backend` protocol. Mutations return the post-mutation
     envelope the service layer actually consumes — a plain id string from

@@ -12,7 +12,7 @@ dev-install: ## Install dev dependencies too
 run: ## Run the knoten CLI (pass args after --, e.g. make run -- status)
 	uv run knoten
 
-sync: ## Incremental sync from notes.vcoeur.com
+sync: ## Incremental sync from the configured remote backend
 	uv run knoten sync
 
 sync-full: ## Full export-based rebuild

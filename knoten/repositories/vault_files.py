@@ -1,7 +1,7 @@
 """Filesystem mirror: writes note markdown files with YAML frontmatter.
 
-Mirrors the format of notes.vcoeur.com's export endpoint so that the local
-vault is a superset of what `knoten sync --full` can ingest directly.
+Mirrors the format of the remote backend's export endpoint so that the
+local vault is a superset of what `knoten sync --full` can ingest directly.
 
 One file per note. Atomic writes (tmp + rename). Old files at a stale path
 are removed when a note is renamed.
@@ -15,10 +15,9 @@ from typing import Any
 
 from knoten.models import Note, NoteSummary
 
-# Mirrors notes.vcoeur.com's export layout — see
-# `packages/shared/src/kasten.ts:FAMILY_TO_DIRECTORY` and
-# `packages/server/src/services/export.ts`. The `docs/api.md` file shows
-# underscore-prefixed names, but that is stale — the code uses bare names.
+# Mirrors the remote backend's export layout. The `docs/api.md` file on
+# upstream backends has sometimes shown underscore-prefixed names, but the
+# canonical layout uses bare names.
 _FAMILY_DIRS = {
     "person": "entity",
     "organization": "entity",
@@ -104,8 +103,8 @@ def render_placeholder_markdown(summary: NoteSummary) -> str:
     lines.append("")
     lines.append(
         "_Body not fetchable — the current API token does not have READ "
-        "permission for this note. Open it on notes.vcoeur.com (as the web "
-        "user) to see its content._"
+        "permission for this note. Open it in your remote backend's web "
+        "UI (as a user with access) to see its content._"
     )
     lines.append("")
     return "\n".join(lines)

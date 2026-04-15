@@ -2,7 +2,7 @@ site_name: knoten
 site_url: https://knoten.vcoeur.com/
 site_description: Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index.
 site_author: Alice Voland
-copyright: "&copy; Alice Voland"
+copyright: 'Developed by Alice Voland &middot; <a href="https://vcoeur.com">vcoeur.com</a>'
 
 repo_url: https://github.com/vcoeur/knoten
 repo_name: vcoeur/knoten
