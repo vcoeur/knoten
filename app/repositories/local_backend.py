@@ -578,10 +578,51 @@ class LocalBackend(Backend):
         content_type: str | None = None,
         source: str | None = None,
     ) -> AttachmentUploadResult:
-        raise NotImplementedError("LocalBackend attachments land in Phase 7")
+        self._refresh_index_if_stale()
+        if not path.is_file():
+            raise UserError(f"Not a file: {path}")
+
+        suffix = path.suffix
+        storage_key = f"{uuid.uuid4().hex}{suffix}"
+        attachments_dir = self._vault_dir / ".attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        destination = attachments_dir / storage_key
+        destination.write_bytes(path.read_bytes())
+
+        size_bytes = destination.stat().st_size
+        self._store.record_attachment(
+            storage_key=storage_key,
+            original_name=path.name,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            source=source,
+            created_at=_utcnow_iso(),
+        )
+        return AttachmentUploadResult(
+            storage_key=storage_key,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            url=None,
+        )
 
     def download_attachment(self, storage_key: str, destination: Path) -> AttachmentDownloadResult:
-        raise NotImplementedError("LocalBackend attachments land in Phase 7")
+        self._refresh_index_if_stale()
+        row = self._store.find_attachment(storage_key)
+        if row is None:
+            raise NotFoundError(f"No attachment with storage_key {storage_key}")
+
+        source_abs = self._vault_dir / ".attachments" / storage_key
+        if not source_abs.exists():
+            raise NotFoundError(f"Attachment blob missing on disk: {source_abs}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source_abs.read_bytes())
+        return AttachmentDownloadResult(
+            path=destination,
+            bytes_written=destination.stat().st_size,
+            content_type=row.get("content_type") or "",
+            filename=row.get("original_name"),
+        )
 
 
 def _strip_frontmatter(text: str) -> str:

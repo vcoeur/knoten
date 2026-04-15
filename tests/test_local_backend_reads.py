@@ -137,11 +137,21 @@ def test_read_note_missing_id_raises_not_found(tmp_settings: Settings) -> None:
         backend.read_note("00000000-0000-0000-0000-000000000000")
 
 
-def test_attachments_still_raise_not_implemented(tmp_settings: Settings) -> None:
-    """Attachments are the last protocol slice still stubbed — Phase 7 lands them."""
+def test_attachments_round_trip(tmp_settings: Settings, tmp_path) -> None:
+    """Phase 7: attachments live under `<vault>/.attachments/<storage_key>`."""
     _seed_vault(tmp_settings)
+    sample = tmp_path / "sample.pdf"
+    sample.write_bytes(b"PDFDATA")
+
     with LocalBackend(tmp_settings) as backend:
-        with pytest.raises(NotImplementedError):
-            backend.upload_attachment(tmp_settings.vault_dir / "anything.pdf")
-        with pytest.raises(NotImplementedError):
-            backend.download_attachment("stub", tmp_settings.vault_dir / "out.bin")
+        upload = backend.upload_attachment(sample, content_type="application/pdf")
+        assert upload.storage_key
+        assert upload.size_bytes == 7
+
+        dest = tmp_path / "roundtrip.pdf"
+        download = backend.download_attachment(upload.storage_key, dest)
+
+    assert dest.read_bytes() == b"PDFDATA"
+    assert download.bytes_written == 7
+    assert download.content_type == "application/pdf"
+    assert download.filename == "sample.pdf"

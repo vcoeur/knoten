@@ -61,6 +61,12 @@ def _default_home() -> Path:
     return FALLBACK_HOME
 
 
+MODE_REMOTE = "remote"
+MODE_LOCAL = "local"
+MODE_AUTO = "auto"
+_VALID_MODES = frozenset({MODE_REMOTE, MODE_LOCAL, MODE_AUTO})
+
+
 @dataclass(frozen=True)
 class Settings:
     """Effective configuration for a single CLI invocation."""
@@ -75,6 +81,7 @@ class Settings:
     state_file: Path
     lock_file: Path
     tmp_dir: Path
+    mode: str = MODE_AUTO
 
     @property
     def token_redacted(self) -> str:
@@ -83,6 +90,19 @@ class Settings:
             return ""
         prefix, _, _ = self.api_token.partition("_")
         return f"{prefix}_******" if prefix else "******"
+
+    @property
+    def effective_mode(self) -> str:
+        """Return 'local' or 'remote' after resolving `auto`.
+
+        `auto` → `local` if `api_url` is empty, else `remote`. Explicit
+        `local` / `remote` are honoured as-is.
+        """
+        if self.mode == MODE_LOCAL:
+            return MODE_LOCAL
+        if self.mode == MODE_REMOTE:
+            return MODE_REMOTE
+        return MODE_LOCAL if not self.api_url else MODE_REMOTE
 
 
 def _env_file_candidates(explicit: Path | None) -> list[Path]:
@@ -173,8 +193,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
     vault_dir = home / env.str("KASTEN_VAULT_DIR", "kasten")
     state_dir = home / env.str("KASTEN_STATE_DIR", ".kasten-state")
 
+    mode = env.str("KASTEN_MODE", MODE_AUTO).strip().lower() or MODE_AUTO
+    if mode not in _VALID_MODES:
+        from app.repositories.errors import ConfigError
+
+        raise ConfigError(f"KASTEN_MODE must be one of {sorted(_VALID_MODES)}, got {mode!r}")
+
     return Settings(
-        api_url=env.str("KASTEN_API_URL", "https://notes.vcoeur.com").rstrip("/"),
+        api_url=env.str("KASTEN_API_URL", "").rstrip("/"),
         api_token=env.str("KASTEN_API_TOKEN", ""),
         http_timeout=env.float("KASTEN_HTTP_TIMEOUT", 30.0),
         home=home,
@@ -184,6 +210,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         state_file=state_dir / "state.json",
         lock_file=state_dir / "sync.lock",
         tmp_dir=state_dir / "tmp",
+        mode=mode,
     )
 
 

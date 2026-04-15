@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from app.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from app.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS trashed_notes (
     deleted_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trashed_filename ON trashed_notes(filename);
+
+-- Local-mode attachment metadata. Files live at
+-- `<vault>/.attachments/<storage_key>`; this table is the authoritative
+-- mapping the backend uses to find them when downloading.
+CREATE TABLE IF NOT EXISTS attachments (
+    storage_key    TEXT PRIMARY KEY,
+    original_name  TEXT NOT NULL,
+    content_type   TEXT,
+    size_bytes     INTEGER NOT NULL DEFAULT 0,
+    source         TEXT,
+    created_at     TEXT NOT NULL
+);
 """
 
 
@@ -307,6 +319,10 @@ class Store:
             # CREATE TABLE via executescript, so here we only need to bump the
             # version. Any pre-v6 database had no soft-delete, so the table
             # starts empty.
+            pass
+        if from_version < 7:
+            # v6 -> v7: attachments table for LocalBackend. Same story —
+            # CREATE TABLE IF NOT EXISTS in _SCHEMA already fired.
             pass
 
     def _read_meta(self, key: str) -> str | None:
@@ -583,6 +599,33 @@ class Store:
         """Drop a row from `trashed_notes` after restore (or permanent delete)."""
         with self.transaction() as conn:
             conn.execute("DELETE FROM trashed_notes WHERE id = ?", (note_id,))
+
+    def record_attachment(
+        self,
+        *,
+        storage_key: str,
+        original_name: str,
+        content_type: str | None,
+        size_bytes: int,
+        source: str | None,
+        created_at: str,
+    ) -> None:
+        """Insert a row in `attachments` describing a stored blob."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO attachments
+                    (storage_key, original_name, content_type, size_bytes, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (storage_key, original_name, content_type, size_bytes, source, created_at),
+            )
+
+    def find_attachment(self, storage_key: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM attachments WHERE storage_key = ?", (storage_key,)
+        ).fetchone()
+        return dict(row) if row else None
 
     def record_file_stat(self, note_id: str, *, path_mtime_ns: int, path_size: int) -> None:
         """Record the `(mtime_ns, size)` tuple for a note's mirror file.

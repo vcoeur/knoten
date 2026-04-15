@@ -52,6 +52,7 @@ from app.repositories.errors import (
 from app.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
+from app.repositories.local_backend import LocalBackend
 from app.repositories.lock import acquire_lock
 from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
@@ -105,6 +106,10 @@ def _load() -> Settings:
 
 
 def _require_token(settings: Settings) -> None:
+    if settings.effective_mode == "local":
+        # Local mode has no server to authenticate against. The token is
+        # meaningless and every command works without it.
+        return
     if not settings.api_token:
         raise ConfigError(
             "KASTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
@@ -114,16 +119,17 @@ def _require_token(settings: Settings) -> None:
 def _build_backend(settings: Settings) -> Backend:
     """Construct the backend implementation selected by settings.
 
-    Phase 3 stub — every path goes to `RemoteBackend`. The `KASTEN_API_URL`
-    / local-mode branch lands in Phase 7 (attachments + mode selection +
-    CLI wiring) once `LocalBackend` exists. Keeping the helper here now
-    means command sites only ever reference `Backend` at the type level
-    and the switch is a one-line change when local mode lands.
+    Selection: `effective_mode` resolves `KASTEN_MODE=auto` to `local` when
+    `KASTEN_API_URL` is empty and `remote` otherwise. Explicit `remote` /
+    `local` are honoured as-is. Local mode requires no network and no
+    token — any user can run KastenManager against a plain on-disk vault.
     """
+    if settings.effective_mode == "local":
+        return LocalBackend(settings)
     if not settings.api_url:
         raise ConfigError(
-            "KASTEN_API_URL is not set. Local mode is not yet supported — "
-            "point at a notes.vcoeur.com instance in .env for now."
+            "KASTEN_MODE=remote requires KASTEN_API_URL to be set "
+            "(or unset KASTEN_MODE to fall back to local mode)."
         )
     return RemoteBackend(settings)
 
@@ -226,6 +232,20 @@ def cmd_sync(
     progress = make_progress_callback(mode)
     try:
         settings = _load()
+        if settings.effective_mode == "local":
+            # Local mode has no server to sync from. `kasten sync` becomes
+            # a stat-walk reindex: the backend walks the vault on its
+            # first read-path call and catches up external edits.
+            progress("→ Local mode: running reindex walk (no network)")
+            with _build_backend(settings) as backend:
+                page = backend.list_note_summaries(limit=1, offset=0)
+            payload = {
+                "mode": "local",
+                "total": page.total,
+                "message": "Local mode — vault reindexed from disk.",
+            }
+            render_sync_result(payload, mode=mode)
+            return
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
             with _build_backend(settings) as backend:
