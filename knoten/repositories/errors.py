@@ -76,6 +76,34 @@ class PermissionError(UserError):
         self.operation = operation
 
 
+class ValidationError(UserError):
+    """Remote backend rejected a note payload because a frontmatter field
+    value did not match its declared type.
+
+    Raised on HTTP 400 responses whose body is
+    `{"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}` — one issue
+    per offending field, each a dict of `{key, expected, actual, message}`.
+    The backend began enforcing this with `notes.vcoeur.com v2.9.1`;
+    earlier releases silently accepted type-mismatched values.
+
+    The full issues list is preserved on the exception so the CLI can
+    surface it in the structured error envelope under `issues`.
+    """
+
+    def __init__(self, issues: list[dict], *, method: str, path: str) -> None:
+        summary = (
+            "; ".join(
+                f"{issue.get('key', '?')}: {issue.get('message') or issue.get('expected', '?')}"
+                for issue in issues
+            )
+            or "frontmatter type mismatch"
+        )
+        super().__init__(f"{method} {path} rejected by backend validation — {summary}")
+        self.issues = issues
+        self.method = method
+        self.path = path
+
+
 class NetworkError(KnotenError):
     """Remote API unreachable, authentication failed, or returned 5xx."""
 

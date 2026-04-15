@@ -25,7 +25,13 @@ from knoten.repositories.backend import (
     NotesPage,
     NoteUpdateResult,
 )
-from knoten.repositories.errors import AuthError, NetworkError, NoteForbiddenError, NotFoundError
+from knoten.repositories.errors import (
+    AuthError,
+    NetworkError,
+    NoteForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from knoten.services.note_mapper import note_from_api, summary_from_api
 from knoten.settings import Settings
 
@@ -43,6 +49,20 @@ def _parse_disposition_filename(header: str) -> str | None:
     if end == -1:
         return None
     return header[start:end] or None
+
+
+def _safe_json(response: httpx.Response) -> Any:
+    """Return the parsed JSON body, or None if the body is empty / not JSON.
+
+    Used by `_request` to peek at error-response envelopes without ever
+    raising while inside the error-handling branch.
+    """
+    if not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
 
 
 class RemoteBackend(Backend):
@@ -254,6 +274,19 @@ class RemoteBackend(Backend):
             raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")
         if response.status_code == 404 and note_id is not None:
             raise NoteForbiddenError(note_id)
+        if response.status_code == 400:
+            # Structured VALIDATION_ERROR envelope from notes.vcoeur.com v2.9.1+.
+            # Shape: {"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}.
+            # Parse eagerly so callers get a typed ValidationError they can
+            # surface to the user, instead of the generic NetworkError wrapping
+            # truncated response text.
+            parsed = _safe_json(response)
+            if isinstance(parsed, dict) and parsed.get("error") == "VALIDATION_ERROR":
+                detail = parsed.get("detail") or {}
+                issues = detail.get("issues") if isinstance(detail, dict) else None
+                if not isinstance(issues, list):
+                    issues = []
+                raise ValidationError(issues, method=method, path=path)
         if response.status_code not in expected and response.status_code >= 400:
             raise NetworkError(
                 f"{method} {path} returned {response.status_code}: {response.text[:200]}"

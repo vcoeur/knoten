@@ -49,6 +49,7 @@ from knoten.repositories.errors import (
     NotFoundError,
     StoreError,
     UserError,
+    ValidationError,
 )
 from knoten.repositories.errors import (
     PermissionError as LocalPermissionError,
@@ -166,6 +167,8 @@ def _classify_error(exc: Exception) -> tuple[int, str]:
         return 1, "ambiguous_target"
     if isinstance(exc, NotFoundError):
         return 1, "not_found"
+    if isinstance(exc, ValidationError):
+        return 1, "validation"
     if isinstance(exc, UserError):
         return 1, "user"
     if isinstance(exc, KnotenError):
@@ -185,6 +188,8 @@ def _error_extras(exc: Exception) -> dict[str, Any]:
         }
     if isinstance(exc, AmbiguousTargetError):
         return {"candidates": exc.candidates}
+    if isinstance(exc, ValidationError):
+        return {"issues": exc.issues}
     return {}
 
 
