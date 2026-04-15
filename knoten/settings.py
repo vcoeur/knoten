@@ -1,20 +1,19 @@
-"""Runtime configuration loaded from environment and .env files.
+"""Runtime configuration loaded from environment and a single .env file.
 
-All local state lives under `KNOTEN_HOME`. Discovery order for the root
-and the `.env` file is designed so the same codebase works in three
-different runtime contexts:
+Exactly one `.env` file is read per invocation. The file picked depends
+on whether the CLI is running from an installed copy or a source checkout:
 
-  1. **Dev from the repo** (`uv run knoten …`, `make sync`): `_default_home()`
-     walks up from `__file__` and finds the repo root via `pyproject.toml`.
-     The repo's `.env` is picked up automatically.
-  2. **Installed globally** (`uv tool install .` → `~/.local/bin/knoten`):
-     `__file__` is inside a uv tools venv's `site-packages/`, so the
-     pyproject walk would match nothing useful. `_default_home()` detects
-     that case and falls back to `~/.knoten`, and `.env` is picked up from
-     `~/.config/knoten/.env` so the installed CLI can find the user's real
-     vault without per-invocation env vars.
-  3. **Tests**: `tmp_settings` fixture constructs `Settings` explicitly;
-     the discovery helpers are bypassed entirely.
+  1. **Dev from the repo** (`uv run knoten …`, `make sync`): a pyproject
+     walk up from `__file__` finds the repo root, and the repo's own
+     `.env` is read.
+  2. **Installed** (`pipx install knoten` / `uv tool install knoten`):
+     `__file__` lives inside a site-packages or uv tools venv, so the
+     pyproject walk is skipped. The CLI reads `~/.config/knoten/.env`.
+     If a user wants the vault somewhere other than `~/.knoten`, they
+     set `KNOTEN_HOME=/path/to/vault` inside that same file — all
+     configuration lives in one place.
+  3. **Tests**: the `tmp_settings` fixture constructs `Settings`
+     explicitly; the discovery helpers are bypassed entirely.
 """
 
 from __future__ import annotations
@@ -24,8 +23,10 @@ from pathlib import Path
 
 from environs import Env
 
-# Stable user-level config path, read before the source-tree fallback so an
-# installed CLI can find a repo vault via `KNOTEN_HOME=…` inside this file.
+# Stable user-level config path. The single `.env` file read when knoten
+# is running from an installed copy (`pipx install knoten` /
+# `uv tool install knoten`). Users who want the vault outside `~/.knoten`
+# set `KNOTEN_HOME=…` inside this same file, alongside URL + token.
 USER_CONFIG_ENV = Path.home() / ".config" / "knoten" / ".env"
 
 # Final fallback home when no other anchor is available. Matches the layout
@@ -107,89 +108,35 @@ class Settings:
         return MODE_LOCAL if not self.api_url else MODE_REMOTE
 
 
-def _env_file_candidates(explicit: Path | None) -> list[Path]:
-    """Return every `.env` that should be layered, in priority order.
+def primary_env_file() -> Path:
+    """Return the single `.env` file knoten reads for this invocation.
 
-    `environs.read_env(override=False)` implements "first value wins", so
-    files later in the list only fill in keys the earlier files did not
-    set. This means an installed CLI can keep a tiny `~/.config/knoten/.env`
-    that just points `KNOTEN_HOME` at a repo, and still pick up the
-    token from that repo's own `.env` — no secret duplication.
-
-    Order:
-      1. `explicit` — caller-supplied, for tests or advanced callers.
-      2. `~/.config/knoten/.env` — user-level config. The canonical
-         location for an installed CLI's `KNOTEN_HOME` pointer.
-      3. `$KNOTEN_HOME/.env` — if `KNOTEN_HOME` was set by the shell
-         (or by an earlier layer), its sibling `.env` is layered next.
-         This is what lets the user-level pointer cascade into the repo's
-         own `.env`.
-      4. `_default_home() / .env` — dev workflow (repo via pyproject walk
-         or `~/.knoten`). Only added when it's not already in the list.
+    - In an installed copy (`pipx install knoten` / `uv tool install knoten`):
+      `~/.config/knoten/.env`.
+    - In a dev checkout: the repo-root `.env` found by walking up from
+      this file to the first `pyproject.toml`.
+    - As a final fallback (neither pattern matches): `~/.knoten/.env`.
     """
-    candidates: list[Path] = []
-
-    def add(path: Path | None) -> None:
-        if path is None:
-            return
-        resolved = path.expanduser()
-        if resolved.exists() and resolved not in candidates:
-            candidates.append(resolved)
-
-    add(explicit)
-    add(USER_CONFIG_ENV)
-
-    # Second pass: re-read the environment so a layer-1/2 hit that set
-    # KNOTEN_HOME is visible for candidate 3.
-    import os
-
-    env_home_value = os.environ.get("KNOTEN_HOME")
-    if candidates:
-        # Pre-parse candidates already collected so KNOTEN_HOME that lives
-        # only inside those files still activates candidate 3.
-        for candidate in candidates:
-            env_home_value = _peek_env_var(candidate, "KNOTEN_HOME", env_home_value)
-    if env_home_value:
-        add(Path(env_home_value) / ".env")
-
-    add(_default_home() / ".env")
-    return candidates
-
-
-def _peek_env_var(env_file: Path, key: str, current: str | None) -> str | None:
-    """Return the first definition of `key` in `env_file`, or `current` if absent.
-
-    A minimal parser — we only care about simple `KEY=value` lines at the
-    top of a `.env`, which is enough to look up `KNOTEN_HOME` before fully
-    loading the layered config via environs.
-    """
-    if current:
-        return current
-    try:
-        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            lhs, _, rhs = line.partition("=")
-            if lhs.strip() == key:
-                return rhs.strip().strip('"').strip("'") or None
-    except OSError:
-        return current
-    return current
+    here = Path(__file__).resolve()
+    if _looks_like_installed_location(here):
+        return USER_CONFIG_ENV
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent / ".env"
+    return FALLBACK_HOME / ".env"
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
-    """Load settings from process env and optional .env file.
+    """Load settings from process env and a single .env file.
 
     Missing KNOTEN_API_TOKEN is tolerated here — commands that need it raise
-    later with a clear exit-4 config error. This keeps `knoten config --show`
+    later with a clear exit-4 config error. This keeps `knoten config show`
     usable even when the token is not yet set.
     """
     env = Env()
-    for candidate in _env_file_candidates(env_file):
-        env.read_env(str(candidate), override=False)
+    target = (env_file or primary_env_file()).expanduser()
+    if target.exists():
+        env.read_env(str(target), override=False)
 
     home = Path(env.str("KNOTEN_HOME", str(_default_home()))).expanduser().resolve()
     vault_dir = home / env.str("KNOTEN_VAULT_DIR", "kasten")

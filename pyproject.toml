@@ -1,6 +1,6 @@
 [project]
 name = "knoten"
-version = "0.1.0"
+version = "0.1.1"
 description = "Standalone CLI zettelkasten with a local markdown vault and SQLite FTS5 index; can also mirror a notes.vcoeur.com instance"
 readme = "README.md"
 license = { text = "MIT" }

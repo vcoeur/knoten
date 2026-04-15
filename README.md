@@ -217,21 +217,18 @@ knoten rename "! New idea" "! Core insight" --json
 | `$KNOTEN_HOME/.knoten-state/state.json` | sync cursor, schema version | yes |
 | `$KNOTEN_HOME/.knoten-state/tmp/` | scratch (atomic writes, zip unpack) | yes |
 | `$KNOTEN_HOME/.knoten-state/sync.lock` | fcntl advisory lock during sync / writes | yes |
-| `$KNOTEN_HOME/.env` | API URL + token | yes |
 
-### Two runtime contexts
+### One `.env` per runtime context
 
-**Dev from the repo** (`uv run knoten …`, `make sync`): `KNOTEN_HOME` defaults to the directory containing `pyproject.toml`, and the repo's own `.env` is read automatically. Clone, `cp .env.example .env`, fill in the token, done.
+Exactly one `.env` file is read per invocation — whichever one is appropriate for how knoten is running. No layering, no pointer files.
 
-**Installed from PyPI** (`pipx install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`** first. That file is typically a two-line pointer:
+**Dev from the repo** (`uv run knoten …`, `make sync`): the repo-root `.env` is the only file read. Clone, `cp .env.example .env`, fill in whatever you need, done.
 
-```ini
-KNOTEN_HOME=~/src/vcoeur/knoten
-```
+**Installed from PyPI** (`pipx install knoten` / `uv tool install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`**. Everything lives in that one file — `KNOTEN_API_URL`, `KNOTEN_API_TOKEN`, `KNOTEN_MODE`, and — if you want the vault somewhere other than `~/.knoten/` — `KNOTEN_HOME=/path/to/vault` next to the rest. `knoten config edit` always opens this file.
 
-Once `KNOTEN_HOME` is known, the CLI layers on `$KNOTEN_HOME/.env` automatically to pick up the API URL + token — no secret duplication. Fallback if nothing is configured: `~/.knoten/` (state) + `~/.knoten/.env` (config).
+Process env vars still win over the file (`environs.read_env(override=False)`), so a one-shot `KNOTEN_API_URL=… knoten sync` works as expected.
 
-`.env` files are layered with "first value wins" semantics (`environs.read_env(override=False)`), so a process env var always beats any file, and an earlier layer always beats a later one.
+**Migrating from the old pointer-style layout (pre-single-file)**: if `~/.config/knoten/.env` used to be a two-line pointer to a repo checkout (`KNOTEN_HOME=~/src/vcoeur/knoten`) and the real token lived in `$KNOTEN_HOME/.env`, copy `KNOTEN_API_URL` + `KNOTEN_API_TOKEN` from the repo's `.env` into `~/.config/knoten/.env` once. The repo's own `.env` is then only used when you run `uv run knoten …` from inside the checkout.
 
 ## Development
 

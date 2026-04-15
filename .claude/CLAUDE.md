@@ -74,25 +74,24 @@ Default layout — `KNOTEN_HOME` anchors a vault + state pair:
 - `$KNOTEN_HOME/.knoten-state/index.sqlite` — metadata + FTS5 (gitignored)
 - `$KNOTEN_HOME/.knoten-state/state.json` — sync cursor, schema version (gitignored)
 - `$KNOTEN_HOME/.knoten-state/sync.lock` — fcntl lock held during sync / writes
-- `$KNOTEN_HOME/.env` — API URL + token (gitignored)
 
 ### How `KNOTEN_HOME` is resolved
 
-The resolution tries, in order: shell env → any `.env` layer that sets it → source-tree walk → `~/.knoten` fallback. Two runtime contexts matter:
+`KNOTEN_HOME` resolution tries, in order: shell env → the single `.env` file → source-tree walk → `~/.knoten` fallback. Two runtime contexts matter:
 
 - **Dev** (`uv run knoten …`, `make sync` from the repo): `_default_home()` walks up from `__file__` and finds the repo root via its `pyproject.toml`. The repo's `.env` is read automatically. No user config needed.
-- **Installed** (`uv tool install .` → `~/.local/bin/knoten`): `__file__` lives in a uv tools venv's `site-packages/`, so the pyproject walk is skipped. The CLI reads `~/.config/knoten/.env` first — that file typically only carries `KNOTEN_HOME=/path/to/repo`, which then triggers a second layer read of `$KNOTEN_HOME/.env` for the API URL + token. No secret duplication.
+- **Installed** (`pipx install knoten` / `uv tool install knoten` → `~/.local/bin/knoten`): `__file__` lives inside a site-packages or uv tools venv, so the pyproject walk is skipped. The CLI reads `~/.config/knoten/.env`. Everything — URL, token, optional `KNOTEN_HOME=/path/to/vault` — lives in that one file.
 
-### `.env` layering
+### One `.env` per invocation
 
-`load_settings()` reads multiple `.env` files in priority order with `override=False` — **first value wins**, later files fill in missing keys:
+`load_settings()` reads **exactly one** `.env` file, chosen by `primary_env_file()`:
 
-1. `env_file` arg — explicit, tests / advanced callers
-2. `~/.config/knoten/.env` — user-level pointer (installed CLI)
-3. `$KNOTEN_HOME/.env` — once `KNOTEN_HOME` is known from layer 2 or the process env
-4. `_default_home() / .env` — dev workflow (repo or `~/.knoten`)
+- `env_file` arg (explicit, tests / advanced callers), **or**
+- `~/.config/knoten/.env` in installed mode, **or**
+- `<repo-root>/.env` in dev mode (pyproject walk), **or**
+- `~/.knoten/.env` as a last-resort fallback.
 
-Process env vars always win over any file layer (environs `override=False`).
+Process env vars always win over the file (`environs.read_env(override=False)`). There is deliberately no layered pointer file chain — prior versions had `~/.config/knoten/.env` point at a repo `.env`, but that made `knoten config edit` misleading because the edited file wasn't always the one with the secrets. Single-file model avoids the confusion.
 
 ## Commands
 

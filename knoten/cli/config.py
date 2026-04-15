@@ -26,9 +26,8 @@ from typing import Any
 
 import typer
 
-import knoten.settings as _knoten_settings
 from knoten.cli.output import OutputMode, emit_json, render_status
-from knoten.settings import USER_CONFIG_ENV, Settings, ensure_dirs, load_settings
+from knoten.settings import Settings, ensure_dirs, load_settings, primary_env_file
 
 config_app = typer.Typer(
     help="Inspect and edit the knoten configuration.",
@@ -60,20 +59,6 @@ KNOTEN_API_URL=
 """
 
 
-def _primary_env_file(settings: Settings) -> Path:
-    """Return the `.env` file `config edit` and `init` should write / open.
-
-    Dev mode (running from a source checkout): the repo-root `.env`.
-    Installed mode: the user-level `~/.config/knoten/.env` pointer.
-    """
-    here = Path(_knoten_settings.__file__).resolve()
-    parts = here.parts
-    is_installed = "site-packages" in parts or ("uv" in parts and "tools" in parts)
-    if is_installed:
-        return USER_CONFIG_ENV
-    return settings.home / ".env"
-
-
 def _full_config_payload(settings: Settings) -> dict[str, Any]:
     """Build the dict emitted by `config show` (all values + paths)."""
     return {
@@ -84,7 +69,7 @@ def _full_config_payload(settings: Settings) -> dict[str, Any]:
         "home": str(settings.home),
         "vault_dir": str(settings.vault_dir),
         "state_dir": str(settings.state_dir),
-        "env_file": str(_primary_env_file(settings)),
+        "env_file": str(primary_env_file()),
     }
 
 
@@ -96,7 +81,7 @@ def _paths_payload(settings: Settings) -> dict[str, str]:
         "vault_dir": str(settings.vault_dir),
         "state_dir": str(settings.state_dir),
         "index_path": str(settings.index_path),
-        "env_file": str(_primary_env_file(settings)),
+        "env_file": str(primary_env_file()),
     }
 
 
@@ -135,12 +120,7 @@ def config_path(
 @config_app.command("edit")
 def config_edit() -> None:
     """Open the knoten .env file in $VISUAL / $EDITOR or the OS default editor."""
-    try:
-        settings = load_settings()
-    except Exception as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        raise typer.Exit(4) from exc
-    env_file = _primary_env_file(settings)
+    env_file = primary_env_file()
     created = _ensure_env_file(env_file)
     editor = _resolve_editor()
     if created:
@@ -157,7 +137,7 @@ def init_command() -> None:
     except Exception as exc:
         sys.stderr.write(f"error: {exc}\n")
         raise typer.Exit(4) from exc
-    env_file = _primary_env_file(settings)
+    env_file = primary_env_file()
     created = _ensure_env_file(env_file)
     typer.echo(f"mode: {settings.effective_mode}")
     typer.echo(f"home: {settings.home}")
