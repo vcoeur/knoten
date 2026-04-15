@@ -12,6 +12,9 @@ kasten.bak-*/
 .knoten-state/
 .dev-state/
 
+# MkDocs build output (built in CI, deployed via GitHub Actions)
+site/
+
 # Python build artefacts
 __pycache__/
 *.py[cod]
