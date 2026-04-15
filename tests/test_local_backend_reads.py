@@ -137,20 +137,11 @@ def test_read_note_missing_id_raises_not_found(tmp_settings: Settings) -> None:
         backend.read_note("00000000-0000-0000-0000-000000000000")
 
 
-def test_mutations_raise_not_implemented(tmp_settings: Settings) -> None:
+def test_attachments_still_raise_not_implemented(tmp_settings: Settings) -> None:
+    """Attachments are the last protocol slice still stubbed — Phase 7 lands them."""
     _seed_vault(tmp_settings)
     with LocalBackend(tmp_settings) as backend:
         with pytest.raises(NotImplementedError):
-            backend.create_note.__wrapped__ if False else backend.create_note(_draft())
+            backend.upload_attachment(tmp_settings.vault_dir / "anything.pdf")
         with pytest.raises(NotImplementedError):
-            backend.append_to_note("irrelevant", "x")
-        with pytest.raises(NotImplementedError):
-            backend.delete_note("irrelevant")
-        with pytest.raises(NotImplementedError):
-            backend.restore_note("irrelevant")
-
-
-def _draft():
-    from app.repositories.backend import NoteDraft
-
-    return NoteDraft(filename="- Stub", body="")
+            backend.download_attachment("stub", tmp_settings.vault_dir / "out.bin")

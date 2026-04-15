@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from app.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from app.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -94,6 +94,28 @@ CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Soft-deleted notes live here while they sit in `<vault>/.trash/`.
+-- Separate table (vs. a `deleted_at` column on `notes`) so the active
+-- `notes` table stays deleted-free and the unique filename index never
+-- conflicts with a new note created under the same name.
+CREATE TABLE IF NOT EXISTS trashed_notes (
+    id                TEXT PRIMARY KEY,
+    filename          TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    family            TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    source            TEXT,
+    original_path     TEXT NOT NULL,
+    trash_path        TEXT NOT NULL,
+    frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+    body_sha256       TEXT NOT NULL,
+    mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    deleted_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trashed_filename ON trashed_notes(filename);
 """
 
 
@@ -280,6 +302,12 @@ class Store:
                 self.conn.execute(
                     "ALTER TABLE notes ADD COLUMN path_size INTEGER NOT NULL DEFAULT 0"
                 )
+        if from_version < 6:
+            # v5 -> v6: trashed_notes table. `_ensure_schema` already ran the
+            # CREATE TABLE via executescript, so here we only need to bump the
+            # version. Any pre-v6 database had no soft-delete, so the table
+            # starts empty.
+            pass
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -497,6 +525,64 @@ class Store:
 
     def all_ids(self) -> set[str]:
         return {row["id"] for row in self.conn.execute("SELECT id FROM notes").fetchall()}
+
+    def soft_delete_to_trash(
+        self,
+        note_id: str,
+        *,
+        trash_path: str,
+        deleted_at: str,
+    ) -> bool:
+        """Move a note's row from `notes` to `trashed_notes`.
+
+        Copies the current metadata into the trash table, then deletes
+        the `notes` row (cascade drops tags / wikilinks / FTS5). Returns
+        True if a row was moved, False if the id was unknown.
+        """
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO trashed_notes (
+                    id, filename, title, family, kind, source,
+                    original_path, trash_path, frontmatter_json,
+                    body_sha256, mcp_permissions,
+                    created_at, updated_at, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    row["filename"],
+                    row["title"],
+                    row["family"],
+                    row["kind"],
+                    row["source"],
+                    row["path"],
+                    trash_path,
+                    row["frontmatter_json"],
+                    row["body_sha256"],
+                    row["mcp_permissions"],
+                    row["created_at"],
+                    row["updated_at"],
+                    deleted_at,
+                ),
+            )
+            conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            return True
+
+    def find_trashed(self, note_id: str) -> dict[str, Any] | None:
+        """Look up a soft-deleted note by id, or return None."""
+        row = self.conn.execute("SELECT * FROM trashed_notes WHERE id = ?", (note_id,)).fetchone()
+        return dict(row) if row else None
+
+    def discard_trashed(self, note_id: str) -> None:
+        """Drop a row from `trashed_notes` after restore (or permanent delete)."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM trashed_notes WHERE id = ?", (note_id,))
 
     def record_file_stat(self, note_id: str, *, path_mtime_ns: int, path_size: int) -> None:
         """Record the `(mtime_ns, size)` tuple for a note's mirror file.

@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.models import Note, WikiLink
@@ -31,7 +33,9 @@ from app.repositories.backend import (
 )
 from app.repositories.errors import NotFoundError, UserError
 from app.repositories.store import Store
+from app.services.kasten_filename import parse_kasten_filename
 from app.services.markdown_parser import parse_body
+from app.services.notes import ingest_note
 from app.settings import Settings
 
 _LOG = logging.getLogger(__name__)
@@ -203,19 +207,211 @@ class LocalBackend(Backend):
         )
 
     def create_note(self, draft: NoteDraft) -> str:
-        raise NotImplementedError("LocalBackend writes land in Phase 6")
+        self._refresh_index_if_stale()
+
+        parsed = parse_kasten_filename(draft.filename)
+        if not parsed.family:
+            raise UserError(f"Could not derive family from filename {draft.filename!r}")
+        if self._store.find_by_filename(draft.filename) is not None:
+            raise UserError(
+                f"A note with filename {draft.filename!r} already exists — "
+                "pick a different name or edit the existing note."
+            )
+
+        note_id = str(uuid.uuid4())
+        now = _utcnow_iso()
+        kind = draft.kind or parsed.family
+        parsed_body = parse_body(draft.body)
+
+        note = Note(
+            id=note_id,
+            filename=draft.filename,
+            title=parsed.title or draft.filename,
+            family=parsed.family,
+            kind=kind,
+            source=parsed.source,
+            body=draft.body,
+            frontmatter=dict(draft.frontmatter),
+            tags=_merge_tags(draft.tags, parsed_body.tags),
+            wikilinks=tuple(
+                WikiLink(target_title=title, target_id=None)
+                for title in parsed_body.wikilink_titles
+            ),
+            created_at=now,
+            updated_at=now,
+            mcp_permissions="ALL",
+        )
+        ingest_note(note, store=self._store, vault_dir=self._vault_dir)
+        return note_id
 
     def update_note(self, note_id: str, patch: NotePatch) -> NoteUpdateResult:
-        raise NotImplementedError("LocalBackend writes land in Phase 6")
+        self._refresh_index_if_stale()
+
+        row = self._store.find_by_id(note_id)
+        if row is None:
+            raise NotFoundError(f"No note with id {note_id}")
+
+        if patch.filename is not None and patch.filename != row["filename"]:
+            raise NotImplementedError(
+                "LocalBackend rename cascade lands in the next commit (Phase 6b) — "
+                "rename currently unavailable in local mode."
+            )
+
+        previous_path = row["path"]
+        absolute = self._vault_dir / previous_path
+        try:
+            current_raw = absolute.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
+        current_body = _strip_frontmatter(current_raw)
+
+        new_body = patch.body if patch.body is not None else current_body
+        if patch.add_tags or patch.remove_tags:
+            new_body = _apply_tag_edits(
+                new_body, add_tags=patch.add_tags, remove_tags=patch.remove_tags
+            )
+
+        try:
+            current_fm = json.loads(row.get("frontmatter_json") or "{}")
+            if not isinstance(current_fm, dict):
+                current_fm = {}
+        except (TypeError, ValueError):
+            current_fm = {}
+        new_fm = dict(patch.frontmatter) if patch.frontmatter is not None else current_fm
+
+        new_title = patch.title if patch.title is not None else row["title"]
+
+        parsed_body = parse_body(new_body)
+        tags_tuple = tuple(sorted(set(parsed_body.tags)))
+
+        note = Note(
+            id=note_id,
+            filename=row["filename"],
+            title=new_title,
+            family=row["family"],
+            kind=row["kind"],
+            source=row.get("source"),
+            body=new_body,
+            frontmatter=new_fm,
+            tags=tags_tuple,
+            wikilinks=tuple(
+                WikiLink(target_title=title, target_id=None)
+                for title in parsed_body.wikilink_titles
+            ),
+            created_at=row.get("created_at") or _utcnow_iso(),
+            updated_at=_utcnow_iso(),
+            mcp_permissions=row.get("mcp_permissions") or "ALL",
+        )
+        ingest_note(
+            note,
+            store=self._store,
+            vault_dir=self._vault_dir,
+            previous_path=previous_path,
+        )
+        return NoteUpdateResult(note_id=note_id, affected_notes=())
 
     def append_to_note(self, note_id: str, content: str) -> None:
-        raise NotImplementedError("LocalBackend writes land in Phase 6")
+        self._refresh_index_if_stale()
+        row = self._store.find_by_id(note_id)
+        if row is None:
+            raise NotFoundError(f"No note with id {note_id}")
+
+        absolute = self._vault_dir / row["path"]
+        try:
+            current_raw = absolute.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
+        current_body = _strip_frontmatter(current_raw)
+        new_body = f"{current_body}\n\n{content}" if current_body else content
+
+        self.update_note(note_id, NotePatch(body=new_body))
 
     def delete_note(self, note_id: str) -> None:
-        raise NotImplementedError("LocalBackend writes land in Phase 6")
+        self._refresh_index_if_stale()
+        row = self._store.find_by_id(note_id)
+        if row is None:
+            raise NotFoundError(f"No note with id {note_id}")
+
+        relative_path = row["path"]
+        trash_relative = f".trash/{relative_path}"
+        source_abs = self._vault_dir / relative_path
+        trash_abs = self._vault_dir / trash_relative
+
+        if not source_abs.exists():
+            raise NotFoundError(f"Mirror file missing for {note_id}: {relative_path}")
+
+        trash_abs.parent.mkdir(parents=True, exist_ok=True)
+        if trash_abs.exists():
+            trash_abs.unlink()
+        source_abs.rename(trash_abs)
+
+        moved = self._store.soft_delete_to_trash(
+            note_id,
+            trash_path=trash_relative,
+            deleted_at=_utcnow_iso(),
+        )
+        if not moved:
+            trash_abs.rename(source_abs)
+            raise NotFoundError(f"No note with id {note_id}")
 
     def restore_note(self, note_id: str) -> None:
-        raise NotImplementedError("LocalBackend writes land in Phase 6")
+        self._refresh_index_if_stale()
+        trashed = self._store.find_trashed(note_id)
+        if trashed is None:
+            raise NotFoundError(f"No trashed note with id {note_id}")
+
+        original_path = trashed["original_path"]
+        if self._store.find_by_filename(trashed["filename"]) is not None:
+            raise UserError(
+                f"Cannot restore {note_id}: a note with filename "
+                f"{trashed['filename']!r} already exists. Rename one of them first."
+            )
+
+        trash_abs = self._vault_dir / trashed["trash_path"]
+        restore_abs = self._vault_dir / original_path
+        if not trash_abs.exists():
+            raise NotFoundError(f"Trash file missing for {note_id}: {trashed['trash_path']}")
+        if restore_abs.exists():
+            raise UserError(f"Cannot restore {note_id}: {original_path!r} already exists on disk.")
+
+        restore_abs.parent.mkdir(parents=True, exist_ok=True)
+        trash_abs.rename(restore_abs)
+
+        try:
+            raw = restore_abs.read_text(encoding="utf-8")
+        except OSError as exc:
+            restore_abs.rename(trash_abs)
+            raise NotFoundError(f"Cannot read restored file: {exc}") from exc
+
+        body = _strip_frontmatter(raw)
+        parsed_body = parse_body(body)
+        try:
+            fm = json.loads(trashed.get("frontmatter_json") or "{}")
+            if not isinstance(fm, dict):
+                fm = {}
+        except (TypeError, ValueError):
+            fm = {}
+
+        note = Note(
+            id=note_id,
+            filename=trashed["filename"],
+            title=trashed["title"],
+            family=trashed["family"],
+            kind=trashed["kind"],
+            source=trashed.get("source"),
+            body=body,
+            frontmatter=fm,
+            tags=tuple(sorted(set(parsed_body.tags))),
+            wikilinks=tuple(
+                WikiLink(target_title=title, target_id=None)
+                for title in parsed_body.wikilink_titles
+            ),
+            created_at=trashed["created_at"],
+            updated_at=_utcnow_iso(),
+            mcp_permissions=trashed.get("mcp_permissions") or "ALL",
+        )
+        ingest_note(note, store=self._store, vault_dir=self._vault_dir)
+        self._store.discard_trashed(note_id)
 
     def upload_attachment(
         self,
@@ -238,3 +434,36 @@ def _strip_frontmatter(text: str) -> str:
     if end == -1:
         return text
     return text[end + 5 :]
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _merge_tags(explicit: tuple[str, ...], parsed: tuple[str, ...]) -> tuple[str, ...]:
+    """Combine caller-supplied tags with ones extracted from the body."""
+    return tuple(sorted({*explicit, *parsed}))
+
+
+def _apply_tag_edits(
+    body: str,
+    *,
+    add_tags: tuple[str, ...],
+    remove_tags: tuple[str, ...],
+) -> str:
+    """Port of the remote-path tag-edit routine used by `kasten edit --add-tag`."""
+    import re
+
+    new_body = body
+    for tag in remove_tags:
+        pattern = re.compile(rf"(?<![\w#])#{re.escape(tag)}\b")
+        new_body = pattern.sub("", new_body)
+    new_body = re.sub(r"[ \t]+\n", "\n", new_body).rstrip()
+
+    missing = [
+        tag for tag in add_tags if not re.search(rf"(?<![\w#])#{re.escape(tag)}\b", new_body)
+    ]
+    if missing:
+        suffix = " ".join(f"#{tag}" for tag in missing)
+        new_body = f"{new_body.rstrip()}\n\n{suffix}\n" if new_body else f"{suffix}\n"
+    return new_body
