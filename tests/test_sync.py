@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pytest_httpx import HTTPXMock
 
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.sync_state import load_state
 from app.services.sync import incremental_sync
@@ -54,8 +54,8 @@ def test_incremental_sync_fetches_new_notes(tmp_settings: Settings, httpx_mock: 
         json={"data": [list_item], "total": 1, "limit": 200, "offset": 0},
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
-        result = incremental_sync(client=client, store=store, settings=tmp_settings)
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1
         assert result.deleted == 0
         assert result.local_total == 1
@@ -123,8 +123,8 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
         json={"data": [list_item], "total": 1, "limit": 200, "offset": 0},
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
-        result = incremental_sync(client=client, store=store, settings=tmp_settings)
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 0
         assert result.deleted == 0
         assert result.missing_refetched == 0

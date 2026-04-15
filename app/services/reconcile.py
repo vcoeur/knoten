@@ -25,10 +25,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.repositories.backend import Backend
 from app.repositories.errors import NoteForbiddenError
-from app.repositories.http_client import NotesClient
 from app.repositories.store import Store, StoreNoteRow
-from app.services.note_mapper import note_from_api
 from app.services.notes import ingest_note, ingest_placeholder
 from app.settings import Settings
 
@@ -55,7 +54,7 @@ class ReconcileResult:
 
 def reconcile_local(
     *,
-    client: NotesClient,
+    backend: Backend,
     store: Store,
     settings: Settings,
     verify_hashes: bool = False,
@@ -116,10 +115,10 @@ def reconcile_local(
 
     # --- Re-fetch missing + mismatched --------------------------------------
     for row in missing:
-        _refetch(row, client=client, store=store, settings=settings)
+        _refetch(row, backend=backend, store=store, settings=settings)
         result.missing_refetched += 1
     for row in mismatched:
-        _refetch(row, client=client, store=store, settings=settings)
+        _refetch(row, backend=backend, store=store, settings=settings)
         result.mismatched_refetched += 1
 
     # --- 3. Orphan cleanup --------------------------------------------------
@@ -145,7 +144,7 @@ def reconcile_local(
 def _refetch(
     row: StoreNoteRow,
     *,
-    client: NotesClient,
+    backend: Backend,
     store: Store,
     settings: Settings,
 ) -> None:
@@ -156,7 +155,7 @@ def _refetch(
     store's existing row.
     """
     try:
-        payload = client.read_note(row.id)
+        note = backend.read_note(row.id)
     except NoteForbiddenError:
         from app.models import NoteSummary
 
@@ -181,7 +180,6 @@ def _refetch(
             previous_path=row.path,
         )
         return
-    note = note_from_api(payload)
     previous = store.get_row(note.id)
     ingest_note(
         note,

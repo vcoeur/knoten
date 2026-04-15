@@ -10,7 +10,7 @@ from __future__ import annotations
 from pytest_httpx import HTTPXMock
 
 from app.models import Note
-from app.repositories.http_client import NotesClient
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.services.notes import ingest_note
 from app.services.reconcile import reconcile_local
@@ -69,8 +69,8 @@ def test_reconcile_refetches_missing_files(tmp_settings: Settings, httpx_mock: H
             json=_note_read_payload(note_id),
         )
 
-        with NotesClient(tmp_settings) as client:
-            result = reconcile_local(client=client, store=store, settings=tmp_settings)
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
 
         assert result.missing_refetched == 1
         assert result.missing_ids == [note_id]
@@ -93,8 +93,8 @@ def test_reconcile_removes_orphan_files(tmp_settings: Settings, httpx_mock: HTTP
         dotfile = tmp_settings.vault_dir / "note" / ".DS_Store"
         dotfile.write_bytes(b"")
 
-        with NotesClient(tmp_settings) as client:
-            result = reconcile_local(client=client, store=store, settings=tmp_settings)
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
 
         assert result.orphans_removed == 1
         assert result.orphan_paths == ["note/! Orphaned.md"]
@@ -123,15 +123,15 @@ def test_reconcile_hash_verification_refetches_drifted(
             json=_note_read_payload(note_id, body="Original body."),
         )
 
-        with NotesClient(tmp_settings) as client:
+        with RemoteBackend(tmp_settings) as backend:
             # Without --hashes, the drift is invisible (file still exists).
-            silent = reconcile_local(client=client, store=store, settings=tmp_settings)
+            silent = reconcile_local(backend=backend, store=store, settings=tmp_settings)
             assert silent.mismatched_refetched == 0
             assert "Tampered body." in target.read_text(encoding="utf-8")
 
             # With --hashes, the drift is caught and the file is restored.
             loud = reconcile_local(
-                client=client, store=store, settings=tmp_settings, verify_hashes=True
+                backend=backend, store=store, settings=tmp_settings, verify_hashes=True
             )
             assert loud.mismatched_refetched == 1
             assert loud.mismatched_ids == [note_id]
@@ -143,8 +143,8 @@ def test_reconcile_is_idempotent_when_clean(tmp_settings: Settings, httpx_mock: 
     note_id = "44444444-4444-4444-4444-444444444444"
     with Store(tmp_settings.index_path) as store:
         _seed_note(store, tmp_settings, note_id)
-        with NotesClient(tmp_settings) as client:
-            result = reconcile_local(client=client, store=store, settings=tmp_settings)
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
         assert result.missing_refetched == 0
         assert result.mismatched_refetched == 0
         assert result.orphans_removed == 0
@@ -226,8 +226,8 @@ def test_sync_always_catches_remote_deletes_even_on_equal_totals(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, NotesClient(tmp_settings) as client:
-        result = incremental_sync(client=client, store=store, settings=tmp_settings)
+    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.deleted == 1
         assert store.count_notes() == 1
         assert store.find_by_id(deleted_id) is None

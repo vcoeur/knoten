@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from app.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from app.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS notes (
     restricted        INTEGER NOT NULL DEFAULT 0,
     mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
     created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL
+    updated_at        TEXT NOT NULL,
+    path_mtime_ns     INTEGER NOT NULL DEFAULT 0,
+    path_size         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_filename ON notes(filename);
@@ -91,6 +93,40 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts_trigram USING fts5(
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Soft-deleted notes live here while they sit in `<vault>/.trash/`.
+-- Separate table (vs. a `deleted_at` column on `notes`) so the active
+-- `notes` table stays deleted-free and the unique filename index never
+-- conflicts with a new note created under the same name.
+CREATE TABLE IF NOT EXISTS trashed_notes (
+    id                TEXT PRIMARY KEY,
+    filename          TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    family            TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    source            TEXT,
+    original_path     TEXT NOT NULL,
+    trash_path        TEXT NOT NULL,
+    frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+    body_sha256       TEXT NOT NULL,
+    mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    deleted_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trashed_filename ON trashed_notes(filename);
+
+-- Local-mode attachment metadata. Files live at
+-- `<vault>/.attachments/<storage_key>`; this table is the authoritative
+-- mapping the backend uses to find them when downloading.
+CREATE TABLE IF NOT EXISTS attachments (
+    storage_key    TEXT PRIMARY KEY,
+    original_name  TEXT NOT NULL,
+    content_type   TEXT,
+    size_bytes     INTEGER NOT NULL DEFAULT 0,
+    source         TEXT,
+    created_at     TEXT NOT NULL
 );
 """
 
@@ -264,6 +300,30 @@ class Store:
                 SELECT note_id, title, body, filename FROM notes_fts
                 """
             )
+        if from_version < 5:
+            # v4 -> v5: add path_mtime_ns + path_size so LocalBackend can
+            # stat-walk the vault and detect external edits. Existing rows
+            # get 0, which the walk treats as "never seen" — it re-stats and
+            # backfills on the first invocation.
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
+            if "path_mtime_ns" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE notes ADD COLUMN path_mtime_ns INTEGER NOT NULL DEFAULT 0"
+                )
+            if "path_size" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE notes ADD COLUMN path_size INTEGER NOT NULL DEFAULT 0"
+                )
+        if from_version < 6:
+            # v5 -> v6: trashed_notes table. `_ensure_schema` already ran the
+            # CREATE TABLE via executescript, so here we only need to bump the
+            # version. Any pre-v6 database had no soft-delete, so the table
+            # starts empty.
+            pass
+        if from_version < 7:
+            # v6 -> v7: attachments table for LocalBackend. Same story —
+            # CREATE TABLE IF NOT EXISTS in _SCHEMA already fired.
+            pass
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -287,12 +347,24 @@ class Store:
             self.conn.rollback()
             raise
 
-    def upsert_note(self, note: Note, *, path: str, body_sha256: str) -> None:
+    def upsert_note(
+        self,
+        note: Note,
+        *,
+        path: str,
+        body_sha256: str,
+        path_mtime_ns: int = 0,
+        path_size: int = 0,
+    ) -> None:
         """Insert or replace a note and its derived rows (tags, wikilinks, FTS).
 
         Clears the `restricted` flag — this method is only used for notes
         whose body we actually fetched from the remote. For notes we can
         only see in list responses, use `upsert_placeholder`.
+
+        `path_mtime_ns` / `path_size` record the stat of the mirror file
+        after it was written, so `LocalBackend._refresh_index_if_stale`
+        can detect external edits without re-hashing every file.
         """
         with self.transaction() as conn:
             conn.execute(
@@ -300,8 +372,8 @@ class Store:
                 INSERT INTO notes (
                     id, filename, title, family, kind, source, path,
                     frontmatter_json, body_sha256, restricted, mcp_permissions,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    created_at, updated_at, path_mtime_ns, path_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     filename = excluded.filename,
                     title = excluded.title,
@@ -313,7 +385,9 @@ class Store:
                     body_sha256 = excluded.body_sha256,
                     restricted = 0,
                     mcp_permissions = excluded.mcp_permissions,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    path_mtime_ns = excluded.path_mtime_ns,
+                    path_size = excluded.path_size
                 """,
                 (
                     note.id,
@@ -328,6 +402,8 @@ class Store:
                     note.mcp_permissions,
                     note.created_at,
                     note.updated_at,
+                    path_mtime_ns,
+                    path_size,
                 ),
             )
 
@@ -465,6 +541,188 @@ class Store:
 
     def all_ids(self) -> set[str]:
         return {row["id"] for row in self.conn.execute("SELECT id FROM notes").fetchall()}
+
+    def soft_delete_to_trash(
+        self,
+        note_id: str,
+        *,
+        trash_path: str,
+        deleted_at: str,
+    ) -> bool:
+        """Move a note's row from `notes` to `trashed_notes`.
+
+        Copies the current metadata into the trash table, then deletes
+        the `notes` row (cascade drops tags / wikilinks / FTS5). Returns
+        True if a row was moved, False if the id was unknown.
+        """
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO trashed_notes (
+                    id, filename, title, family, kind, source,
+                    original_path, trash_path, frontmatter_json,
+                    body_sha256, mcp_permissions,
+                    created_at, updated_at, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    row["filename"],
+                    row["title"],
+                    row["family"],
+                    row["kind"],
+                    row["source"],
+                    row["path"],
+                    trash_path,
+                    row["frontmatter_json"],
+                    row["body_sha256"],
+                    row["mcp_permissions"],
+                    row["created_at"],
+                    row["updated_at"],
+                    deleted_at,
+                ),
+            )
+            conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            return True
+
+    def find_trashed(self, note_id: str) -> dict[str, Any] | None:
+        """Look up a soft-deleted note by id, or return None."""
+        row = self.conn.execute("SELECT * FROM trashed_notes WHERE id = ?", (note_id,)).fetchone()
+        return dict(row) if row else None
+
+    def discard_trashed(self, note_id: str) -> None:
+        """Drop a row from `trashed_notes` after restore (or permanent delete)."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM trashed_notes WHERE id = ?", (note_id,))
+
+    def record_attachment(
+        self,
+        *,
+        storage_key: str,
+        original_name: str,
+        content_type: str | None,
+        size_bytes: int,
+        source: str | None,
+        created_at: str,
+    ) -> None:
+        """Insert a row in `attachments` describing a stored blob."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO attachments
+                    (storage_key, original_name, content_type, size_bytes, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (storage_key, original_name, content_type, size_bytes, source, created_at),
+            )
+
+    def find_attachment(self, storage_key: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM attachments WHERE storage_key = ?", (storage_key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_file_stat(self, note_id: str, *, path_mtime_ns: int, path_size: int) -> None:
+        """Record the `(mtime_ns, size)` tuple for a note's mirror file.
+
+        Called by `ingest_note` after the mirror file has been written
+        atomically, so the drift detector can tell "this is the content
+        we ingested" from "the user edited the file by hand". Idempotent
+        — a no-op if the note row does not exist.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE notes SET path_mtime_ns = ?, path_size = ? WHERE id = ?",
+                (path_mtime_ns, path_size, note_id),
+            )
+
+    def path_index(self) -> dict[str, tuple[int, int, str]]:
+        """Return `{relative_path: (mtime_ns, size, note_id)}` for active notes.
+
+        Fed to `LocalBackend._refresh_index_if_stale` so the stat walk can
+        detect drifted files in O(n) SQL + O(files) stat calls, without a
+        hash pass. Placeholders are skipped — their mirror file is a stub
+        and should not participate in drift detection.
+        """
+        rows = self.conn.execute(
+            "SELECT path, path_mtime_ns, path_size, id FROM notes WHERE restricted = 0"
+        ).fetchall()
+        return {row["path"]: (row["path_mtime_ns"], row["path_size"], row["id"]) for row in rows}
+
+    def apply_drifted_body(
+        self,
+        note_id: str,
+        *,
+        body: str,
+        body_sha256: str,
+        tags: tuple[str, ...],
+        wikilink_titles: tuple[str, ...],
+        path_mtime_ns: int,
+        path_size: int,
+    ) -> None:
+        """Refresh a note's body + derived rows after an external edit.
+
+        Called by the `LocalBackend` stat walk when a mirror file's
+        (mtime, size) has drifted from the recorded values. Updates FTS5,
+        tags, and wikilinks (with `target_id = None` — the walk does not
+        resolve titles to ids; the next full reindex or explicit write
+        does that). Leaves `filename / family / kind / source /
+        frontmatter_json` unchanged — only the body changed on disk, not
+        the metadata.
+        """
+        with self.transaction() as conn:
+            updated_rows = conn.execute(
+                """
+                UPDATE notes
+                SET body_sha256   = ?,
+                    path_mtime_ns = ?,
+                    path_size     = ?
+                WHERE id = ? AND restricted = 0
+                """,
+                (body_sha256, path_mtime_ns, path_size, note_id),
+            ).rowcount
+            if updated_rows == 0:
+                return
+
+            title_row = conn.execute(
+                "SELECT title, filename FROM notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+            if title_row is None:
+                return
+            title = title_row["title"]
+            filename = title_row["filename"]
+
+            conn.execute("DELETE FROM tags WHERE note_id = ?", (note_id,))
+            if tags:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO tags(note_id, tag) VALUES(?, ?)",
+                    [(note_id, tag) for tag in tags],
+                )
+
+            conn.execute("DELETE FROM wikilinks WHERE source_id = ?", (note_id,))
+            if wikilink_titles:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO wikilinks(source_id, target_title, target_id) "
+                    "VALUES(?, ?, NULL)",
+                    [(note_id, title_) for title_ in wikilink_titles],
+                )
+
+            conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
+            conn.execute(
+                "INSERT INTO notes_fts(note_id, title, body, filename) VALUES(?, ?, ?, ?)",
+                (note_id, title, body, filename),
+            )
+            conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note_id,))
+            conn.execute(
+                "INSERT INTO notes_fts_trigram(note_id, title, body, filename) VALUES(?, ?, ?, ?)",
+                (note_id, title, body, filename),
+            )
 
     def all_rows(self) -> list[StoreNoteRow]:
         """Every active note row, used by sync reconciliation."""

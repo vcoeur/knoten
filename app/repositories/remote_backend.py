@@ -1,19 +1,32 @@
-"""HTTP client for notes.vcoeur.com.
+"""HTTP-backed `Backend` implementation — talks to `notes.vcoeur.com`.
 
 Thin typed wrapper around httpx. All methods raise the exception types from
-`app.repositories.errors` — the CLI layer maps those to exit codes. Response
-payloads are returned as dicts; model construction happens in services.
+`app.repositories.errors` so the service layer stays backend-agnostic. The
+class used to be `NotesClient` in `http_client.py`; this file is the same
+behaviour adapted to the `Backend` protocol — method names and return types
+match the protocol exactly, payload dicts are translated to/from the shared
+dataclasses at the boundary.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from app.models import Note
+from app.repositories.backend import (
+    AttachmentDownloadResult,
+    AttachmentUploadResult,
+    Backend,
+    NoteDraft,
+    NotePatch,
+    NotesPage,
+    NoteUpdateResult,
+)
 from app.repositories.errors import AuthError, NetworkError, NoteForbiddenError, NotFoundError
+from app.services.note_mapper import note_from_api, summary_from_api
 from app.settings import Settings
 
 
@@ -32,8 +45,16 @@ def _parse_disposition_filename(header: str) -> str | None:
     return header[start:end] or None
 
 
-class NotesClient:
-    """Bearer-token client for the notes.vcoeur.com REST API."""
+class RemoteBackend(Backend):
+    """Bearer-token client for the `notes.vcoeur.com` REST API.
+
+    Honours the `Backend` protocol. Mutations return the post-mutation
+    envelope the service layer actually consumes — a plain id string from
+    `create_note`, a `NoteUpdateResult` with `affected_notes` from
+    `update_note`, and `None` from `append_to_note / delete_note /
+    restore_note` because the caller already knows the id and re-fetches
+    via `read_note` before ingesting.
+    """
 
     def __init__(self, settings: Settings) -> None:
         if not settings.api_token:
@@ -51,8 +72,7 @@ class NotesClient:
             timeout=settings.http_timeout,
         )
 
-    # Context manager so callers can use `with NotesClient(...) as c:`
-    def __enter__(self) -> NotesClient:
+    def __enter__(self) -> RemoteBackend:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -61,91 +81,70 @@ class NotesClient:
     def close(self) -> None:
         self._client.close()
 
-    # ---- Notes ------------------------------------------------------------
+    def list_note_summaries(self, *, limit: int, offset: int) -> NotesPage:
+        raw = self._get_json("/api/notes", params={"limit": limit, "offset": offset})
+        items = raw.get("data") or []
+        return NotesPage(
+            data=tuple(summary_from_api(item) for item in items),
+            total=int(raw.get("total") or 0),
+            limit=int(raw.get("limit") or limit),
+            offset=int(raw.get("offset") or offset),
+        )
 
-    def list_notes(
-        self,
-        *,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> dict[str, Any]:
-        """GET /api/notes — returns {data, total, limit, offset}.
+    def read_note(self, note_id: str) -> Note:
+        payload = self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
+        return note_from_api(payload)
 
-        Items are sorted by updated_at DESC. Body is NOT included — fetch with
-        `read_note(id)` to get the full content.
-        """
-        return self._get_json("/api/notes", params={"limit": limit, "offset": offset})
+    def create_note(self, draft: NoteDraft) -> str:
+        payload: dict[str, Any] = {"filename": draft.filename}
+        if draft.body:
+            payload["body"] = draft.body
+        if draft.kind is not None:
+            payload["kind"] = draft.kind
+        if draft.frontmatter:
+            payload["frontmatter"] = dict(draft.frontmatter)
+        if draft.tags:
+            payload["tags"] = list(draft.tags)
+        raw = self._post_json("/api/notes", json=payload, expected=(200, 201))
+        return str(raw.get("id"))
 
-    def iter_all_summaries(
-        self,
-        *,
-        page_size: int = 200,
-        stop_when_older_than: str | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        """Yield every active note summary, oldest-new-first stopping aside.
+    def update_note(self, note_id: str, patch: NotePatch) -> NoteUpdateResult:
+        payload: dict[str, Any] = {}
+        if patch.filename is not None:
+            payload["filename"] = patch.filename
+        if patch.title is not None:
+            payload["title"] = patch.title
+        if patch.body is not None:
+            payload["body"] = patch.body
+        if patch.frontmatter is not None:
+            payload["frontmatter"] = dict(patch.frontmatter)
+        raw = self._put_json(f"/api/notes/{note_id}", json=payload)
+        affected_raw = raw.get("affectedNotes") if isinstance(raw, dict) else None
+        affected_ids: list[str] = []
+        if isinstance(affected_raw, list):
+            for entry in affected_raw:
+                if isinstance(entry, dict) and "id" in entry:
+                    affected_ids.append(str(entry["id"]))
+                elif isinstance(entry, str):
+                    affected_ids.append(entry)
+        return NoteUpdateResult(note_id=note_id, affected_notes=tuple(affected_ids))
 
-        If `stop_when_older_than` is set (ISO-8601 string), pagination stops
-        once a page's newest item has `updated_at <= stop_when_older_than` —
-        the caller is using this for incremental sync and no longer cares
-        about older items.
-        """
-        offset = 0
-        while True:
-            page = self.list_notes(limit=page_size, offset=offset)
-            data: list[dict[str, Any]] = page.get("data", [])
-            if not data:
-                return
-            yield from data
-            # DESC order: if the last (oldest) item on this page is older
-            # than the cursor, the next page is entirely old — stop.
-            if (
-                stop_when_older_than is not None
-                and data[-1].get("updated_at", "") <= stop_when_older_than
-            ):
-                return
-            if len(data) < page_size:
-                return
-            offset += page_size
-
-    def read_note(self, note_id: str) -> dict[str, Any]:
-        """GET /api/notes/{id} — full note with body and linkMap.
-
-        Raises `NoteForbiddenError` on 404. The server deliberately returns
-        404 for notes the current token cannot READ (restricted viewer +
-        `mcpPermissions = LIST`), conflating "does not exist" and
-        "forbidden" to avoid leaking existence. Sync catches this and
-        falls back to a metadata-only placeholder.
-        """
-        return self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
-
-    def create_note(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST /api/notes — returns the created note (with body)."""
-        return self._post_json("/api/notes", json=payload, expected=(200, 201))
-
-    def update_note(self, note_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """PUT /api/notes/{id} — returns the updated note."""
-        return self._put_json(f"/api/notes/{note_id}", json=payload)
-
-    def append_note(self, note_id: str, content: str) -> dict[str, Any]:
-        """POST /api/notes/{id}/append — append content to the body.
-
-        Uses the dedicated server endpoint that enforces `APPEND` (rather
-        than `WRITE`) on the note's `mcpPermissions` level. Returns the
-        updated note in the same shape as `read_note`.
-        """
-        return self._post_json(
-            f"/api/notes/{note_id}/append", json={"content": content}, expected=(200, 201)
+    def append_to_note(self, note_id: str, content: str) -> None:
+        self._post_json(
+            f"/api/notes/{note_id}/append",
+            json={"content": content},
+            expected=(200, 201),
         )
 
     def delete_note(self, note_id: str) -> None:
-        """DELETE /api/notes/{id} — soft delete (trash)."""
         self._request("DELETE", f"/api/notes/{note_id}")
 
-    def restore_note(self, note_id: str) -> dict[str, Any]:
-        """POST /api/notes/{id}/restore."""
-        return self._post_json(f"/api/notes/{note_id}/restore", json={}, expected=(200, 201))
-
-    # ---- Attachments -----------------------------------------------------
+    def restore_note(self, note_id: str) -> None:
+        self._post_json(
+            f"/api/notes/{note_id}/restore",
+            json={},
+            expected=(200, 201),
+        )
 
     def upload_attachment(
         self,
@@ -153,13 +152,7 @@ class NotesClient:
         *,
         content_type: str | None = None,
         source: str | None = None,
-    ) -> dict[str, Any]:
-        """POST /api/attachments — multipart upload.
-
-        Streams `path` to the server as a `file` form field and returns the
-        parsed JSON body. The response always includes `storageKey`, which
-        the caller uses to link a file-family note to the uploaded blob.
-        """
+    ) -> AttachmentUploadResult:
         try:
             with path.open("rb") as handle:
                 files = {"file": (path.name, handle, content_type or "application/octet-stream")}
@@ -180,15 +173,20 @@ class NotesClient:
             raise NetworkError(
                 f"POST /api/attachments returned {response.status_code}: {response.text[:200]}"
             )
-        return response.json()
+        body = response.json()
+        size_raw = body.get("sizeBytes")
+        try:
+            size_bytes = int(size_raw) if size_raw is not None else None
+        except (TypeError, ValueError):
+            size_bytes = None
+        return AttachmentUploadResult(
+            storage_key=str(body.get("storageKey") or ""),
+            content_type=body.get("contentType"),
+            size_bytes=size_bytes,
+            url=body.get("url"),
+        )
 
-    def download_attachment(self, storage_key: str, destination: Path) -> dict[str, Any]:
-        """GET /api/attachments/{key} — stream to `destination`.
-
-        Returns a dict with the bytes written and the server-provided
-        content type / filename (parsed from Content-Disposition when
-        available). Caller is responsible for choosing `destination`.
-        """
+    def download_attachment(self, storage_key: str, destination: Path) -> AttachmentDownloadResult:
         destination.parent.mkdir(parents=True, exist_ok=True)
         written = 0
         content_type = ""
@@ -216,14 +214,12 @@ class NotesClient:
                         written += len(chunk)
         except httpx.HTTPError as exc:
             raise NetworkError(f"Cannot reach {self._settings.api_url}: {exc}") from exc
-        return {
-            "path": destination,
-            "bytes_written": written,
-            "content_type": content_type,
-            "filename": disposition_filename,
-        }
-
-    # ---- Internal helpers -------------------------------------------------
+        return AttachmentDownloadResult(
+            path=destination,
+            bytes_written=written,
+            content_type=content_type,
+            filename=disposition_filename,
+        )
 
     def _get_json(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
         return self._request("GET", path, params=params)
@@ -256,11 +252,6 @@ class NotesClient:
             )
         if response.status_code == 503:
             raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")
-        # Per-note 404 on a read is the server's way of saying "this note
-        # does not exist, or you don't have READ permission on it" — the
-        # server deliberately conflates the two. We surface this as a
-        # dedicated exception so sync can create a placeholder instead of
-        # crashing the whole run.
         if response.status_code == 404 and note_id is not None:
             raise NoteForbiddenError(note_id)
         if response.status_code not in expected and response.status_code >= 400:

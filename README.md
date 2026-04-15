@@ -1,8 +1,11 @@
 # KastenManager
 
-Local CLI mirror and search tool for [notes.vcoeur.com](https://notes.vcoeur.com), designed to be driven by **Claude Code via skills**. Reads are fast and offline against a local SQLite FTS5 index; writes go to the remote first and are then refreshed locally, so the remote is always the source of truth.
+Standalone CLI zettelkasten with a local markdown vault + SQLite FTS5 index. Runs in two modes:
 
-> **Not deployed anywhere.** This is a per-laptop client for your own `notes.vcoeur.com` instance — you need to run the server to use it. Install it on each machine you use, point it at the same `notes.vcoeur.com`, and let each local mirror catch up independently.
+- **Local mode** (default): a self-contained zettelkasten. No server, no network, no token. The vault is the source of truth; SQLite is a derived index that catches up to external edits automatically on each CLI invocation. This is all you need if you just want a fast, text-editor-friendly notes system.
+- **Remote mode**: mirrors a [notes.vcoeur.com](https://notes.vcoeur.com) instance. Reads stay offline against the local index; writes go to the remote first and refresh the mirror.
+
+Both modes share the same CLI surface — the only difference is where data lives. Set `KASTEN_API_URL` in your environment to switch to remote mode; leave it empty (the default) for local mode.
 
 ## What it does
 
@@ -79,8 +82,49 @@ tests/             <- mirror the app layout
 Read rules:
 
 - **Reads never hit the network.** Every command except `sync`, `verify`, and the write / attachment operations below resolves against the local mirror + sqlite. If the mirror is stale, Claude sees stale data until the next explicit `sync` — a deliberate choice for predictable latency.
-- **Writes always hit the network.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
-- **Rename cascades across referencing notes.** On `notes.vcoeur.com` v2.9.0+, `kasten rename` (and `kasten edit --filename`) triggers a server-side rewrite of `[[old-filename]]` → `[[new-filename]]` in every other note that referenced the renamed one. The server returns the affected notes in an `affectedNotes` array on the PUT response; KastenManager re-fetches each and re-ingests it into the local mirror in the same command, so bodies stay consistent without a full `kasten sync`. Pre-v2.9.0 servers return no `affectedNotes` field — the client then leaves referencing bodies untouched, matching the old silent-breakage behaviour until the server is upgraded.
+- **Writes always hit the network in remote mode.** `create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download` call `notes.vcoeur.com` first, then re-fetch the affected note and update the local mirror in the same command. No local-authoritative state.
+- **Local mode is filesystem-authoritative.** The vault is the source of truth; SQLite is derived. Every CLI invocation first runs a mtime-gated stat walk that picks up external edits (e.g. files you edited in your text editor), new files dropped into the vault, and external deletes. `kasten delete` moves files to `<vault>/.trash/` (reversible via `kasten restore`); `rm foo.md` in a shell is a permanent delete (the walk drops the store row and there is no trash copy to restore from).
+- **Rename cascades across referencing notes** in both modes. Rename rewrites `[[old-filename]]` to `[[new-filename]]` in every other note whose body referenced the renamed one. In remote mode the server does the rewrite and returns an `affectedNotes` envelope (notes.vcoeur.com v2.9.0+); in local mode KastenManager does the same rewrite by walking the `wikilinks` index. Rollback on partial failure restores the original bytes of every file it touched before re-raising.
+
+## Local-only mode — quickstart
+
+```bash
+# 1. Install.
+git clone https://github.com/vcoeur/KastenManager.git
+cd KastenManager
+make dev-install
+
+# 2. Point it at a fresh vault directory. No token, no URL.
+export KASTEN_HOME=~/my-kasten
+mkdir -p ~/my-kasten/kasten
+
+# 3. Create your first note.
+uv run kasten create --filename "- First thought" --body "Hello from my new vault."
+
+# 4. Read, list, search — all offline.
+uv run kasten list
+uv run kasten search "hello"
+```
+
+Vault layout after a few writes:
+
+```
+~/my-kasten/
+├── kasten/                   ← the markdown vault, version-control this
+│   ├── note/
+│   │   ├── - First thought.md
+│   │   └── ! Permanent insight.md
+│   ├── entity/
+│   │   └── @ Alice Voland.md
+│   ├── literature/
+│   │   └── Smith2024. Reading notes.md
+│   ├── .trash/               ← soft-deleted notes (reversible)
+│   └── .attachments/         ← blobs for `kasten upload`
+└── .kasten-state/
+    └── index.sqlite          ← derived FTS5 + wikilink index
+```
+
+You can edit `.md` files directly in any editor — the next `kasten` invocation picks up the changes via a stat walk. Git-managing the `kasten/` directory is the expected sync story across machines; `.kasten-state/` should be gitignored because it is a derived cache.
 
 ## Install
 

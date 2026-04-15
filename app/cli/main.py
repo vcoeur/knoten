@@ -1,7 +1,7 @@
 """Typer CLI entrypoint for the `kasten` command.
 
 Each subcommand is a thin wrapper: parse flags, resolve Settings, open the
-Store (and NotesClient when remote access is needed), call into a service,
+Store (and RemoteBackend when remote access is needed), call into a service,
 render the result via `app.cli.output`.
 
 Exit codes (mapped from exception types in `app.repositories.errors`):
@@ -37,6 +37,7 @@ from app.cli.output import (
     render_summary_list,
     render_sync_result,
 )
+from app.repositories.backend import Backend
 from app.repositories.errors import (
     AmbiguousTargetError,
     AuthError,
@@ -51,8 +52,9 @@ from app.repositories.errors import (
 from app.repositories.errors import (
     PermissionError as LocalPermissionError,
 )
-from app.repositories.http_client import NotesClient
+from app.repositories.local_backend import LocalBackend
 from app.repositories.lock import acquire_lock
+from app.repositories.remote_backend import RemoteBackend
 from app.repositories.store import Store
 from app.repositories.sync_state import load_state
 from app.services.notes import (
@@ -104,10 +106,32 @@ def _load() -> Settings:
 
 
 def _require_token(settings: Settings) -> None:
+    if settings.effective_mode == "local":
+        # Local mode has no server to authenticate against. The token is
+        # meaningless and every command works without it.
+        return
     if not settings.api_token:
         raise ConfigError(
             "KASTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
         )
+
+
+def _build_backend(settings: Settings) -> Backend:
+    """Construct the backend implementation selected by settings.
+
+    Selection: `effective_mode` resolves `KASTEN_MODE=auto` to `local` when
+    `KASTEN_API_URL` is empty and `remote` otherwise. Explicit `remote` /
+    `local` are honoured as-is. Local mode requires no network and no
+    token — any user can run KastenManager against a plain on-disk vault.
+    """
+    if settings.effective_mode == "local":
+        return LocalBackend(settings)
+    if not settings.api_url:
+        raise ConfigError(
+            "KASTEN_MODE=remote requires KASTEN_API_URL to be set "
+            "(or unset KASTEN_MODE to fall back to local mode)."
+        )
+    return RemoteBackend(settings)
 
 
 def _classify_error(exc: Exception) -> tuple[int, str]:
@@ -208,12 +232,26 @@ def cmd_sync(
     progress = make_progress_callback(mode)
     try:
         settings = _load()
+        if settings.effective_mode == "local":
+            # Local mode has no server to sync from. `kasten sync` becomes
+            # a stat-walk reindex: the backend walks the vault on its
+            # first read-path call and catches up external edits.
+            progress("→ Local mode: running reindex walk (no network)")
+            with _build_backend(settings) as backend:
+                page = backend.list_note_summaries(limit=1, offset=0)
+            payload = {
+                "mode": "local",
+                "total": page.total,
+                "message": "Local mode — vault reindexed from disk.",
+            }
+            render_sync_result(payload, mode=mode)
+            return
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 if full:
                     result = full_sync(
-                        client=client,
+                        backend=backend,
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
@@ -221,7 +259,7 @@ def cmd_sync(
                     )
                 else:
                     result = incremental_sync(
-                        client=client,
+                        backend=backend,
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
@@ -278,9 +316,9 @@ def cmd_verify(
             progress(
                 "→ Reconciling local mirror" + (" (with body-hash verification)" if hashes else "")
             )
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 result = reconcile_local(
-                    client=client,
+                    backend=backend,
                     store=store,
                     settings=settings,
                     verify_hashes=hashes,
@@ -755,9 +793,9 @@ def cmd_create(
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note = create_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     filename=filename,
@@ -838,9 +876,9 @@ def cmd_edit(
             key, _, value = pair.partition("=")
             fm_sets[key] = value
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note = edit_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -918,9 +956,9 @@ def cmd_append(
         if ai:
             text = _wrap_ai(text)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note = append_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -957,9 +995,9 @@ def cmd_delete(
                 log("aborted", mode=mode)
                 raise typer.Exit(0)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note_id = delete_note_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     target=target,
@@ -991,9 +1029,9 @@ def cmd_restore(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note = restore_note_remote(
-                    client=client, store=store, vault_dir=settings.vault_dir, note_id=note_id
+                    backend=backend, store=store, vault_dir=settings.vault_dir, note_id=note_id
                 )
             payload = _write_response(store, settings.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
@@ -1097,9 +1135,9 @@ def cmd_upload(
         settings = _load()
         _require_token(settings)
         with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 note, upload = upload_file_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     vault_dir=settings.vault_dir,
                     source_path=path,
@@ -1149,9 +1187,9 @@ def cmd_download(
         settings = _load()
         _require_token(settings)
         with Store(settings.index_path) as store:
-            with NotesClient(settings) as client:
+            with _build_backend(settings) as backend:
                 result = download_file_remote(
-                    client=client,
+                    backend=backend,
                     store=store,
                     target=target,
                     destination=output,
