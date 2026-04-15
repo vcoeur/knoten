@@ -133,8 +133,11 @@ The `kasten/` subdirectory name is historical (the vault is a Zettelkasten) and 
 Install from PyPI:
 
 ```bash
-pip install knoten
+pipx install knoten
+# or: uv tool install knoten
 ```
+
+Both install `knoten` into its own isolated venv and put it on your `$PATH`.
 
 Verify:
 
@@ -143,7 +146,13 @@ knoten --help
 knoten config show --json   # see the effective configuration
 ```
 
-For local mode (the default), that's all you need — the CLI creates a vault at `~/.knoten/kasten/` on first use.
+For local mode (the default), that's all you need — the vault at `~/.knoten/kasten/` and the SQLite index are created lazily on your first command (`knoten list`, `knoten create`, …).
+
+Optional bootstrap — pre-seed a commented `.env` and create the vault dirs up front instead of lazily:
+
+```bash
+knoten init
+```
 
 For remote mode (mirroring a `notes.vcoeur.com` instance), edit your `.env` and add `KNOTEN_API_URL` + `KNOTEN_API_TOKEN`:
 
@@ -214,7 +223,7 @@ knoten rename "! New idea" "! Core insight" --json
 
 **Dev from the repo** (`uv run knoten …`, `make sync`): `KNOTEN_HOME` defaults to the directory containing `pyproject.toml`, and the repo's own `.env` is read automatically. Clone, `cp .env.example .env`, fill in the token, done.
 
-**Installed from PyPI** (`pip install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`** first. That file is typically a two-line pointer:
+**Installed from PyPI** (`pipx install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`** first. That file is typically a two-line pointer:
 
 ```ini
 KNOTEN_HOME=~/src/vcoeur/knoten
