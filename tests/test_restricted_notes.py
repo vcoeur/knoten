@@ -106,7 +106,7 @@ def test_sync_creates_placeholder_for_404_note(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1
         assert result.restricted_placeholders == 1
@@ -121,17 +121,17 @@ def test_sync_creates_placeholder_for_404_note(
         assert json.loads(row["frontmatter_json"]) == {}
 
         # Placeholder is in FTS5 via title, so search by title still works.
-        hits, total = store.search("Restricted", vault_dir=tmp_settings.vault_dir)
+        hits, total = store.search("Restricted", vault_dir=tmp_settings.paths.vault_dir)
         assert total == 1
         assert hits[0].id == restricted_id
 
         # Placeholder is NOT in FTS5 via body (body is empty).
-        hits, total = store.search("Body of", vault_dir=tmp_settings.vault_dir)
+        hits, total = store.search("Body of", vault_dir=tmp_settings.paths.vault_dir)
         assert total == 1  # only the readable one
         assert hits[0].id == readable_id
 
     # The placeholder file exists on disk with the restricted marker.
-    placeholder_file = tmp_settings.vault_dir / "note" / "! Restricted.md"
+    placeholder_file = tmp_settings.paths.vault_dir / "note" / "! Restricted.md"
     assert placeholder_file.exists()
     content = placeholder_file.read_text(encoding="utf-8")
     assert "restricted: true" in content
@@ -153,14 +153,14 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
     never_seen_id = "55555555-5555-5555-5555-555555555555"
 
     # Pre-seed state with a cursor and a local row for known_id.
-    tmp_settings.state_dir.mkdir(parents=True, exist_ok=True)
-    tmp_settings.state_file.write_text(
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
         '{"schema_version": 2, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
         encoding="utf-8",
     )
     from knoten.models import Note
 
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         pre = Note(
             id=known_id,
             filename="! Known",
@@ -177,7 +177,7 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
         )
         from knoten.services.notes import ingest_note
 
-        ingest_note(pre, store=store, vault_dir=tmp_settings.vault_dir)
+        ingest_note(pre, store=store, vault_dir=tmp_settings.paths.vault_dir)
 
     # List response: both notes present, both older than the cursor (so the
     # main pagination loop bails on the stale page immediately).
@@ -201,7 +201,7 @@ def test_sync_drift_catch_up_pass_finds_never_seen_ids(
         json=_note_payload(never_seen_id, "! NeverSeen"),
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1  # the never-seen note was pulled
         assert store.find_by_id(never_seen_id) is not None

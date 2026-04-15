@@ -1,6 +1,6 @@
 """Filesystem + SQLite `Backend` implementation.
 
-Operates on a markdown vault under `settings.vault_dir` with a local
+Operates on a markdown vault under `settings.paths.vault_dir` with a local
 `Store` (SQLite + FTS5) as a derived index. No network, no permission
 model — a standalone zettelkasten CLI for users who do not want to run
 their own `notes.vcoeur.com` instance.
@@ -51,14 +51,15 @@ class LocalBackend(Backend):
     """`Backend` backed by a markdown vault + local SQLite index."""
 
     def __init__(self, settings: Settings) -> None:
-        if not settings.vault_dir.exists():
+        if not settings.paths.vault_dir.exists():
             raise UserError(
-                f"Vault directory does not exist: {settings.vault_dir} — "
-                "create it or set KNOTEN_HOME to a directory with a `kasten/` subdir."
+                f"Vault directory does not exist: {settings.paths.vault_dir} — "
+                "run `knoten init` or set KNOTEN_DATA_DIR to a directory with a "
+                "`kasten/` subdir."
             )
         self._settings = settings
-        self._vault_dir = settings.vault_dir
-        self._store = Store(settings.index_path)
+        self._vault_dir = settings.paths.vault_dir
+        self._store = Store(settings.paths.index_path)
         self._store.open()
         self._reindex_done: bool = False
 

@@ -52,14 +52,15 @@ def _assert_minimal(payload: dict) -> None:
 
 @pytest.fixture
 def cli_env(monkeypatch, tmp_path):
-    """Env wiring that lets the CLI find a per-test vault + mock server."""
-    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    """Env wiring that lets the CLI find a per-test vault + mock server.
+
+    The autouse `_isolate_paths` fixture already pins config / data / cache
+    dirs under a per-test sandbox, so we only need to inject the API URL
+    and token for the mocked remote backend.
+    """
     monkeypatch.setenv("KNOTEN_API_URL", API_URL)
     monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test_token")
-    settings = load_settings()
-    settings.vault_dir.mkdir(parents=True, exist_ok=True)
-    settings.state_dir.mkdir(parents=True, exist_ok=True)
-    return settings
+    return load_settings()
 
 
 def _seed_permanent(settings, *, note_id: str = NOTE_ID) -> Note:
@@ -78,8 +79,8 @@ def _seed_permanent(settings, *, note_id: str = NOTE_ID) -> Note:
         updated_at="2024-01-02T00:00:00Z",
         mcp_permissions="ALL",
     )
-    with Store(settings.index_path) as store:
-        ingest_note(note, store=store, vault_dir=settings.vault_dir)
+    with Store(settings.paths.index_path) as store:
+        ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
     return note
 
 
@@ -280,11 +281,11 @@ def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None
         updated_at="2024-01-02T00:00:00Z",
         mcp_permissions="ALL",
     )
-    with Store(cli_env.index_path) as store:
-        source_path = ingest_note(source_note, store=store, vault_dir=cli_env.vault_dir)
+    with Store(cli_env.paths.index_path) as store:
+        source_path = ingest_note(source_note, store=store, vault_dir=cli_env.paths.vault_dir)
 
     # Sanity: the source file on disk currently points at [[! Seed]].
-    assert "[[! Seed]]" in (cli_env.vault_dir / source_path).read_text()
+    assert "[[! Seed]]" in (cli_env.paths.vault_dir / source_path).read_text()
 
     httpx_mock.add_response(
         url=f"{API_URL}/api/notes/{NOTE_ID}",
@@ -333,7 +334,7 @@ def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None
     assert result.exit_code == 0, result.output
 
     # The local mirror of the source note must now contain the new wikilink.
-    refreshed_body = (cli_env.vault_dir / source_path).read_text()
+    refreshed_body = (cli_env.paths.vault_dir / source_path).read_text()
     assert "[[! Seed renamed]]" in refreshed_body
     assert "[[! Seed]]" not in refreshed_body
 

@@ -66,14 +66,14 @@ def _seed_vault(settings: Settings) -> list[Note]:
             updated_at="2024-01-04T00:00:00Z",
         ),
     ]
-    with Store(settings.index_path) as store:
+    with Store(settings.paths.index_path) as store:
         for note in notes:
-            ingest_note(note, store=store, vault_dir=settings.vault_dir)
+            ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
     return notes
 
 
 def test_local_backend_rejects_missing_vault_dir(tmp_settings: Settings) -> None:
-    tmp_settings.vault_dir.rmdir()
+    tmp_settings.paths.vault_dir.rmdir()
     with pytest.raises(Exception, match="Vault directory does not exist"):
         LocalBackend(tmp_settings)
 

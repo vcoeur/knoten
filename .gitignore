@@ -10,6 +10,7 @@ kasten.bak-*/
 
 # Runtime state (index, sync cursor, scratch)
 .knoten-state/
+.dev-state/
 
 # Python build artefacts
 __pycache__/

@@ -34,7 +34,7 @@ def _seed_note(store: Store, settings: Settings, note_id: str, body: str = "Body
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
     )
-    ingest_note(note, store=store, vault_dir=settings.vault_dir)
+    ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
 
 
 def _note_read_payload(note_id: str, *, body: str = "Body one.") -> dict:
@@ -56,10 +56,10 @@ def _note_read_payload(note_id: str, *, body: str = "Body one.") -> dict:
 
 def test_reconcile_refetches_missing_files(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
     note_id = "11111111-1111-1111-1111-111111111111"
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_note(store, tmp_settings, note_id)
         # Simulate user rm'ing the mirror file.
-        target = tmp_settings.vault_dir / "note" / "! Seeded.md"
+        target = tmp_settings.paths.vault_dir / "note" / "! Seeded.md"
         assert target.exists()
         target.unlink()
         assert not target.exists()
@@ -81,16 +81,16 @@ def test_reconcile_refetches_missing_files(tmp_settings: Settings, httpx_mock: H
 
 def test_reconcile_removes_orphan_files(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
     note_id = "22222222-2222-2222-2222-222222222222"
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_note(store, tmp_settings, note_id)
 
         # Drop an orphan markdown file that the store does not know about.
-        orphan = tmp_settings.vault_dir / "note" / "! Orphaned.md"
+        orphan = tmp_settings.paths.vault_dir / "note" / "! Orphaned.md"
         orphan.write_text("---\ntitle: Orphan\n---\n\nOrphan body.\n", encoding="utf-8")
         assert orphan.exists()
 
         # Drop a dotfile that should be ignored (atomic-write leftover).
-        dotfile = tmp_settings.vault_dir / "note" / ".DS_Store"
+        dotfile = tmp_settings.paths.vault_dir / "note" / ".DS_Store"
         dotfile.write_bytes(b"")
 
         with RemoteBackend(tmp_settings) as backend:
@@ -102,16 +102,16 @@ def test_reconcile_removes_orphan_files(tmp_settings: Settings, httpx_mock: HTTP
         # Dotfile is left alone.
         assert dotfile.exists()
         # Known file is untouched.
-        assert (tmp_settings.vault_dir / "note" / "! Seeded.md").exists()
+        assert (tmp_settings.paths.vault_dir / "note" / "! Seeded.md").exists()
 
 
 def test_reconcile_hash_verification_refetches_drifted(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     note_id = "33333333-3333-3333-3333-333333333333"
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_note(store, tmp_settings, note_id, body="Original body.")
-        target = tmp_settings.vault_dir / "note" / "! Seeded.md"
+        target = tmp_settings.paths.vault_dir / "note" / "! Seeded.md"
 
         # User manually edits the file — body no longer matches body_sha256.
         text = target.read_text(encoding="utf-8")
@@ -141,7 +141,7 @@ def test_reconcile_hash_verification_refetches_drifted(
 
 def test_reconcile_is_idempotent_when_clean(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
     note_id = "44444444-4444-4444-4444-444444444444"
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_note(store, tmp_settings, note_id)
         with RemoteBackend(tmp_settings) as backend:
             result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
@@ -165,12 +165,12 @@ def test_sync_always_catches_remote_deletes_even_on_equal_totals(
     deleted_id = "66666666-6666-6666-6666-666666666666"
 
     # Pre-seed both notes locally, then advance the cursor past everything.
-    tmp_settings.state_dir.mkdir(parents=True, exist_ok=True)
-    tmp_settings.state_file.write_text(
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
         '{"schema_version": 1, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
         encoding="utf-8",
     )
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_note(store, tmp_settings, kept_id)
         # Manually insert a second note so both are "locally known".
         other = Note(
@@ -187,7 +187,7 @@ def test_sync_always_catches_remote_deletes_even_on_equal_totals(
             created_at="2024-01-01T00:00:00Z",
             updated_at="2024-01-02T00:00:00Z",
         )
-        ingest_note(other, store=store, vault_dir=tmp_settings.vault_dir)
+        ingest_note(other, store=store, vault_dir=tmp_settings.paths.vault_dir)
         assert store.count_notes() == 2
 
     # Remote now only has kept_id. Total=1 on the list response.
@@ -226,7 +226,7 @@ def test_sync_always_catches_remote_deletes_even_on_equal_totals(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.deleted == 1
         assert store.count_notes() == 1

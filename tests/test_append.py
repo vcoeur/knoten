@@ -38,7 +38,7 @@ def _seed_local(store: Store, tmp_settings: Settings, *, mcp_permissions: str = 
         updated_at="2024-01-02T00:00:00Z",
         mcp_permissions=mcp_permissions,
     )
-    ingest_note(note, store=store, vault_dir=tmp_settings.vault_dir)
+    ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     return note
 
 
@@ -81,7 +81,7 @@ def test_append_to_note_backend_posts_to_append_endpoint(
 def test_append_note_remote_round_trips_through_store(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_local(store, tmp_settings)
 
         httpx_mock.add_response(
@@ -116,7 +116,7 @@ def test_append_note_remote_round_trips_through_store(
             note = append_note_remote(
                 backend=backend,
                 store=store,
-                vault_dir=tmp_settings.vault_dir,
+                vault_dir=tmp_settings.paths.vault_dir,
                 target="11111111-1111-1111-1111-111111111111",
                 content="second line",
             )
@@ -124,7 +124,7 @@ def test_append_note_remote_round_trips_through_store(
         assert note.body == "first line\n\nsecond line"
 
         # Mirror file has the new body.
-        path = tmp_settings.vault_dir / "note" / "! Seed.md"
+        path = tmp_settings.paths.vault_dir / "note" / "! Seed.md"
         assert path.exists()
         text = path.read_text(encoding="utf-8")
         assert "first line" in text
@@ -134,7 +134,7 @@ def test_append_note_remote_round_trips_through_store(
 def test_append_note_remote_refuses_below_append_without_force(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_local(store, tmp_settings, mcp_permissions="READ")
 
         with RemoteBackend(tmp_settings) as backend:
@@ -142,7 +142,7 @@ def test_append_note_remote_refuses_below_append_without_force(
                 append_note_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=tmp_settings.vault_dir,
+                    vault_dir=tmp_settings.paths.vault_dir,
                     target="11111111-1111-1111-1111-111111111111",
                     content="blocked",
                 )
@@ -157,7 +157,7 @@ def test_append_note_remote_refuses_below_append_without_force(
 def test_append_note_remote_force_bypasses_precheck(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_local(store, tmp_settings, mcp_permissions="READ")
 
         # Server would accept it for a web-scope token; mock accordingly.
@@ -188,7 +188,7 @@ def test_append_note_remote_force_bypasses_precheck(
             note = append_note_remote(
                 backend=backend,
                 store=store,
-                vault_dir=tmp_settings.vault_dir,
+                vault_dir=tmp_settings.paths.vault_dir,
                 target="11111111-1111-1111-1111-111111111111",
                 content="forced",
                 force=True,

@@ -62,7 +62,7 @@ Python 3.12+, managed with `uv`. Deliberately small and stdlib-friendly.
 | Store + search | stdlib `sqlite3` + FTS5 (`unicode61` for ranked search, `trigram` mirror for `search --fuzzy`) + [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) |
 | Markdown parsing | [markdown-it-py](https://markdown-it-py.readthedocs.io/) |
 | Terminal output | [rich](https://rich.readthedocs.io/) |
-| Config | [environs](https://pypi.org/project/environs/) + `.env` |
+| Config | [environs](https://pypi.org/project/environs/) + `.env` + [platformdirs](https://platformdirs.readthedocs.io/) for cross-OS paths |
 | Tests | pytest + pytest-httpx |
 
 ## Architecture
@@ -89,44 +89,41 @@ Read rules:
 ## Local-only mode — quickstart
 
 ```bash
-# 1. Install.
-git clone https://github.com/vcoeur/knoten.git
-cd knoten
-make dev-install
+# 1. Install from PyPI.
+pipx install knoten
+# or: uv tool install knoten
 
-# 2. Point it at a fresh vault directory. No token, no URL.
-export KNOTEN_HOME=~/my-knoten
-mkdir -p ~/my-knoten/kasten
+# 2. Create your first note — vault + SQLite index auto-create on demand.
+knoten create --filename "- First thought" --body "Hello from my new vault."
 
-# 3. Create your first note.
-uv run knoten create --filename "- First thought" --body "Hello from my new vault."
-
-# 4. Read, list, search — all offline.
-uv run knoten list
-uv run knoten search "hello"
+# 3. Read, list, search — all offline.
+knoten list
+knoten search "hello"
 ```
 
-Vault layout after a few writes:
+Default Linux vault layout after a few writes:
 
 ```
-~/my-knoten/
-├── kasten/                   ← the markdown vault, version-control this
-│   ├── note/
-│   │   ├── - First thought.md
-│   │   └── ! Permanent insight.md
-│   ├── entity/
-│   │   └── @ Alice Voland.md
-│   ├── literature/
-│   │   └── Smith2024. Reading notes.md
-│   ├── .trash/               ← soft-deleted notes (reversible)
-│   └── .attachments/         ← blobs for `knoten upload`
-└── .knoten-state/
-    └── index.sqlite          ← derived FTS5 + wikilink index
+~/.local/share/knoten/kasten/   ← the markdown vault (platformdirs data dir)
+├── note/
+│   ├── - First thought.md
+│   └── ! Permanent insight.md
+├── entity/
+│   └── @ Alice Voland.md
+├── literature/
+│   └── Smith2024. Reading notes.md
+├── .trash/                     ← soft-deleted notes (reversible)
+└── .attachments/               ← blobs for `knoten upload`
+
+~/.cache/knoten/
+├── index.sqlite                ← derived FTS5 + wikilink index
+├── state.json                  ← sync cursor (remote mode)
+└── sync.lock                   ← fcntl advisory lock
 ```
 
-You can edit `.md` files directly in any editor — the next `knoten` invocation picks up the changes via a stat walk. Git-managing the `kasten/` directory is the expected sync story across machines; `.knoten-state/` should be gitignored because it is a derived cache.
+macOS and Windows place these under the respective OS-standard locations — see the [Local paths](#local-paths) section below. You can point any of the three dirs anywhere with `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR`.
 
-The `kasten/` subdirectory name is historical (the vault is a Zettelkasten) and can be changed via `KNOTEN_VAULT_DIR`.
+You can edit `.md` files directly in any editor — the next `knoten` invocation picks up the changes via a stat walk. Git-managing the `kasten/` directory is the expected sync story across machines; the cache dir should be excluded because it is derived state.
 
 ## Install
 
@@ -174,7 +171,7 @@ uv run knoten config show --json
 make test                   # pytest
 ```
 
-When run from the repo, `knoten` picks up the `.env` at the repo root automatically and stores its vault + SQLite index under the repo. No global install needed.
+When run from the repo, `knoten` picks up the `.env` at the repo root, keeps the markdown vault at `<repo>/kasten/`, and puts the SQLite index + sync cursor under `<repo>/.dev-state/cache/` so derived state stays out of the main tree. No global install needed.
 
 ## First sync
 
@@ -182,7 +179,7 @@ When run from the repo, `knoten` picks up the `.env` at the repo root automatica
 knoten sync --full
 ```
 
-This pages through `GET /api/notes` with the cursor cleared, fetches each note's body via `GET /api/notes/{id}`, writes one markdown file per note under `./kasten/`, and builds the local SQLite index under `./.knoten-state/index.sqlite`.
+This pages through `GET /api/notes` with the cursor cleared, fetches each note's body via `GET /api/notes/{id}`, writes one markdown file per note under the vault directory, and builds the local SQLite index in the cache dir.
 
 If `./kasten/` already contains unrelated content, it is preserved — sync writes files by their export-style path (`entity/`, `note/`, `literature/`, `files/`, `journal/YYYY-MM/`) and will not overwrite arbitrary files in parallel directories.
 
@@ -208,27 +205,46 @@ knoten rename "! New idea" "! Core insight" --json
 
 ## Local paths
 
-`KNOTEN_HOME` anchors the vault and state directories:
+`knoten` follows each OS's standard "config dir + data dir + cache dir" layout via [`platformdirs`](https://platformdirs.readthedocs.io/):
 
-| Path | Purpose | Gitignored |
-|---|---|---|
-| `$KNOTEN_HOME/kasten/` | plaintext markdown mirror | yes |
-| `$KNOTEN_HOME/.knoten-state/index.sqlite` | metadata + FTS5 index | yes |
-| `$KNOTEN_HOME/.knoten-state/state.json` | sync cursor, schema version | yes |
-| `$KNOTEN_HOME/.knoten-state/tmp/` | scratch (atomic writes, zip unpack) | yes |
-| `$KNOTEN_HOME/.knoten-state/sync.lock` | fcntl advisory lock during sync / writes | yes |
+| Role | Linux (XDG) | macOS | Windows |
+|---|---|---|---|
+| Config (`.env`) | `~/.config/knoten/` | `~/Library/Application Support/knoten/` | `%APPDATA%\knoten\` |
+| Data (markdown vault) | `~/.local/share/knoten/kasten/` | `~/Library/Application Support/knoten/kasten/` | `%LOCALAPPDATA%\knoten\kasten\` |
+| Cache (SQLite + sync state) | `~/.cache/knoten/` | `~/Library/Caches/knoten/` | `%LOCALAPPDATA%\knoten\Cache\` |
 
-### One `.env` per runtime context
+Any of the three can be overridden via env vars — useful for tests, Docker, or custom deployments:
 
-Exactly one `.env` file is read per invocation — whichever one is appropriate for how knoten is running. No layering, no pointer files.
+```bash
+export KNOTEN_CONFIG_DIR=/etc/knoten
+export KNOTEN_DATA_DIR=/srv/knoten/data
+export KNOTEN_CACHE_DIR=/var/cache/knoten
+```
 
-**Dev from the repo** (`uv run knoten …`, `make sync`): the repo-root `.env` is the only file read. Clone, `cp .env.example .env`, fill in whatever you need, done.
+Inspect the resolved paths at any time:
 
-**Installed from PyPI** (`pipx install knoten` / `uv tool install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`**. Everything lives in that one file — `KNOTEN_API_URL`, `KNOTEN_API_TOKEN`, `KNOTEN_MODE`, and — if you want the vault somewhere other than `~/.knoten/` — `KNOTEN_HOME=/path/to/vault` next to the rest. `knoten config edit` always opens this file.
+```bash
+knoten config path        # plain output, one path per line
+knoten config path --json # JSON, scriptable
+knoten config show        # all values including API token (redacted)
+```
 
-Process env vars still win over the file (`environs.read_env(override=False)`), so a one-shot `KNOTEN_API_URL=… knoten sync` works as expected.
+**Dev mode** — when `knoten` is run from a source checkout (`uv run knoten …` inside the repo), the `.env` at the repo root is picked up, the markdown vault stays at `<repo>/kasten/` (unchanged from pre-v0.2 layout), and the SQLite cache goes into a repo-local `<repo>/.dev-state/cache/` to keep derived state out of the main tree.
 
-**Migrating from the old pointer-style layout (pre-single-file)**: if `~/.config/knoten/.env` used to be a two-line pointer to a repo checkout (`KNOTEN_HOME=~/src/vcoeur/knoten`) and the real token lived in `$KNOTEN_HOME/.env`, copy `KNOTEN_API_URL` + `KNOTEN_API_TOKEN` from the repo's `.env` into `~/.config/knoten/.env` once. The repo's own `.env` is then only used when you run `uv run knoten …` from inside the checkout.
+### Migration from v0.1.x
+
+The first run of v0.2+ from an installed copy automatically moves:
+
+| Legacy path (v0.1.x) | New path (v0.2+) |
+|---|---|
+| `~/.knoten/kasten/` (or `$KNOTEN_HOME/kasten/`) | `$KNOTEN_DATA_DIR/kasten/` |
+| `~/.knoten/.knoten-state/index.sqlite` | `$KNOTEN_CACHE_DIR/index.sqlite` |
+| `~/.knoten/.knoten-state/state.json` | `$KNOTEN_CACHE_DIR/state.json` |
+| `~/.config/knoten/.env` | `$KNOTEN_CONFIG_DIR/.env` (same file on Linux — no-op) |
+
+No data loss, no manual steps. Ephemeral files (sync lock, tmp scratch) are not migrated — they are rebuilt on demand. Migration is skipped in dev mode so the maintainer's repo-local vault is not moved.
+
+`KNOTEN_HOME` still works as a one-release deprecation shim: if it's set, knoten prints a warning and tells you to use `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` instead.
 
 ## Development
 
@@ -244,7 +260,7 @@ Tests use pytest-httpx to mock `notes.vcoeur.com` — there is no dependency on 
 
 ## Status
 
-v0.1 — initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI.
+v0.2 — adopts cross-OS `platformdirs` layout (XDG on Linux, `~/Library/…` on macOS, `%APPDATA%` / `%LOCALAPPDATA%` on Windows), with auto-migration from the v0.1 `KNOTEN_HOME`-anchored layout on first run. v0.1 introduced the initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI.
 
 ## Licence
 

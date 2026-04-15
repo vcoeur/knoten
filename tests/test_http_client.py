@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
@@ -13,18 +15,7 @@ from knoten.settings import Settings
 
 
 def test_client_requires_token(tmp_settings: Settings) -> None:
-    bad = Settings(
-        api_url=tmp_settings.api_url,
-        api_token="",
-        http_timeout=tmp_settings.http_timeout,
-        home=tmp_settings.home,
-        vault_dir=tmp_settings.vault_dir,
-        state_dir=tmp_settings.state_dir,
-        index_path=tmp_settings.index_path,
-        state_file=tmp_settings.state_file,
-        lock_file=tmp_settings.lock_file,
-        tmp_dir=tmp_settings.tmp_dir,
-    )
+    bad = replace(tmp_settings, api_token="")
     with pytest.raises(AuthError):
         RemoteBackend(bad)
 

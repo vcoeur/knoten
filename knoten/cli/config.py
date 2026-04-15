@@ -2,12 +2,12 @@
 
 Three subcommands:
 
-- `knoten config show` — dump the effective configuration (same payload
-  the old flat `knoten config` used to produce; the token is redacted).
-- `knoten config path` — print just the resolved paths. Grep-friendly
-  output suitable for shell scripts.
-- `knoten config edit` — open the `.env` file in `$VISUAL` / `$EDITOR`
-  or the OS default editor. On Windows this means users never have to
+- `knoten config show` — dump the effective configuration (API URL, mode,
+  token redacted, resolved paths).
+- `knoten config path` — print just the resolved config/data/cache paths.
+  Grep-friendly output suitable for shell scripts.
+- `knoten config edit` — open the `.env` file in `$VISUAL` / `$EDITOR` or
+  the OS default editor. On Windows this means users never have to
   navigate `%APPDATA%` manually.
 
 The `init_command` helper is invoked by the top-level `knoten init`
@@ -21,13 +21,12 @@ import os
 import platform
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 import typer
 
 from knoten.cli.output import OutputMode, emit_json, render_status
-from knoten.settings import Settings, ensure_dirs, load_settings, primary_env_file
+from knoten.settings import Settings, load_settings
 
 config_app = typer.Typer(
     help="Inspect and edit the knoten configuration.",
@@ -53,35 +52,47 @@ KNOTEN_API_URL=
 # Shown only once at creation time — store it here or in a password manager.
 # KNOTEN_API_TOKEN=nt_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Optional: override the root path for vault + state.
-# Defaults to the repo root in dev, ~/.knoten when installed.
-# KNOTEN_HOME=~/src/vcoeur/knoten
+# HTTP request timeout in seconds.
+# KNOTEN_HTTP_TIMEOUT=30
+
+# Filesystem escape hatches — point config / data / cache somewhere other
+# than the platformdirs default. Useful for tests, Docker, custom deploys.
+# KNOTEN_CONFIG_DIR=/etc/knoten
+# KNOTEN_DATA_DIR=/srv/knoten/data
+# KNOTEN_CACHE_DIR=/var/cache/knoten
 """
 
 
 def _full_config_payload(settings: Settings) -> dict[str, Any]:
     """Build the dict emitted by `config show` (all values + paths)."""
+    p = settings.paths
     return {
         "mode": settings.effective_mode,
-        "api_url": settings.api_url,
-        "api_token": settings.token_redacted,
+        "runtime": "dev" if p.is_dev else "installed",
+        "api_url": settings.api_url or "(unset)",
+        "api_token": settings.token_redacted or "(unset)",
         "http_timeout": settings.http_timeout,
-        "home": str(settings.home),
-        "vault_dir": str(settings.vault_dir),
-        "state_dir": str(settings.state_dir),
-        "env_file": str(primary_env_file()),
+        "config_dir": str(p.config_dir),
+        "data_dir": str(p.data_dir),
+        "cache_dir": str(p.cache_dir),
+        "env_file": str(p.env_file),
+        "vault_dir": str(p.vault_dir),
+        "index_path": str(p.index_path),
     }
 
 
 def _paths_payload(settings: Settings) -> dict[str, str]:
     """Build the dict emitted by `config path` (paths only)."""
+    p = settings.paths
     return {
         "mode": settings.effective_mode,
-        "home": str(settings.home),
-        "vault_dir": str(settings.vault_dir),
-        "state_dir": str(settings.state_dir),
-        "index_path": str(settings.index_path),
-        "env_file": str(primary_env_file()),
+        "runtime": "dev" if p.is_dev else "installed",
+        "config_dir": str(p.config_dir),
+        "data_dir": str(p.data_dir),
+        "cache_dir": str(p.cache_dir),
+        "env_file": str(p.env_file),
+        "vault_dir": str(p.vault_dir),
+        "index_path": str(p.index_path),
     }
 
 
@@ -93,7 +104,6 @@ def config_show(
     mode = OutputMode.detect(json_output)
     try:
         settings = load_settings()
-        ensure_dirs(settings)
         render_status(_full_config_payload(settings), mode=mode)
     except Exception as exc:
         _emit_error(exc, mode=mode)
@@ -103,7 +113,7 @@ def config_show(
 def config_path(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Print the resolved config, vault, and state paths."""
+    """Print the resolved config / data / cache paths."""
     mode = OutputMode.detect(json_output)
     try:
         settings = load_settings()
@@ -120,8 +130,13 @@ def config_path(
 @config_app.command("edit")
 def config_edit() -> None:
     """Open the knoten .env file in $VISUAL / $EDITOR or the OS default editor."""
-    env_file = primary_env_file()
-    created = _ensure_env_file(env_file)
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        raise typer.Exit(4) from exc
+    env_file = settings.paths.env_file
+    created = _ensure_env_file(settings)
     editor = _resolve_editor()
     if created:
         typer.echo(f"Created {env_file} from the default template.")
@@ -133,18 +148,19 @@ def init_command() -> None:
     """Implementation of the top-level `knoten init` command."""
     try:
         settings = load_settings()
-        ensure_dirs(settings)
     except Exception as exc:
         sys.stderr.write(f"error: {exc}\n")
         raise typer.Exit(4) from exc
-    env_file = primary_env_file()
-    created = _ensure_env_file(env_file)
+    created = _ensure_env_file(settings)
+    p = settings.paths
     typer.echo(f"mode: {settings.effective_mode}")
-    typer.echo(f"home: {settings.home}")
-    typer.echo(f"vault_dir: {settings.vault_dir}")
-    typer.echo(f"state_dir: {settings.state_dir}")
+    typer.echo(f"runtime: {'dev' if p.is_dev else 'installed'}")
+    typer.echo(f"config_dir: {p.config_dir}")
+    typer.echo(f"data_dir: {p.data_dir}")
+    typer.echo(f"cache_dir: {p.cache_dir}")
+    typer.echo(f"vault_dir: {p.vault_dir}")
     suffix = "(created)" if created else "(already present)"
-    typer.echo(f"env_file: {env_file} {suffix}")
+    typer.echo(f"env_file: {p.env_file} {suffix}")
     if created:
         typer.echo("")
         typer.echo(
@@ -155,8 +171,9 @@ def init_command() -> None:
         typer.echo("Run `knoten config edit` to open it in your editor.")
 
 
-def _ensure_env_file(env_file: Path) -> bool:
+def _ensure_env_file(settings: Settings) -> bool:
     """Create the .env file from the default template if it does not exist."""
+    env_file = settings.paths.env_file
     if env_file.exists():
         return False
     env_file.parent.mkdir(parents=True, exist_ok=True)

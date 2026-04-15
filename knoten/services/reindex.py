@@ -78,7 +78,7 @@ def reindex_from_files(
     log(f"→ Rebuilding derived tables from {result.checked} on-disk file(s)")
 
     for row in rows:
-        absolute = settings.vault_dir / row.path
+        absolute = settings.paths.vault_dir / row.path
         if not absolute.exists():
             result.skipped_missing_file += 1
             result.missing_file_ids.append(row.id)

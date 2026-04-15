@@ -130,7 +130,7 @@ def incremental_sync(
     """
     log: ProgressCallback = progress or _noop
     started = time.monotonic()
-    state = load_state(settings.state_file)
+    state = load_state(settings.paths.state_file)
     cursor = (
         cursor_override if cursor_override is not None else (state.last_sync_max_updated_at or "")
     )
@@ -269,7 +269,7 @@ def incremental_sync(
             row = store.find_by_id(note_id)
             label = row["filename"] if row else note_id
             log(f"    ✗ removing '{label}' (trashed or hard-deleted on remote)")
-            delete_ingested(store, settings.vault_dir, note_id)
+            delete_ingested(store, settings.paths.vault_dir, note_id)
         deleted = len(to_delete)
     else:
         log("  no remote deletions detected")
@@ -297,7 +297,7 @@ def incremental_sync(
     if max_seen:
         state.last_sync_max_updated_at = max_seen
     state.last_remote_total = remote_total
-    save_state(settings.state_file, state)
+    save_state(settings.paths.state_file, state)
     store.set_meta("last_sync_at", now)
     if max_seen:
         store.set_meta("last_sync_max_updated_at", max_seen)
@@ -344,9 +344,9 @@ def full_sync(
     )
     result.mode = "full"
     now = _utcnow_iso()
-    state = load_state(settings.state_file)
+    state = load_state(settings.paths.state_file)
     state.last_full_sync_at = now
-    save_state(settings.state_file, state)
+    save_state(settings.paths.state_file, state)
     return result
 
 
@@ -371,7 +371,7 @@ def _fetch_or_placeholder(
         ingest_placeholder(
             item,
             store=store,
-            vault_dir=settings.vault_dir,
+            vault_dir=settings.paths.vault_dir,
             previous_path=previous.path if previous else None,
         )
         log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
@@ -381,7 +381,7 @@ def _fetch_or_placeholder(
     ingest_note(
         note,
         store=store,
-        vault_dir=settings.vault_dir,
+        vault_dir=settings.paths.vault_dir,
         previous_path=previous.path if previous else None,
     )
     return (1, 0)

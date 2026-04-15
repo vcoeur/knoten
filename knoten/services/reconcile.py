@@ -63,7 +63,7 @@ def reconcile_local(
     """Run all three reconciliation checks and return a report.
 
     Performs network calls only for notes that need re-fetching. File system
-    scans stay within `settings.vault_dir`. `progress` receives one-line
+    scans stay within `settings.paths.vault_dir`. `progress` receives one-line
     status updates during each phase.
     """
     log = progress or _noop
@@ -76,7 +76,7 @@ def reconcile_local(
     missing: list[StoreNoteRow] = []
     existing: list[StoreNoteRow] = []
     for row in rows:
-        if (settings.vault_dir / row.path).exists():
+        if (settings.paths.vault_dir / row.path).exists():
             existing.append(row)
         else:
             missing.append(row)
@@ -96,7 +96,7 @@ def reconcile_local(
         verifiable = [row for row in existing if not row.restricted]
         log(f"  hashing {len(verifiable)} file(s) to check body drift")
         for row in verifiable:
-            absolute = settings.vault_dir / row.path
+            absolute = settings.paths.vault_dir / row.path
             try:
                 text = absolute.read_text(encoding="utf-8")
             except OSError:
@@ -124,19 +124,19 @@ def reconcile_local(
     # --- 3. Orphan cleanup --------------------------------------------------
     # Rebuild known_paths after re-fetch in case any note's path changed.
     known_paths = {row.path for row in store.all_rows()}
-    orphans = _find_orphans(settings.vault_dir, known_paths)
+    orphans = _find_orphans(settings.paths.vault_dir, known_paths)
     if orphans:
         log(f"  {len(orphans)} orphan file(s) to remove")
         for orphan in orphans[:5]:
-            relative = orphan.relative_to(settings.vault_dir)
+            relative = orphan.relative_to(settings.paths.vault_dir)
             log(f"    ✗ removing '{relative}'")
         if len(orphans) > 5:
             log(f"    … and {len(orphans) - 5} more")
     for orphan in orphans:
         orphan.unlink()
-        _prune_empty_parents(orphan.parent, settings.vault_dir)
+        _prune_empty_parents(orphan.parent, settings.paths.vault_dir)
     result.orphans_removed = len(orphans)
-    result.orphan_paths = [str(o.relative_to(settings.vault_dir)) for o in orphans]
+    result.orphan_paths = [str(o.relative_to(settings.paths.vault_dir)) for o in orphans]
 
     return result
 
@@ -176,7 +176,7 @@ def _refetch(
         ingest_placeholder(
             summary,
             store=store,
-            vault_dir=settings.vault_dir,
+            vault_dir=settings.paths.vault_dir,
             previous_path=row.path,
         )
         return
@@ -184,7 +184,7 @@ def _refetch(
     ingest_note(
         note,
         store=store,
-        vault_dir=settings.vault_dir,
+        vault_dir=settings.paths.vault_dir,
         previous_path=previous.path if previous else None,
     )
 

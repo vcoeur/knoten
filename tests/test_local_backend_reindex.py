@@ -51,9 +51,9 @@ def _seed(settings: Settings, count: int = 2) -> list[Note]:
         )
         for i in range(1, count + 1)
     ]
-    with Store(settings.index_path) as store:
+    with Store(settings.paths.index_path) as store:
         for note in notes:
-            ingest_note(note, store=store, vault_dir=settings.vault_dir)
+            ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
     return notes
 
 
@@ -68,7 +68,7 @@ def test_external_write_body_surfaces_on_next_read(tmp_settings: Settings) -> No
     notes = _seed(tmp_settings, count=1)
     target = notes[0]
 
-    path = tmp_settings.vault_dir / "note" / f"{target.filename}.md"
+    path = tmp_settings.paths.vault_dir / "note" / f"{target.filename}.md"
     assert path.exists()
 
     new_markdown = (
@@ -92,7 +92,7 @@ def test_external_write_body_surfaces_on_next_read(tmp_settings: Settings) -> No
 def test_external_write_updates_stored_stats(tmp_settings: Settings) -> None:
     notes = _seed(tmp_settings, count=1)
     target = notes[0]
-    path = tmp_settings.vault_dir / "note" / f"{target.filename}.md"
+    path = tmp_settings.paths.vault_dir / "note" / f"{target.filename}.md"
 
     path.write_text(
         "---\nkind: fleeting\nfamily: fleeting\ntitle: drifted\n"
@@ -105,7 +105,7 @@ def test_external_write_updates_stored_stats(tmp_settings: Settings) -> None:
     with LocalBackend(tmp_settings) as backend:
         backend.list_note_summaries(limit=10, offset=0)
 
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         index = store.path_index()
     recorded_mtime, recorded_size, _ = index[f"note/{target.filename}.md"]
     assert recorded_mtime == new_stat.st_mtime_ns
@@ -117,7 +117,7 @@ def test_external_delete_drops_store_row(tmp_settings: Settings) -> None:
     victim = notes[0]
     survivor = notes[1]
 
-    victim_path = tmp_settings.vault_dir / "note" / f"{victim.filename}.md"
+    victim_path = tmp_settings.paths.vault_dir / "note" / f"{victim.filename}.md"
     victim_path.unlink()
 
     with LocalBackend(tmp_settings) as backend:
@@ -155,7 +155,7 @@ def test_walk_runs_once_per_instance(tmp_settings: Settings, monkeypatch) -> Non
 def test_trash_directory_is_skipped(tmp_settings: Settings) -> None:
     _seed(tmp_settings, count=1)
 
-    trash_dir = tmp_settings.vault_dir / ".trash"
+    trash_dir = tmp_settings.paths.vault_dir / ".trash"
     trash_dir.mkdir(parents=True, exist_ok=True)
     stray = trash_dir / "should-be-ignored.md"
     stray.write_text(

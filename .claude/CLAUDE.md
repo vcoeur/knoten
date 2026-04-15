@@ -68,30 +68,30 @@ The single most important rule for anyone (especially Claude) using this CLI:
 
 ## Paths
 
-Default layout — `KNOTEN_HOME` anchors a vault + state pair:
+As of v0.2 the layout is cross-OS via `platformdirs` (see `knoten/paths.py`). Three roles, three directories:
 
-- `$KNOTEN_HOME/kasten/` — markdown mirror (gitignored). Subdir name is configurable via `KNOTEN_VAULT_DIR`; the historical `kasten/` default is the only place the old name survives.
-- `$KNOTEN_HOME/.knoten-state/index.sqlite` — metadata + FTS5 (gitignored)
-- `$KNOTEN_HOME/.knoten-state/state.json` — sync cursor, schema version (gitignored)
-- `$KNOTEN_HOME/.knoten-state/sync.lock` — fcntl lock held during sync / writes
+- **config_dir** — holds `.env` only. Linux: `~/.config/knoten/`. macOS: `~/Library/Application Support/knoten/`. Windows: `%APPDATA%\knoten\`.
+- **data_dir** — holds the markdown vault under `kasten/` (user content). Linux: `~/.local/share/knoten/`. macOS: `~/Library/Application Support/knoten/`. Windows: `%LOCALAPPDATA%\knoten\`.
+- **cache_dir** — holds the SQLite index (`index.sqlite`), sync cursor (`state.json`), advisory lock (`sync.lock`), and tmp scratch. Linux: `~/.cache/knoten/`. macOS: `~/Library/Caches/knoten/`. Windows: `%LOCALAPPDATA%\knoten\Cache\`.
 
-### How `KNOTEN_HOME` is resolved
+Each dir can be overridden via `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` — process env wins over the file, tests / Docker / custom deployments set these directly. `knoten config path` prints the resolved paths.
 
-`KNOTEN_HOME` resolution tries, in order: shell env → the single `.env` file → source-tree walk → `~/.knoten` fallback. Two runtime contexts matter:
+### Dev mode vs installed mode
 
-- **Dev** (`uv run knoten …`, `make sync` from the repo): `_default_home()` walks up from `__file__` and finds the repo root via its `pyproject.toml`. The repo's `.env` is read automatically. No user config needed.
-- **Installed** (`pipx install knoten` / `uv tool install knoten` → `~/.local/bin/knoten`): `__file__` lives inside a site-packages or uv tools venv, so the pyproject walk is skipped. The CLI reads `~/.config/knoten/.env`. Everything — URL, token, optional `KNOTEN_HOME=/path/to/vault` — lives in that one file.
+`paths._repo_root()` walks up from `__file__` looking for `pyproject.toml`; if it finds one (and `__file__` is not inside a site-packages / uv tools venv), that's dev mode.
+
+- **Dev** (`uv run knoten …` from the repo): `config_dir = data_dir = <repo>`, `cache_dir = <repo>/.dev-state/cache/`. The markdown vault stays at `<repo>/kasten/` — historic location, unchanged from pre-v0.2, so the maintainer's dev notes don't move. Migration is skipped in dev mode for the same reason.
+- **Installed** (`pipx install knoten` / `uv tool install knoten`): platformdirs defaults, resolved from `APP_NAME="knoten"` with `appauthor=False`.
+
+### Legacy migration (v0.1.x → v0.2)
+
+`migrate_legacy_layout` runs inside `load_settings` right after `paths.resolve()`, before `ensure_dirs`. Idempotent, survives OS errors, silent on clean state. Source is `$KNOTEN_HOME/` (or `~/.knoten/` if unset), target is the new platformdirs layout. Ephemeral files (sync lock, tmp) are not migrated — they rebuild on demand. See `knoten/migrate.py` for the exact rules and `tests/test_migrate.py` for the full contract.
+
+`KNOTEN_HOME` is still consulted by the migration so legacy users who pointed it at a non-default directory don't lose their vault. If it's still set after migration, the CLI prints a one-time deprecation warning telling the user to use `KNOTEN_*_DIR` instead.
 
 ### One `.env` per invocation
 
-`load_settings()` reads **exactly one** `.env` file, chosen by `primary_env_file()`:
-
-- `env_file` arg (explicit, tests / advanced callers), **or**
-- `~/.config/knoten/.env` in installed mode, **or**
-- `<repo-root>/.env` in dev mode (pyproject walk), **or**
-- `~/.knoten/.env` as a last-resort fallback.
-
-Process env vars always win over the file (`environs.read_env(override=False)`). There is deliberately no layered pointer file chain — prior versions had `~/.config/knoten/.env` point at a repo `.env`, but that made `knoten config edit` misleading because the edited file wasn't always the one with the secrets. Single-file model avoids the confusion.
+`load_settings()` reads **exactly one** `.env` file: `settings.paths.env_file`, which lives at `config_dir / .env`. In dev mode that's `<repo>/.env`; in installed mode it's `~/.config/knoten/.env` (or the OS equivalent). Process env vars always win over the file (`environs.read_env(override=False)`).
 
 ## Commands
 

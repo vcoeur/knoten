@@ -54,7 +54,7 @@ def test_incremental_sync_fetches_new_notes(tmp_settings: Settings, httpx_mock: 
         json={"data": [list_item], "total": 1, "limit": 200, "offset": 0},
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 1
         assert result.deleted == 0
@@ -62,10 +62,10 @@ def test_incremental_sync_fetches_new_notes(tmp_settings: Settings, httpx_mock: 
         assert result.missing_refetched == 0
         assert result.orphans_removed == 0
 
-    state = load_state(tmp_settings.state_file)
+    state = load_state(tmp_settings.paths.state_file)
     assert state.last_sync_max_updated_at == "2024-01-02T00:00:00Z"
 
-    written = tmp_settings.vault_dir / "note" / "! First.md"
+    written = tmp_settings.paths.vault_dir / "note" / "! First.md"
     assert written.exists()
     content = written.read_text(encoding="utf-8")
     assert "Body of first" in content
@@ -76,8 +76,8 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
     # pre-seed the local store + disk with a matching row. The cursor
     # ensures nothing is re-fetched from the list response, and the disk
     # state is clean so reconciliation is a no-op.
-    tmp_settings.state_dir.mkdir(parents=True, exist_ok=True)
-    tmp_settings.state_file.write_text(
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
         '{"schema_version": 1, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
         encoding="utf-8",
     )
@@ -85,7 +85,7 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
     from knoten.models import Note
     from knoten.services.notes import ingest_note
 
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         pre = Note(
             id="22222222-2222-2222-2222-222222222222",
             filename="! Old",
@@ -100,7 +100,7 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
             created_at="2020-01-01T00:00:00Z",
             updated_at="2020-01-02T00:00:00Z",
         )
-        ingest_note(pre, store=store, vault_dir=tmp_settings.vault_dir)
+        ingest_note(pre, store=store, vault_dir=tmp_settings.paths.vault_dir)
 
     list_item = {
         "id": "22222222-2222-2222-2222-222222222222",
@@ -123,7 +123,7 @@ def test_incremental_sync_skips_stale_items(tmp_settings: Settings, httpx_mock: 
         json={"data": [list_item], "total": 1, "limit": 200, "offset": 0},
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
         assert result.fetched == 0
         assert result.deleted == 0

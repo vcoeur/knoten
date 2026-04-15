@@ -57,7 +57,7 @@ def _seed_file_note(
         updated_at="2024-11-10T00:00:00Z",
         mcp_permissions="ALL",
     )
-    ingest_note(note, store=store, vault_dir=tmp_settings.vault_dir)
+    ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     return note
 
 
@@ -200,11 +200,11 @@ def test_upload_file_remote_two_step_flow(
         },
     )
 
-    with Store(tmp_settings.index_path) as store, RemoteBackend(tmp_settings) as backend:
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         note, upload = upload_file_remote(
             backend=backend,
             store=store,
-            vault_dir=tmp_settings.vault_dir,
+            vault_dir=tmp_settings.paths.vault_dir,
             source_path=sample,
             filename="2024-11-10+ scan.pdf",
             tags=[],
@@ -236,14 +236,14 @@ def test_upload_file_remote_rejects_missing_storage_key(
         json={"sizeBytes": "4"},  # no storageKey
     )
     with (
-        Store(tmp_settings.index_path) as store,
+        Store(tmp_settings.paths.index_path) as store,
         RemoteBackend(tmp_settings) as backend,
         pytest.raises(UserError, match="storageKey"),
     ):
         upload_file_remote(
             backend=backend,
             store=store,
-            vault_dir=tmp_settings.vault_dir,
+            vault_dir=tmp_settings.paths.vault_dir,
             source_path=sample,
             filename="2024-11-10+ scan.pdf",
             tags=[],
@@ -265,7 +265,7 @@ def test_download_file_remote_happy_path(
         headers={"content-type": "application/pdf"},
     )
     dest = tmp_path / "out.pdf"
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_file_note(store, tmp_settings)
         with RemoteBackend(tmp_settings) as backend:
             result = download_file_remote(
@@ -284,7 +284,7 @@ def test_download_file_remote_happy_path(
 def test_download_file_remote_rejects_non_file_family(
     tmp_settings: Settings, tmp_path: Path
 ) -> None:
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         non_file = Note(
             id="33333333-3333-3333-3333-333333333333",
             filename="! Permanent",
@@ -300,7 +300,7 @@ def test_download_file_remote_rejects_non_file_family(
             updated_at="2024-01-01T00:00:00Z",
             mcp_permissions="ALL",
         )
-        ingest_note(non_file, store=store, vault_dir=tmp_settings.vault_dir)
+        ingest_note(non_file, store=store, vault_dir=tmp_settings.paths.vault_dir)
         with (
             RemoteBackend(tmp_settings) as backend,
             pytest.raises(UserError, match="not a file-family note"),
@@ -316,7 +316,7 @@ def test_download_file_remote_rejects_non_file_family(
 def test_download_file_remote_rejects_missing_attachment_key(
     tmp_settings: Settings, tmp_path: Path
 ) -> None:
-    with Store(tmp_settings.index_path) as store:
+    with Store(tmp_settings.paths.index_path) as store:
         _seed_file_note(store, tmp_settings, frontmatter={})
         with (
             RemoteBackend(tmp_settings) as backend,

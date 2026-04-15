@@ -33,8 +33,8 @@ def _seed_permanent(settings: Settings, note_id: str, filename: str, body: str) 
         updated_at="2024-01-02T00:00:00Z",
         mcp_permissions="ALL",
     )
-    with Store(settings.index_path) as store:
-        ingest_note(note, store=store, vault_dir=settings.vault_dir)
+    with Store(settings.paths.index_path) as store:
+        ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
     return note
 
 
@@ -47,7 +47,7 @@ def test_create_note_writes_file_and_persists_row(tmp_settings: Settings) -> Non
         new_id = backend.create_note(draft)
 
     assert new_id
-    absolute = tmp_settings.vault_dir / "note" / "- Fresh thought.md"
+    absolute = tmp_settings.paths.vault_dir / "note" / "- Fresh thought.md"
     assert absolute.exists()
     content = absolute.read_text(encoding="utf-8")
     assert "family: fleeting" in content
@@ -118,8 +118,8 @@ def test_update_note_rename_round_trip(tmp_settings: Settings) -> None:
 
     assert result.affected_notes == ()
     assert refreshed.filename == "! Renamed"
-    assert (tmp_settings.vault_dir / "note" / "! Renamed.md").exists()
-    assert not (tmp_settings.vault_dir / "note" / "! Seed.md").exists()
+    assert (tmp_settings.paths.vault_dir / "note" / "! Renamed.md").exists()
+    assert not (tmp_settings.paths.vault_dir / "note" / "! Seed.md").exists()
 
 
 def test_delete_note_moves_file_to_trash(tmp_settings: Settings) -> None:
@@ -129,14 +129,14 @@ def test_delete_note_moves_file_to_trash(tmp_settings: Settings) -> None:
         "! Doomed",
         "going away soon",
     )
-    mirror = tmp_settings.vault_dir / "note" / "! Doomed.md"
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Doomed.md"
     assert mirror.exists()
 
     with LocalBackend(tmp_settings) as backend:
         backend.delete_note(seed.id)
 
     assert not mirror.exists()
-    trash_file = tmp_settings.vault_dir / ".trash" / "note" / "! Doomed.md"
+    trash_file = tmp_settings.paths.vault_dir / ".trash" / "note" / "! Doomed.md"
     assert trash_file.exists()
 
     with LocalBackend(tmp_settings) as backend, pytest.raises(NotFoundError):
@@ -157,9 +157,9 @@ def test_delete_then_restore_round_trip(tmp_settings: Settings) -> None:
 
     assert refreshed.id == seed.id
     assert "keepsake" in refreshed.body
-    mirror = tmp_settings.vault_dir / "note" / "! Recoverable.md"
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Recoverable.md"
     assert mirror.exists()
-    assert not (tmp_settings.vault_dir / ".trash" / "note" / "! Recoverable.md").exists()
+    assert not (tmp_settings.paths.vault_dir / ".trash" / "note" / "! Recoverable.md").exists()
 
 
 def test_restore_raises_when_filename_collides(tmp_settings: Settings) -> None:

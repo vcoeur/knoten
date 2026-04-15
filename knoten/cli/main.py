@@ -75,7 +75,7 @@ from knoten.services.notes import (
 from knoten.services.reconcile import reconcile_local
 from knoten.services.reindex import reindex_from_files
 from knoten.services.sync import full_sync, incremental_sync
-from knoten.settings import Settings, ensure_dirs, load_settings
+from knoten.settings import Settings, load_settings
 
 app = typer.Typer(
     help="Local CLI mirror and search for notes.vcoeur.com. Designed for Claude.",
@@ -108,9 +108,7 @@ class Fields(StrEnum):
 
 
 def _load() -> Settings:
-    settings = load_settings()
-    ensure_dirs(settings)
-    return settings
+    return load_settings()
 
 
 def _require_token(settings: Settings) -> None:
@@ -255,7 +253,7 @@ def cmd_sync(
             render_sync_result(payload, mode=mode)
             return
         _require_token(settings)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 if full:
                     result = full_sync(
@@ -310,7 +308,7 @@ def cmd_verify(
     try:
         settings = _load()
         _require_token(settings)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             progress("→ SQLite integrity check")
             integrity = store.integrity_check()
             progress(f"  {integrity}")
@@ -396,7 +394,7 @@ def cmd_reindex(
     progress = make_progress_callback(mode)
     try:
         settings = _load()
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             result = reindex_from_files(store=store, settings=settings, progress=progress)
         payload = {
             "integrity": result.integrity,
@@ -480,7 +478,7 @@ def cmd_search(
                 "--explain only applies to ranked unicode61 search; drop --fuzzy to use it"
             )
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             if fuzzy:
                 hits, total = store.search_fuzzy(
                     query,
@@ -491,7 +489,7 @@ def cmd_search(
                     max_permission=max_permission,
                     limit=limit,
                     offset=offset,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                 )
                 source = "local-fuzzy"
             else:
@@ -504,7 +502,7 @@ def cmd_search(
                     max_permission=max_permission,
                     limit=limit,
                     offset=offset,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     explain=explain,
                 )
                 source = "local"
@@ -531,10 +529,10 @@ def cmd_read(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             payload = read_note_full(
                 store,
-                settings.vault_dir,
+                settings.paths.vault_dir,
                 target,
                 include_backlinks=not no_backlinks,
             )
@@ -550,9 +548,9 @@ def cmd_path(
     """Print the absolute mirror path for a note. One line, no JSON envelope."""
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             row = resolve_target(store, target)
-        sys.stdout.write(str((settings.vault_dir / row["path"]).resolve()) + "\n")
+        sys.stdout.write(str((settings.paths.vault_dir / row["path"]).resolve()) + "\n")
     except Exception as exc:
         _fail(exc)
 
@@ -582,7 +580,7 @@ def cmd_list(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             summaries, total = store.list_notes(
                 family=family,
                 kind=kind,
@@ -594,7 +592,8 @@ def cmd_list(
                 limit=limit,
                 offset=offset,
             )
-            notes = list_summaries_to_dicts(summaries, vault_dir=settings.vault_dir, store=store)
+            vault_dir = settings.paths.vault_dir
+            notes = list_summaries_to_dicts(summaries, vault_dir=vault_dir, store=store)
         payload = {"total": total, "limit": limit, "offset": offset, "notes": notes}
         render_summary_list(payload, mode=mode)
     except Exception as exc:
@@ -612,11 +611,11 @@ def cmd_backlinks(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             row = resolve_target(store, target)
             backlinks = store.backlinks_for_note(row["id"])
             for bl in backlinks:
-                bl["absolute_path"] = str((settings.vault_dir / bl["path"]).resolve())
+                bl["absolute_path"] = str((settings.paths.vault_dir / bl["path"]).resolve())
         total = len(backlinks)
         page = backlinks[offset : offset + limit]
         render_backlinks(
@@ -641,7 +640,7 @@ def cmd_tags(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             rows = store.tag_counts()
         render_counts({"tags": rows}, "tags", mode=mode)
     except Exception as exc:
@@ -671,13 +670,13 @@ def cmd_graph(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             start = resolve_target(store, target)
             nodes, edges, broken = store.graph_neighbourhood(
                 start["id"], depth=depth, direction=direction
             )
         for node in nodes.values():
-            node["absolute_path"] = str((settings.vault_dir / node["path"]).resolve())
+            node["absolute_path"] = str((settings.paths.vault_dir / node["path"]).resolve())
         payload = {
             "start": start["id"],
             "depth": depth,
@@ -716,7 +715,7 @@ def cmd_kinds(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             rows = store.kind_counts(family=family)
         render_counts({"kinds": rows}, "kinds", mode=mode)
     except Exception as exc:
@@ -800,19 +799,19 @@ def cmd_create(
                 raise UserError("--ai requires --body or --body-file")
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = create_note_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     filename=filename,
                     body=body_text,
                     kind=kind,
                     tags=list(tag),
                     frontmatter=frontmatter,
                 )
-            payload = _write_response(store, settings.vault_dir, note.id, fields)
+            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
@@ -883,12 +882,12 @@ def cmd_edit(
                 raise UserError(f"--set-frontmatter expects key=value, got '{pair}'")
             key, _, value = pair.partition("=")
             fm_sets[key] = value
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = edit_note_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     target=target,
                     new_filename=filename,
                     new_title=title,
@@ -899,7 +898,7 @@ def cmd_edit(
                     remove_tags=list(remove_tag),
                     force=force,
                 )
-            payload = _write_response(store, settings.vault_dir, note.id, fields)
+            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
@@ -963,17 +962,17 @@ def cmd_append(
             raise UserError("Content is empty — nothing to append")
         if ai:
             text = _wrap_ai(text)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = append_note_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     target=target,
                     content=text,
                     force=force,
                 )
-            payload = _write_response(store, settings.vault_dir, note.id, fields)
+            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
@@ -1002,12 +1001,12 @@ def cmd_delete(
             if not confirmed:
                 log("aborted", mode=mode)
                 raise typer.Exit(0)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note_id = delete_note_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     target=target,
                     force=force,
                 )
@@ -1036,12 +1035,13 @@ def cmd_restore(
     try:
         settings = _load()
         _require_token(settings)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
+            vault_dir = settings.paths.vault_dir
             with _build_backend(settings) as backend:
                 note = restore_note_remote(
-                    backend=backend, store=store, vault_dir=settings.vault_dir, note_id=note_id
+                    backend=backend, store=store, vault_dir=vault_dir, note_id=note_id
                 )
-            payload = _write_response(store, settings.vault_dir, note.id, fields)
+            payload = _write_response(store, vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
@@ -1142,19 +1142,19 @@ def cmd_upload(
     try:
         settings = _load()
         _require_token(settings)
-        with acquire_lock(settings.lock_file), Store(settings.index_path) as store:
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note, upload = upload_file_remote(
                     backend=backend,
                     store=store,
-                    vault_dir=settings.vault_dir,
+                    vault_dir=settings.paths.vault_dir,
                     source_path=path,
                     filename=filename,
                     tags=list(tag),
                     source=source,
                     content_type=content_type,
                 )
-            payload = _write_response(store, settings.vault_dir, note.id, fields)
+            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         payload["upload"] = {
             "storage_key": upload.get("storageKey"),
             "content_type": upload.get("contentType"),
@@ -1194,7 +1194,7 @@ def cmd_download(
     try:
         settings = _load()
         _require_token(settings)
-        with Store(settings.index_path) as store:
+        with Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 result = download_file_remote(
                     backend=backend,
@@ -1232,8 +1232,8 @@ def cmd_status(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        state = load_state(settings.state_file)
-        with Store(settings.index_path) as store:
+        state = load_state(settings.paths.state_file)
+        with Store(settings.paths.index_path) as store:
             local_total = store.count_notes()
             restricted_total = store.count_restricted()
             cardinality = store.fts_cardinality_check()
@@ -1241,8 +1241,8 @@ def cmd_status(
         since_sync = _seconds_since(state.last_sync_at)
         payload = {
             "api_url": settings.api_url,
-            "vault_path": str(settings.vault_dir),
-            "state_path": str(settings.state_dir),
+            "vault_path": str(settings.paths.vault_dir),
+            "cache_path": str(settings.paths.cache_dir),
             "local_total": local_total,
             "restricted_total": restricted_total,
             "last_sync_at": state.last_sync_at,
@@ -1252,8 +1252,8 @@ def cmd_status(
             "fts_consistent": cardinality["consistent"],
             "fts_count": cardinality["fts_count"],
             "schema_version": store_schema_version,
-            "db_size_bytes": settings.index_path.stat().st_size
-            if settings.index_path.exists()
+            "db_size_bytes": settings.paths.index_path.stat().st_size
+            if settings.paths.index_path.exists()
             else 0,
         }
         render_status(payload, mode=mode)
@@ -1282,17 +1282,17 @@ def cmd_reset(
         settings = _load()
         if not yes:
             confirmed = typer.confirm(
-                f"Really delete {settings.state_dir} and {settings.vault_dir}?",
+                f"Really delete {settings.paths.cache_dir} and {settings.paths.vault_dir}?",
                 default=False,
             )
             if not confirmed:
                 raise typer.Exit(0)
         import shutil
 
-        if settings.state_dir.exists():
-            shutil.rmtree(settings.state_dir)
-        if settings.vault_dir.exists():
-            shutil.rmtree(settings.vault_dir)
+        if settings.paths.cache_dir.exists():
+            shutil.rmtree(settings.paths.cache_dir)
+        if settings.paths.vault_dir.exists():
+            shutil.rmtree(settings.paths.vault_dir)
     except Exception as exc:
         _fail(exc)
 

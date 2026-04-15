@@ -27,10 +27,10 @@ def _note(filename: str, family: str, body: str) -> Note:
 
 def test_ingest_writes_markdown_file(tmp_settings: Settings, store: Store) -> None:
     note = _note("! Core idea", "permanent", "Body of the note with [[Other]].")
-    relative_path = ingest_note(note, store=store, vault_dir=tmp_settings.vault_dir)
+    relative_path = ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
 
     assert relative_path == "note/! Core idea.md"
-    written = tmp_settings.vault_dir / relative_path
+    written = tmp_settings.paths.vault_dir / relative_path
     assert written.exists()
     content = written.read_text(encoding="utf-8")
     assert content.startswith("---\n")
@@ -40,8 +40,8 @@ def test_ingest_writes_markdown_file(tmp_settings: Settings, store: Store) -> No
 
 def test_rename_removes_old_path(tmp_settings: Settings, store: Store) -> None:
     first = _note("! Core idea", "permanent", "First body.")
-    old_path = ingest_note(first, store=store, vault_dir=tmp_settings.vault_dir)
-    assert (tmp_settings.vault_dir / old_path).exists()
+    old_path = ingest_note(first, store=store, vault_dir=tmp_settings.paths.vault_dir)
+    assert (tmp_settings.paths.vault_dir / old_path).exists()
 
     # Same ID, new filename -> simulates a rename.
     renamed = Note(
@@ -61,12 +61,12 @@ def test_rename_removes_old_path(tmp_settings: Settings, store: Store) -> None:
     new_path = ingest_note(
         renamed,
         store=store,
-        vault_dir=tmp_settings.vault_dir,
+        vault_dir=tmp_settings.paths.vault_dir,
         previous_path=old_path,
     )
     assert new_path == "note/! Core insight.md"
-    assert (tmp_settings.vault_dir / new_path).exists()
-    assert not (tmp_settings.vault_dir / old_path).exists()
+    assert (tmp_settings.paths.vault_dir / new_path).exists()
+    assert not (tmp_settings.paths.vault_dir / old_path).exists()
     assert store.count_notes() == 1
 
 
@@ -85,5 +85,5 @@ def test_journal_path_buckets_by_month(tmp_settings: Settings, store: Store) -> 
         created_at="2024-11-10T00:00:00Z",
         updated_at="2024-11-10T00:00:00Z",
     )
-    path = ingest_note(note, store=store, vault_dir=tmp_settings.vault_dir)
+    path = ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     assert path == "journal/2024-11/2024-11-10 Weekly review.md"
