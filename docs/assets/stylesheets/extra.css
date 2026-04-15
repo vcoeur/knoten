@@ -116,8 +116,14 @@
   margin-bottom: 1.75rem;
 }
 
-/* Body typography — compact 14.4px with vcoeur.com's 1.7 line-height */
+/* Body typography — match vcoeur.com (16px, 1.7 line-height, grayscale AA).
+ * 0.8rem is 16px with Material's 125% html base. */
 .md-typeset {
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   line-height: 1.7;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
