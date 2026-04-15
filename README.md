@@ -17,7 +17,7 @@ Both modes share the same CLI surface — the only difference is where data live
 - **`knoten backlinks <target>`**, **`knoten list`**, **`knoten tags`**, **`knoten kinds`** — metadata queries, all offline.
 - **`knoten graph <target> --depth N --direction out|in|both`** — BFS wiki-link neighbourhood for broadened search. Returns nodes with their distance from the start, plus edges. Depth 0-5.
 - **`knoten create`**, **`knoten edit`**, **`knoten append`**, **`knoten delete`**, **`knoten restore`**, **`knoten rename`**, **`knoten upload`**, **`knoten download`** — write / attachment operations that hit `notes.vcoeur.com` first, then refresh the affected note locally. The local mirror is never authoritative.
-- **`knoten status`** / **`knoten config`** — inspect the mirror and effective config without touching the network.
+- **`knoten status`** / **`knoten config show`** / **`knoten config path`** / **`knoten config edit`** / **`knoten init`** — inspect the mirror, see the effective configuration, open the `.env` in your editor, or bootstrap the vault + state dirs. All offline.
 
 All commands accept `--json` for machine-parseable output. On a TTY without `--json`, output is rendered with rich (tables, snippet highlighting). Claude skills should always pass `--json`.
 
@@ -56,7 +56,7 @@ Python 3.12+, managed with `uv`. Deliberately small and stdlib-friendly.
 
 | Layer | Choice |
 |---|---|
-| Packaging | `uv` + `pyproject.toml`, installable globally with `uv tool install .` |
+| Packaging | `uv` + `pyproject.toml`, published to PyPI as `knoten` |
 | CLI | [Typer](https://typer.tiangolo.com/) |
 | HTTP | [httpx](https://www.python-httpx.org/) (sync) |
 | Store + search | stdlib `sqlite3` + FTS5 (`unicode61` for ranked search, `trigram` mirror for `search --fuzzy`) + [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) |
@@ -130,31 +130,42 @@ The `kasten/` subdirectory name is historical (the vault is a Zettelkasten) and 
 
 ## Install
 
+Install from PyPI:
+
 ```bash
-# Clone to your preferred location.
-git clone https://github.com/vcoeur/knoten.git
-cd knoten
-
-# Install dev deps into a local .venv for tests.
-make dev-install
-
-# Copy the env template and add your API token.
-cp .env.example .env
-$EDITOR .env    # set KNOTEN_API_URL + KNOTEN_API_TOKEN
-
-# Verify config.
-uv run knoten config --json
-
-# Install globally as the `knoten` command (one-time per laptop).
-make tool-install
-knoten --help
+pip install knoten
 ```
 
-`make tool-install` installs in **editable** mode (`uv tool install --editable .`), so subsequent `git pull`s or local code changes take effect the next time you run `knoten` — **no reinstall needed on updates**. Only run `make tool-install` again if you changed `pyproject.toml` entry points, dependencies, or you see `ImportError` after a refactor.
+Verify:
 
-`make tool-uninstall` removes the global command (does not delete the repo or `.env`).
+```bash
+knoten --help
+knoten config show --json   # see the effective configuration
+```
 
-Getting an API token: open your `notes.vcoeur.com` instance, go to settings → tokens, create a new one with the `api` scope, paste it into `.env` as `KNOTEN_API_TOKEN`. The token is shown only once.
+For local mode (the default), that's all you need — the CLI creates a vault at `~/.knoten/kasten/` on first use.
+
+For remote mode (mirroring a `notes.vcoeur.com` instance), edit your `.env` and add `KNOTEN_API_URL` + `KNOTEN_API_TOKEN`:
+
+```bash
+knoten config edit          # opens your .env in $EDITOR
+```
+
+Getting an API token: open your `notes.vcoeur.com` instance, go to settings → tokens, create a new one with the `api` scope, paste it into the `.env` as `KNOTEN_API_TOKEN`. The token is shown only once.
+
+### Development from a source checkout
+
+```bash
+git clone https://github.com/vcoeur/knoten.git
+cd knoten
+make dev-install            # uv sync --all-groups
+cp .env.example .env        # optional — only for remote mode
+uv run knoten --help        # run the CLI straight from the repo
+uv run knoten config show --json
+make test                   # pytest
+```
+
+When run from the repo, `knoten` picks up the `.env` at the repo root automatically and stores its vault + SQLite index under the repo. No global install needed.
 
 ## First sync
 
@@ -203,7 +214,7 @@ knoten rename "! New idea" "! Core insight" --json
 
 **Dev from the repo** (`uv run knoten …`, `make sync`): `KNOTEN_HOME` defaults to the directory containing `pyproject.toml`, and the repo's own `.env` is read automatically. Clone, `cp .env.example .env`, fill in the token, done.
 
-**Installed globally** (`uv tool install . → ~/.local/bin/knoten`): the installed copy can't find the source tree, so it reads **`~/.config/knoten/.env`** first. That file is typically a two-line pointer:
+**Installed from PyPI** (`pip install knoten` → `knoten` on `$PATH`): the installed copy can't find a source tree, so it reads **`~/.config/knoten/.env`** first. That file is typically a two-line pointer:
 
 ```ini
 KNOTEN_HOME=~/src/vcoeur/knoten

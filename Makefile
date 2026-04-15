@@ -32,10 +32,4 @@ format: ## Ruff auto-fix + format
 	uv run ruff check --fix .
 	uv run ruff format .
 
-tool-install: ## Install knoten as a global editable command via uv tool (one-time)
-	uv tool install --force --reinstall --editable .
-
-tool-uninstall: ## Remove the global knoten command
-	uv tool uninstall knoten
-
-.PHONY: help install dev-install run sync sync-full test coverage lint format tool-install
+.PHONY: help install dev-install run sync sync-full test coverage lint format

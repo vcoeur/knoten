@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC trusted publishing
+      contents: read    # required so actions/checkout@v4 can read the repo
     steps:
       - uses: actions/checkout@v4
 

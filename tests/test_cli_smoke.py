@@ -30,7 +30,7 @@ def test_config_json_redacts_token(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
     monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_secret_xyz")
     runner = CliRunner()
-    result = runner.invoke(app, ["config", "--json"])
+    result = runner.invoke(app, ["config", "show", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["api_token"].startswith("nt_")

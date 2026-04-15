@@ -24,6 +24,7 @@ from typing import Any
 
 import typer
 
+from knoten.cli.config import config_app, init_command
 from knoten.cli.output import (
     OutputMode,
     emit_json,
@@ -81,6 +82,13 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+app.add_typer(config_app, name="config")
+
+
+@app.command("init")
+def cmd_init() -> None:
+    """Create vault + state dirs and seed a default .env if missing."""
+    init_command()
 
 
 class Fields(StrEnum):
@@ -1263,27 +1271,6 @@ def _seconds_since(iso_timestamp: str | None) -> int | None:
     except ValueError:
         return None
     return int((datetime.now(tz=UTC) - dt).total_seconds())
-
-
-@app.command("config")
-def cmd_config(
-    json_output: bool = typer.Option(False, "--json"),
-) -> None:
-    """Show effective config (token redacted)."""
-    mode = OutputMode.detect(json_output)
-    try:
-        settings = _load()
-        payload = {
-            "api_url": settings.api_url,
-            "api_token": settings.token_redacted,
-            "http_timeout": settings.http_timeout,
-            "home": str(settings.home),
-            "vault_dir": str(settings.vault_dir),
-            "state_dir": str(settings.state_dir),
-        }
-        render_status(payload, mode=mode)
-    except Exception as exc:
-        _fail(exc, mode=mode)
 
 
 @app.command("reset")
