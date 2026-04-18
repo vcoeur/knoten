@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC trusted publishing
-      contents: read    # required so actions/checkout@v4 can read the repo
+      contents: read    # required so actions/checkout@v6 can read the repo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
 
       - name: Build
         run: uv build
