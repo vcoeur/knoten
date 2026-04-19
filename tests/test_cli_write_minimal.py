@@ -2,7 +2,7 @@
 
 Every write-side subcommand (`create`, `edit`, `append`, `restore`, `rename`,
 `upload`) defaults to `--fields minimal`, which emits a small summary dict
-(id, filename, family, kind, tags, updated_at, mcp_permissions) instead of
+(id, filename, family, kind, tags, updated_at, permissions) instead of
 the full note body. Tags are included because they're cheap and callers
 frequently want to confirm `--add-tag` / `--remove-tag` landed without
 paying for `--fields full`. Passing `--fields full` restores the full-read
@@ -35,7 +35,7 @@ MINIMAL_KEYS = {
     "family",
     "kind",
     "tags",
-    "mcp_permissions",
+    "permissions",
     "updated_at",
 }
 
@@ -77,7 +77,7 @@ def _seed_permanent(settings, *, note_id: str = NOTE_ID) -> Note:
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
     with Store(settings.paths.index_path) as store:
         ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
@@ -96,7 +96,7 @@ def _full_note_payload(**overrides) -> dict:
         "frontmatter": {"stub": "value"},
         "tags": ["alpha", "beta"],
         "linkMap": {},
-        "mcpPermissions": "ALL",
+        "permissions": "ALL",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-03T00:00:00Z",
     }
@@ -279,7 +279,7 @@ def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
     with Store(cli_env.paths.index_path) as store:
         source_path = ingest_note(source_note, store=store, vault_dir=cli_env.paths.vault_dir)
@@ -319,7 +319,7 @@ def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None
         "frontmatter": {},
         "tags": [],
         "linkMap": {},
-        "mcpPermissions": "ALL",
+        "permissions": "ALL",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-03T00:00:00Z",
     }
@@ -378,7 +378,7 @@ def test_upload_default_is_minimal_but_keeps_upload_block(
             "frontmatter": {"attachment": STORAGE_KEY},
             "tags": [],
             "linkMap": {},
-            "mcpPermissions": "ALL",
+            "permissions": "ALL",
             "createdAt": "2024-11-10T00:00:00Z",
             "updatedAt": "2024-11-10T00:00:00Z",
         },

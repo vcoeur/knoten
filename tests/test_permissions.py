@@ -1,7 +1,7 @@
-"""`mcp_permissions` end-to-end: mapper, store, schema migration, pre-check.
+"""`permissions` end-to-end: mapper, store, schema migration, pre-check.
 
 Covers:
-  * `summary_from_api` / `note_from_api` pick up camelCase `mcpPermissions`.
+  * `summary_from_api` / `note_from_api` pick up camelCase `permissions`.
   * `Store.upsert_note` / `upsert_placeholder` persist the field.
   * Schema migration from v1 and v2 to v3 keeps existing rows and defaults
     their level to `ALL`.
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from knoten.models import MCP_PERMISSIONS, Note, NoteSummary, permission_at_least
+from knoten.models import PERMISSIONS, Note, NoteSummary, permission_at_least
 from knoten.repositories.errors import PermissionError as LocalPermissionError
 from knoten.repositories.errors import UserError
 from knoten.repositories.store import SCHEMA_VERSION, Store
@@ -40,14 +40,14 @@ def _make_note(note_id: str, filename: str, level: str = "ALL") -> Note:
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions=level,
+        permissions=level,
     )
 
 
 # ── mapper ──────────────────────────────────────────────────────────────
 
 
-def test_summary_from_api_picks_up_mcp_permissions() -> None:
+def test_summary_from_api_picks_up_permissions() -> None:
     payload = {
         "id": "a",
         "filename": "! Locked",
@@ -56,12 +56,12 @@ def test_summary_from_api_picks_up_mcp_permissions() -> None:
         "kind": "permanent",
         "source": None,
         "tags": [],
-        "mcpPermissions": "READ",
+        "permissions": "READ",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-02T00:00:00Z",
     }
     summary = summary_from_api(payload)
-    assert summary.mcp_permissions == "READ"
+    assert summary.permissions == "READ"
 
 
 def test_summary_from_api_defaults_to_all_when_missing() -> None:
@@ -77,10 +77,10 @@ def test_summary_from_api_defaults_to_all_when_missing() -> None:
         "updatedAt": "2024-01-02T00:00:00Z",
     }
     summary = summary_from_api(payload)
-    assert summary.mcp_permissions == "ALL"
+    assert summary.permissions == "ALL"
 
 
-def test_note_from_api_picks_up_mcp_permissions() -> None:
+def test_note_from_api_picks_up_permissions() -> None:
     payload = {
         "id": "b",
         "filename": "! Append only",
@@ -92,22 +92,22 @@ def test_note_from_api_picks_up_mcp_permissions() -> None:
         "frontmatter": {},
         "tags": [],
         "linkMap": {},
-        "mcpPermissions": "APPEND",
+        "permissions": "APPEND",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-02T00:00:00Z",
     }
     note = note_from_api(payload)
-    assert note.mcp_permissions == "APPEND"
+    assert note.permissions == "APPEND"
 
 
 # ── rank helper ─────────────────────────────────────────────────────────
 
 
 def test_permission_at_least_is_monotonic() -> None:
-    for required in MCP_PERMISSIONS:
-        for level in MCP_PERMISSIONS:
+    for required in PERMISSIONS:
+        for level in PERMISSIONS:
             got = permission_at_least(level, required)
-            expected = MCP_PERMISSIONS.index(level) >= MCP_PERMISSIONS.index(required)
+            expected = PERMISSIONS.index(level) >= PERMISSIONS.index(required)
             assert got is expected, f"{level} >= {required} expected {expected}, got {got}"
 
 
@@ -120,7 +120,7 @@ def test_permission_at_least_defaults_unknown_to_all() -> None:
 # ── store persistence ──────────────────────────────────────────────────
 
 
-def test_upsert_note_persists_mcp_permissions(store: Store) -> None:
+def test_upsert_note_persists_permissions(store: Store) -> None:
     store.upsert_note(
         _make_note("n1", "! Locked", level="READ"),
         path="note/! Locked.md",
@@ -128,7 +128,7 @@ def test_upsert_note_persists_mcp_permissions(store: Store) -> None:
     )
     row = store.find_by_id("n1")
     assert row is not None
-    assert row["mcp_permissions"] == "READ"
+    assert row["permissions"] == "READ"
 
     # Re-upserting with a different level updates the column.
     store.upsert_note(
@@ -137,10 +137,10 @@ def test_upsert_note_persists_mcp_permissions(store: Store) -> None:
         body_sha256="abc",
     )
     row = store.find_by_id("n1")
-    assert row["mcp_permissions"] == "APPEND"
+    assert row["permissions"] == "APPEND"
 
 
-def test_upsert_placeholder_persists_mcp_permissions(store: Store) -> None:
+def test_upsert_placeholder_persists_permissions(store: Store) -> None:
     summary = NoteSummary(
         id="p1",
         filename="! Hidden",
@@ -151,16 +151,16 @@ def test_upsert_placeholder_persists_mcp_permissions(store: Store) -> None:
         tags=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions="LIST",
+        permissions="LIST",
     )
     store.upsert_placeholder(summary, path="note/! Hidden.md")
     row = store.find_by_id("p1")
     assert row is not None
-    assert row["mcp_permissions"] == "LIST"
+    assert row["permissions"] == "LIST"
     assert row["restricted"] == 1
 
 
-def test_list_and_search_return_mcp_permissions(store: Store, tmp_path: Path) -> None:
+def test_list_and_search_return_permissions(store: Store, tmp_path: Path) -> None:
     store.upsert_note(
         _make_note("n1", "! Full", level="ALL"),
         path="note/! Full.md",
@@ -172,11 +172,11 @@ def test_list_and_search_return_mcp_permissions(store: Store, tmp_path: Path) ->
         body_sha256="2",
     )
     summaries, _ = store.list_notes()
-    levels = {s.id: s.mcp_permissions for s in summaries}
+    levels = {s.id: s.permissions for s in summaries}
     assert levels == {"n1": "ALL", "n2": "APPEND"}
 
     hits, _ = store.search("Full OR Append", vault_dir=tmp_path)
-    hit_levels = {hit.id: hit.mcp_permissions for hit in hits}
+    hit_levels = {hit.id: hit.permissions for hit in hits}
     assert hit_levels == {"n1": "ALL", "n2": "APPEND"}
 
 
@@ -226,12 +226,12 @@ def test_permission_filter_rejects_unknown_level(store: Store) -> None:
 # ── schema migration v1/v2 → v3 ────────────────────────────────────────
 
 
-def test_schema_version_is_v7() -> None:
-    assert SCHEMA_VERSION == 7
+def test_schema_version_is_v8() -> None:
+    assert SCHEMA_VERSION == 8
 
 
 def _seed_v1_database(path: Path) -> None:
-    """Build a SQLite file at the v1 schema (no `restricted`, no `mcp_permissions`)."""
+    """Build a SQLite file at the v1 schema (no `restricted`, no `permissions`)."""
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
@@ -267,7 +267,7 @@ def _seed_v1_database(path: Path) -> None:
     conn.close()
 
 
-def test_schema_migration_from_v1_adds_mcp_permissions_with_all_default(tmp_path: Path) -> None:
+def test_schema_migration_from_v1_adds_permissions_with_all_default(tmp_path: Path) -> None:
     db_path = tmp_path / "index.sqlite"
     _seed_v1_database(db_path)
 
@@ -276,7 +276,7 @@ def test_schema_migration_from_v1_adds_mcp_permissions_with_all_default(tmp_path
         assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
         row = store.find_by_id("legacy-1")
         assert row is not None
-        assert row["mcp_permissions"] == "ALL"
+        assert row["permissions"] == "ALL"
         assert row["restricted"] == 0  # added by v2 migration
 
         # Subsequent upserts overwrite the default.
@@ -286,21 +286,79 @@ def test_schema_migration_from_v1_adds_mcp_permissions_with_all_default(tmp_path
             body_sha256="new",
         )
         row = store.find_by_id("legacy-1")
-        assert row["mcp_permissions"] == "READ"
+        assert row["permissions"] == "READ"
+
+
+def _seed_v7_database(path: Path) -> None:
+    """Build a SQLite file at the v7 schema shape (historical `mcp_permissions` column)."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE notes (
+            id                TEXT PRIMARY KEY,
+            filename          TEXT NOT NULL,
+            title             TEXT NOT NULL,
+            family            TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            source            TEXT,
+            path              TEXT NOT NULL,
+            frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+            body_sha256       TEXT NOT NULL,
+            restricted        INTEGER NOT NULL DEFAULT 0,
+            mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL,
+            path_mtime_ns     INTEGER NOT NULL DEFAULT 0,
+            path_size         INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE sync_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO sync_meta (key, value) VALUES ('schema_version', '7');
+        INSERT INTO notes (
+            id, filename, title, family, kind, source, path,
+            frontmatter_json, body_sha256, restricted, mcp_permissions,
+            created_at, updated_at, path_mtime_ns, path_size
+        ) VALUES (
+            'legacy-7', '! Legacy', 'Legacy', 'permanent', 'permanent', NULL,
+            'note/! Legacy.md', '{}', 'abc', 0, 'READ',
+            '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 0, 0
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_schema_migration_from_v7_renames_mcp_permissions_to_permissions(tmp_path: Path) -> None:
+    """v7 -> v8 renames `notes.mcp_permissions` to `notes.permissions`; data survives."""
+    db_path = tmp_path / "index.sqlite"
+    _seed_v7_database(db_path)
+
+    with Store(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+        columns = {row[1] for row in store.conn.execute("PRAGMA table_info(notes)").fetchall()}
+        assert "mcp_permissions" not in columns
+        assert "permissions" in columns
+
+        row = store.find_by_id("legacy-7")
+        assert row is not None
+        assert row["permissions"] == "READ"
 
 
 # ── client-side pre-check ──────────────────────────────────────────────
 
 
 def test_assert_permission_passes_when_level_is_sufficient() -> None:
-    row = {"id": "n", "filename": "! X", "mcp_permissions": "WRITE"}
+    row = {"id": "n", "filename": "! X", "permissions": "WRITE"}
     # Should not raise.
     _assert_permission(row, required_level="WRITE", operation="edit", force=False)
     _assert_permission(row, required_level="APPEND", operation="append", force=False)
 
 
 def test_assert_permission_fails_when_level_is_insufficient() -> None:
-    row = {"id": "n", "filename": "! X", "mcp_permissions": "READ"}
+    row = {"id": "n", "filename": "! X", "permissions": "READ"}
     with pytest.raises(LocalPermissionError) as exc_info:
         _assert_permission(row, required_level="WRITE", operation="edit", force=False)
     assert exc_info.value.current_level == "READ"
@@ -309,7 +367,7 @@ def test_assert_permission_fails_when_level_is_insufficient() -> None:
 
 
 def test_assert_permission_force_bypasses_check() -> None:
-    row = {"id": "n", "filename": "! X", "mcp_permissions": "READ"}
+    row = {"id": "n", "filename": "! X", "permissions": "READ"}
     # Should not raise despite the low level.
     _assert_permission(row, required_level="ALL", operation="delete", force=True)
 

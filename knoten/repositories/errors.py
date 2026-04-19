@@ -48,7 +48,7 @@ class AmbiguousTargetError(UserError):
 
 class PermissionError(UserError):
     """Local client-side pre-check blocked a write because the note's
-    `mcpPermissions` level is below what the operation needs.
+    `permissions` level is below what the operation needs.
 
     This is a fast-fail guard for tokens that enforce per-note permissions
     (`api` scope). `web`-scope tokens can bypass it with `--force`, which

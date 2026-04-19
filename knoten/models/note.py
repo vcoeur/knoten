@@ -5,15 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-MCP_PERMISSIONS: tuple[str, ...] = ("NONE", "LIST", "READ", "APPEND", "WRITE", "ALL")
-"""Ordered (cumulative) MCP permission levels — mirrors the remote backend.
+PERMISSIONS: tuple[str, ...] = ("NONE", "LIST", "READ", "APPEND", "WRITE", "ALL")
+"""Ordered (cumulative) permission levels — mirrors the remote backend.
 
 Each level grants all capabilities of the lower levels. `ALL` is the default
 for every note the server creates. A note at `APPEND` cannot be freely
 rewritten; a note at `READ` cannot be mutated at all.
 """
 
-_MCP_PERMISSION_RANK: dict[str, int] = {name: index for index, name in enumerate(MCP_PERMISSIONS)}
+_PERMISSION_RANK: dict[str, int] = {name: index for index, name in enumerate(PERMISSIONS)}
 
 
 def permission_rank(level: str) -> int:
@@ -22,7 +22,7 @@ def permission_rank(level: str) -> int:
     Defensive default so that a future server-side level we don't know about
     does not accidentally block writes — the server itself is the final gate.
     """
-    return _MCP_PERMISSION_RANK.get(level, len(MCP_PERMISSIONS) - 1)
+    return _PERMISSION_RANK.get(level, len(PERMISSIONS) - 1)
 
 
 def permission_at_least(level: str, minimum: str) -> bool:
@@ -58,7 +58,7 @@ class NoteSummary:
     tags: tuple[str, ...]
     created_at: str
     updated_at: str
-    mcp_permissions: str = "ALL"
+    permissions: str = "ALL"
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class Note:
     wikilinks: tuple[WikiLink, ...] = ()
     created_at: str = ""
     updated_at: str = ""
-    mcp_permissions: str = "ALL"
+    permissions: str = "ALL"
 
     def to_summary(self) -> NoteSummary:
         return NoteSummary(
@@ -90,7 +90,7 @@ class Note:
             tags=self.tags,
             created_at=self.created_at,
             updated_at=self.updated_at,
-            mcp_permissions=self.mcp_permissions,
+            permissions=self.permissions,
         )
 
 
@@ -109,7 +109,7 @@ class SearchHit:
     score: float
     snippet: str
     updated_at: str
-    mcp_permissions: str = "ALL"
+    permissions: str = "ALL"
     explain: tuple[tuple[str, float], ...] | None = None
     """Per-column bm25 contributions when `search --explain` is set.
 

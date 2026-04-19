@@ -38,7 +38,7 @@ def _make_note(
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at=updated_at,
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
 
 

@@ -24,7 +24,7 @@ def summary_from_api(payload: dict[str, Any]) -> NoteSummary:
         tags=tuple(_as_str(t) for t in (payload.get("tags") or ())),
         created_at=_as_str(payload.get("createdAt") or payload.get("created_at", "")),
         updated_at=_as_str(payload.get("updatedAt") or payload.get("updated_at", "")),
-        mcp_permissions=_as_str(payload.get("mcpPermissions")) or "ALL",
+        permissions=_as_str(payload.get("permissions")) or "ALL",
     )
 
 
@@ -53,7 +53,7 @@ def note_from_api(payload: dict[str, Any]) -> Note:
         wikilinks=wikilinks,
         created_at=_as_str(payload.get("createdAt") or payload.get("created_at", "")),
         updated_at=_as_str(payload.get("updatedAt") or payload.get("updated_at", "")),
-        mcp_permissions=_as_str(payload.get("mcpPermissions")) or "ALL",
+        permissions=_as_str(payload.get("permissions")) or "ALL",
     )
 
 

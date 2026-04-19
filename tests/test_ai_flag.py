@@ -50,7 +50,7 @@ def _mock_note_response(httpx_mock: HTTPXMock, *, body: str) -> None:
         "frontmatter": {},
         "tags": [],
         "linkMap": {},
-        "mcpPermissions": "ALL",
+        "permissions": "ALL",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-01T00:00:00Z",
     }
@@ -122,7 +122,7 @@ def test_cli_append_ai_wraps_content(
                 wikilinks=(),
                 created_at="2024-01-01T00:00:00Z",
                 updated_at="2024-01-01T00:00:00Z",
-                mcp_permissions="ALL",
+                permissions="ALL",
             ),
             store=store,
             vault_dir=vault_dir,
@@ -139,7 +139,7 @@ def test_cli_append_ai_wraps_content(
         "frontmatter": {},
         "tags": [],
         "linkMap": {},
-        "mcpPermissions": "ALL",
+        "permissions": "ALL",
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-02T00:00:00Z",
     }

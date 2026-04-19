@@ -46,7 +46,7 @@ def _assert_permission(
     operation: str,
     force: bool,
 ) -> None:
-    """Local fast-fail guard against per-note `mcp_permissions`.
+    """Local fast-fail guard against per-note `permissions`.
 
     Skipped entirely when `force=True` — the caller is responsible for
     using that only with a web-scope token that bypasses enforcement.
@@ -56,7 +56,7 @@ def _assert_permission(
     """
     if force:
         return
-    current = row.get("mcp_permissions") or "ALL"
+    current = row.get("permissions") or "ALL"
     if permission_at_least(current, required_level):
         return
     raise LocalPermissionError(
@@ -218,7 +218,7 @@ def read_note_full(
         "path": row["path"],
         "absolute_path": str(absolute_path),
         "restricted": bool(row.get("restricted", 0)),
-        "mcp_permissions": row.get("mcp_permissions") or "ALL",
+        "permissions": row.get("permissions") or "ALL",
         "tags": list(tags),
         "frontmatter": frontmatter,
         "body": body_without_frontmatter,
@@ -265,7 +265,7 @@ def summarize_note(store: Store, vault_dir: Path, target: str) -> dict[str, Any]
         "path": row["path"],
         "absolute_path": str(absolute_path),
         "restricted": bool(row.get("restricted", 0)),
-        "mcp_permissions": row.get("mcp_permissions") or "ALL",
+        "permissions": row.get("permissions") or "ALL",
         "tags": list(store.tags_for_note(row["id"])),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -301,7 +301,7 @@ def list_summaries_to_dicts(
                 "tags": list(summary.tags),
                 "path": relative_path,
                 "absolute_path": absolute_path,
-                "mcp_permissions": summary.mcp_permissions,
+                "permissions": summary.permissions,
                 "created_at": summary.created_at,
                 "updated_at": summary.updated_at,
             }
@@ -322,7 +322,7 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
         "score": hit.score,
         "snippet": hit.snippet,
         "updated_at": hit.updated_at,
-        "mcp_permissions": hit.mcp_permissions,
+        "permissions": hit.permissions,
     }
     if hit.explain is not None:
         payload["explain"] = dict(hit.explain)

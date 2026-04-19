@@ -198,7 +198,7 @@ def incremental_sync(
     #       server (trashed or hard-deleted). Remove it.
     #   (b) Drift catch-up — any remote ID not in the local store is a note
     #       we have never ingested. This happens when a previous sync was
-    #       aborted mid-flight, and also for `mcpPermissions = LIST` notes
+    #       aborted mid-flight, and also for `permissions = LIST` notes
     #       that live in the vault but return 404 on `GET /api/notes/{id}`
     #       (they come through here as placeholders via `_fetch_or_placeholder`).
     #

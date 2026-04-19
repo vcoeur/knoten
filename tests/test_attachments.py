@@ -55,7 +55,7 @@ def _seed_file_note(
         wikilinks=(),
         created_at="2024-11-10T00:00:00Z",
         updated_at="2024-11-10T00:00:00Z",
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
     ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     return note
@@ -194,7 +194,7 @@ def test_upload_file_remote_two_step_flow(
             "frontmatter": {"attachment": STORAGE_KEY},
             "tags": [],
             "linkMap": {},
-            "mcpPermissions": "ALL",
+            "permissions": "ALL",
             "createdAt": "2024-11-10T00:00:00Z",
             "updatedAt": "2024-11-10T00:00:00Z",
         },
@@ -298,7 +298,7 @@ def test_download_file_remote_rejects_non_file_family(
             wikilinks=(),
             created_at="2024-01-01T00:00:00Z",
             updated_at="2024-01-01T00:00:00Z",
-            mcp_permissions="ALL",
+            permissions="ALL",
         )
         ingest_note(non_file, store=store, vault_dir=tmp_settings.paths.vault_dir)
         with (

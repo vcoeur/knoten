@@ -278,7 +278,7 @@ def test_v3_to_v4_migration_populates_trigram(tmp_path: Path) -> None:
                 frontmatter_json  TEXT NOT NULL DEFAULT '{}',
                 body_sha256       TEXT NOT NULL,
                 restricted        INTEGER NOT NULL DEFAULT 0,
-                mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+                permissions   TEXT NOT NULL DEFAULT 'ALL',
                 created_at        TEXT NOT NULL,
                 updated_at        TEXT NOT NULL
             );

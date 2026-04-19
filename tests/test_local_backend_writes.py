@@ -31,7 +31,7 @@ def _seed_permanent(settings: Settings, note_id: str, filename: str, body: str) 
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
     with Store(settings.paths.index_path) as store:
         ingest_note(note, store=store, vault_dir=settings.paths.vault_dir)
