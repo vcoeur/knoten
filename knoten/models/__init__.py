@@ -1,7 +1,7 @@
 """Pure data models. No I/O, no framework imports."""
 
 from knoten.models.note import (
-    MCP_PERMISSIONS,
+    PERMISSIONS,
     Note,
     NoteSummary,
     SearchHit,
@@ -11,7 +11,7 @@ from knoten.models.note import (
 )
 
 __all__ = [
-    "MCP_PERMISSIONS",
+    "PERMISSIONS",
     "Note",
     "NoteSummary",
     "SearchHit",

@@ -18,10 +18,10 @@ from typing import Any
 
 from rapidfuzz import fuzz, process
 
-from knoten.models import MCP_PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
+from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS notes (
     frontmatter_json  TEXT NOT NULL DEFAULT '{}',
     body_sha256       TEXT NOT NULL,
     restricted        INTEGER NOT NULL DEFAULT 0,
-    mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+    permissions   TEXT NOT NULL DEFAULT 'ALL',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     path_mtime_ns     INTEGER NOT NULL DEFAULT 0,
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS trashed_notes (
     trash_path        TEXT NOT NULL,
     frontmatter_json  TEXT NOT NULL DEFAULT '{}',
     body_sha256       TEXT NOT NULL,
-    mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+    permissions   TEXT NOT NULL DEFAULT 'ALL',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     deleted_at        TEXT NOT NULL
@@ -161,24 +161,24 @@ def _append_permission_filter(
     typo at the CLI boundary rather than getting a silent empty result.
     """
     if min_permission is not None:
-        if min_permission not in MCP_PERMISSIONS:
+        if min_permission not in PERMISSIONS:
             raise UserError(
-                f"--min-permission: '{min_permission}' is not one of {', '.join(MCP_PERMISSIONS)}"
+                f"--min-permission: '{min_permission}' is not one of {', '.join(PERMISSIONS)}"
             )
         min_rank = permission_rank(min_permission)
-        allowed = [level for level in MCP_PERMISSIONS if permission_rank(level) >= min_rank]
+        allowed = [level for level in PERMISSIONS if permission_rank(level) >= min_rank]
         placeholders = ",".join("?" * len(allowed))
-        where_clauses.append(f"n.mcp_permissions IN ({placeholders})")
+        where_clauses.append(f"n.permissions IN ({placeholders})")
         params.extend(allowed)
     if max_permission is not None:
-        if max_permission not in MCP_PERMISSIONS:
+        if max_permission not in PERMISSIONS:
             raise UserError(
-                f"--max-permission: '{max_permission}' is not one of {', '.join(MCP_PERMISSIONS)}"
+                f"--max-permission: '{max_permission}' is not one of {', '.join(PERMISSIONS)}"
             )
         max_rank = permission_rank(max_permission)
-        allowed = [level for level in MCP_PERMISSIONS if permission_rank(level) <= max_rank]
+        allowed = [level for level in PERMISSIONS if permission_rank(level) <= max_rank]
         placeholders = ",".join("?" * len(allowed))
-        where_clauses.append(f"n.mcp_permissions IN ({placeholders})")
+        where_clauses.append(f"n.permissions IN ({placeholders})")
         params.extend(allowed)
 
 
@@ -192,7 +192,7 @@ class StoreNoteRow:
     updated_at: str
     body_sha256: str
     restricted: bool = False
-    mcp_permissions: str = "ALL"
+    permissions: str = "ALL"
 
 
 class Store:
@@ -281,10 +281,12 @@ class Store:
                     "ALTER TABLE notes ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0"
                 )
         if from_version < 3:
-            # v2 -> v3: add `mcp_permissions` mirroring notes.vcoeur.com's per-note level.
-            # Existing rows default to 'ALL'; the next `sync` populates real values.
+            # v2 -> v3: add the per-note permission column mirroring notes.vcoeur.com.
+            # Historically named `mcp_permissions`; renamed to `permissions` in v8. This
+            # step keeps the historical name so pre-v8 databases reach v7 unchanged;
+            # v7 -> v8 then renames.
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
-            if "mcp_permissions" not in columns:
+            if "mcp_permissions" not in columns and "permissions" not in columns:
                 self.conn.execute(
                     "ALTER TABLE notes ADD COLUMN mcp_permissions TEXT NOT NULL DEFAULT 'ALL'"
                 )
@@ -324,6 +326,15 @@ class Store:
             # v6 -> v7: attachments table for LocalBackend. Same story —
             # CREATE TABLE IF NOT EXISTS in _SCHEMA already fired.
             pass
+        if from_version < 8:
+            # v7 -> v8: rename `mcp_permissions` to `permissions` to match the
+            # server-side rename after the MCP retirement. SQLite 3.25+ supports
+            # in-place column rename.
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
+            if "mcp_permissions" in columns and "permissions" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE notes RENAME COLUMN mcp_permissions TO permissions"
+                )
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -371,7 +382,7 @@ class Store:
                 """
                 INSERT INTO notes (
                     id, filename, title, family, kind, source, path,
-                    frontmatter_json, body_sha256, restricted, mcp_permissions,
+                    frontmatter_json, body_sha256, restricted, permissions,
                     created_at, updated_at, path_mtime_ns, path_size
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
@@ -384,7 +395,7 @@ class Store:
                     frontmatter_json = excluded.frontmatter_json,
                     body_sha256 = excluded.body_sha256,
                     restricted = 0,
-                    mcp_permissions = excluded.mcp_permissions,
+                    permissions = excluded.permissions,
                     updated_at = excluded.updated_at,
                     path_mtime_ns = excluded.path_mtime_ns,
                     path_size = excluded.path_size
@@ -399,7 +410,7 @@ class Store:
                     path,
                     json.dumps(note.frontmatter, ensure_ascii=False),
                     body_sha256,
-                    note.mcp_permissions,
+                    note.permissions,
                     note.created_at,
                     note.updated_at,
                     path_mtime_ns,
@@ -453,7 +464,7 @@ class Store:
         """Insert a metadata-only row for a note whose body we cannot fetch.
 
         Used when `GET /api/notes/{id}` returns 404 — either the note is
-        restricted (`mcpPermissions = LIST` for a non-web token) or it was
+        restricted (`permissions = LIST` for a non-web token) or it was
         deleted between the list and the read. Either way, we have the
         summary fields from the list response and want to preserve them
         locally so title search still works and the user sees the note is
@@ -464,7 +475,7 @@ class Store:
                 """
                 INSERT INTO notes (
                     id, filename, title, family, kind, source, path,
-                    frontmatter_json, body_sha256, restricted, mcp_permissions,
+                    frontmatter_json, body_sha256, restricted, permissions,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', '', 1, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
@@ -477,7 +488,7 @@ class Store:
                     frontmatter_json = '{}',
                     body_sha256 = '',
                     restricted = 1,
-                    mcp_permissions = excluded.mcp_permissions,
+                    permissions = excluded.permissions,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -488,7 +499,7 @@ class Store:
                     summary.kind,
                     summary.source,
                     path,
-                    summary.mcp_permissions,
+                    summary.permissions,
                     summary.created_at,
                     summary.updated_at,
                 ),
@@ -523,7 +534,7 @@ class Store:
 
     def get_row(self, note_id: str) -> StoreNoteRow | None:
         row = self.conn.execute(
-            "SELECT id, filename, path, updated_at, body_sha256, restricted, mcp_permissions "
+            "SELECT id, filename, path, updated_at, body_sha256, restricted, permissions "
             "FROM notes WHERE id = ?",
             (note_id,),
         ).fetchone()
@@ -536,7 +547,7 @@ class Store:
             updated_at=row["updated_at"],
             body_sha256=row["body_sha256"],
             restricted=bool(row["restricted"]),
-            mcp_permissions=row["mcp_permissions"] or "ALL",
+            permissions=row["permissions"] or "ALL",
         )
 
     def all_ids(self) -> set[str]:
@@ -564,7 +575,7 @@ class Store:
                 INSERT OR REPLACE INTO trashed_notes (
                     id, filename, title, family, kind, source,
                     original_path, trash_path, frontmatter_json,
-                    body_sha256, mcp_permissions,
+                    body_sha256, permissions,
                     created_at, updated_at, deleted_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -579,7 +590,7 @@ class Store:
                     trash_path,
                     row["frontmatter_json"],
                     row["body_sha256"],
-                    row["mcp_permissions"],
+                    row["permissions"],
                     row["created_at"],
                     row["updated_at"],
                     deleted_at,
@@ -727,7 +738,7 @@ class Store:
     def all_rows(self) -> list[StoreNoteRow]:
         """Every active note row, used by sync reconciliation."""
         rows = self.conn.execute(
-            "SELECT id, filename, path, updated_at, body_sha256, restricted, mcp_permissions "
+            "SELECT id, filename, path, updated_at, body_sha256, restricted, permissions "
             "FROM notes"
         ).fetchall()
         return [
@@ -738,7 +749,7 @@ class Store:
                 updated_at=row["updated_at"],
                 body_sha256=row["body_sha256"],
                 restricted=bool(row["restricted"]),
-                mcp_permissions=row["mcp_permissions"] or "ALL",
+                permissions=row["permissions"] or "ALL",
             )
             for row in rows
         ]
@@ -1039,7 +1050,7 @@ class Store:
         rows = self.conn.execute(
             f"""
             SELECT n.id, n.filename, n.title, n.family, n.kind, n.source,
-                   n.mcp_permissions, n.created_at, n.updated_at
+                   n.permissions, n.created_at, n.updated_at
             FROM notes n
             {where_sql}
             ORDER BY {order_by}
@@ -1061,7 +1072,7 @@ class Store:
                     tags=self.tags_for_note(row["id"]),
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
-                    mcp_permissions=row["mcp_permissions"] or "ALL",
+                    permissions=row["permissions"] or "ALL",
                 )
             )
         return summaries, total
@@ -1126,7 +1137,7 @@ class Store:
         rows = self.conn.execute(
             f"""
             SELECT
-                n.id, n.title, n.family, n.kind, n.source, n.path, n.mcp_permissions,
+                n.id, n.title, n.family, n.kind, n.source, n.path, n.permissions,
                 n.updated_at,
                 bm25(notes_fts, 1.0, 10.0, 1.0, 5.0) AS score,
                 snippet(notes_fts, 2, '<<', '>>', '...', 16) AS snippet{explain_columns}
@@ -1162,7 +1173,7 @@ class Store:
                     score=float(row["score"]) if row["score"] is not None else 0.0,
                     snippet=row["snippet"] or "",
                     updated_at=row["updated_at"],
-                    mcp_permissions=row["mcp_permissions"] or "ALL",
+                    permissions=row["permissions"] or "ALL",
                     explain=explain_tuple,
                 )
             )
@@ -1236,7 +1247,7 @@ class Store:
         filtered_rows = self.conn.execute(
             f"""
             SELECT n.id, n.filename, n.title, n.family, n.kind, n.source, n.path,
-                   n.mcp_permissions, n.updated_at
+                   n.permissions, n.updated_at
             FROM notes n
             WHERE {where_sql}
             """,
@@ -1293,7 +1304,7 @@ class Store:
                     score=score,
                     snippet=snippet,
                     updated_at=row["updated_at"],
-                    mcp_permissions=row["mcp_permissions"] or "ALL",
+                    permissions=row["permissions"] or "ALL",
                 )
             )
         return hits, total

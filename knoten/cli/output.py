@@ -76,7 +76,7 @@ _PERMISSION_BADGE: dict[str, str] = {
 
 
 def _permission_badge(level: str | None) -> str:
-    """Single-character TTY marker for an `mcp_permissions` level."""
+    """Single-character TTY marker for an `permissions` level."""
     return _PERMISSION_BADGE.get(level or "ALL", "[dim]?[/dim]")
 
 
@@ -105,7 +105,7 @@ def render_search_hits(payload: dict[str, Any], *, mode: OutputMode) -> None:
             family_kind = f"{hit.get('family', '')}/{hit.get('kind', '')}"
             row: list[Any] = [
                 f"{hit.get('score', 0.0):.2f}",
-                _permission_badge(hit.get("mcp_permissions")),
+                _permission_badge(hit.get("permissions")),
                 family_kind,
                 hit.get("title", ""),
             ]
@@ -172,8 +172,8 @@ def render_note(payload: dict[str, Any], *, mode: OutputMode, minimal: bool = Fa
     title = payload.get("title", "")
     note_id = payload.get("id", "")
     family_kind = f"{payload.get('family', '')}/{payload.get('kind', '')}"
-    permission = payload.get("mcp_permissions", "ALL")
-    header = f"[bold]{title}[/bold]\n[dim]{note_id}  •  {family_kind}  •  mcp={permission}[/dim]"
+    permission = payload.get("permissions", "ALL")
+    header = f"[bold]{title}[/bold]\n[dim]{note_id}  •  {family_kind}  •  perms={permission}[/dim]"
     if mode.tty:
         _console.print(Panel(header, title=payload.get("filename", ""), expand=False))
         if not minimal:
@@ -211,7 +211,7 @@ def render_summary_list(payload: dict[str, Any], *, mode: OutputMode) -> None:
         table.add_column("Updated", style="dim")
         for note in notes:
             table.add_row(
-                _permission_badge(note.get("mcp_permissions")),
+                _permission_badge(note.get("permissions")),
                 note.get("family", ""),
                 note.get("kind", ""),
                 note.get("filename", ""),

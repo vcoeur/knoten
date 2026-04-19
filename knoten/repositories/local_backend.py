@@ -205,7 +205,7 @@ class LocalBackend(Backend):
             wikilinks=wikilinks,
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
-            mcp_permissions=row.get("mcp_permissions") or "ALL",
+            permissions=row.get("permissions") or "ALL",
         )
 
     def create_note(self, draft: NoteDraft) -> str:
@@ -241,7 +241,7 @@ class LocalBackend(Backend):
             ),
             created_at=now,
             updated_at=now,
-            mcp_permissions="ALL",
+            permissions="ALL",
         )
         ingest_note(note, store=self._store, vault_dir=self._vault_dir)
         return note_id
@@ -299,7 +299,7 @@ class LocalBackend(Backend):
             ),
             created_at=row.get("created_at") or _utcnow_iso(),
             updated_at=_utcnow_iso(),
-            mcp_permissions=row.get("mcp_permissions") or "ALL",
+            permissions=row.get("permissions") or "ALL",
         )
         ingest_note(
             note,
@@ -419,7 +419,7 @@ class LocalBackend(Backend):
                 ),
                 created_at=row.get("created_at") or _utcnow_iso(),
                 updated_at=_utcnow_iso(),
-                mcp_permissions=row.get("mcp_permissions") or "ALL",
+                permissions=row.get("permissions") or "ALL",
             )
             ingest_note(
                 renamed_note,
@@ -454,7 +454,7 @@ class LocalBackend(Backend):
                     ),
                     created_at=source_row.get("created_at") or _utcnow_iso(),
                     updated_at=_utcnow_iso(),
-                    mcp_permissions=source_row.get("mcp_permissions") or "ALL",
+                    permissions=source_row.get("permissions") or "ALL",
                 )
                 ingest_note(
                     source_note,
@@ -567,7 +567,7 @@ class LocalBackend(Backend):
             ),
             created_at=trashed["created_at"],
             updated_at=_utcnow_iso(),
-            mcp_permissions=trashed.get("mcp_permissions") or "ALL",
+            permissions=trashed.get("permissions") or "ALL",
         )
         ingest_note(note, store=self._store, vault_dir=self._vault_dir)
         self._store.discard_trashed(note_id)

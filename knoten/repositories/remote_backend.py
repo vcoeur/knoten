@@ -187,7 +187,7 @@ class RemoteBackend(Backend):
         if response.status_code in (401, 403):
             raise AuthError(
                 f"POST /api/attachments returned {response.status_code} — "
-                "check KNOTEN_API_TOKEN scope (needs web, api, or mcp)."
+                "check KNOTEN_API_TOKEN scope (needs web or api)."
             )
         if response.status_code not in (200, 201):
             raise NetworkError(

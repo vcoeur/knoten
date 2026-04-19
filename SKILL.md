@@ -150,7 +150,7 @@ Backslash-escape `$` inside shell strings if you use organization-prefixed wikil
 
 ### Permissions (remote mode)
 
-In remote mode, every note carries an `mcp_permissions` level enforced server-side (typical levels: `NONE`, `LIST`, `READ`, `APPEND`, `WRITE`, `ALL`). Before attempting a write, check the `mcp_permissions` field returned by `read` / `search` / `list` and skip or tell the user if the required level is not satisfied. `knoten` pre-checks this client-side and exits non-zero with `error: "permission_denied"` when the level is insufficient — parse the envelope rather than retry with `--force`.
+In remote mode, every note carries an `permissions` level enforced server-side (typical levels: `NONE`, `LIST`, `READ`, `APPEND`, `WRITE`, `ALL`). Before attempting a write, check the `permissions` field returned by `read` / `search` / `list` and skip or tell the user if the required level is not satisfied. `knoten` pre-checks this client-side and exits non-zero with `error: "permission_denied"` when the level is insufficient — parse the envelope rather than retry with `--force`.
 
 ## Adapting this skill to your workflow
 

@@ -477,13 +477,13 @@ def cmd_search(
     min_permission: str | None = typer.Option(
         None,
         "--min-permission",
-        help="Only include notes at this mcp permission level or higher "
+        help="Only include notes at this permission level or higher "
         "(NONE/LIST/READ/APPEND/WRITE/ALL)",
     ),
     max_permission: str | None = typer.Option(
         None,
         "--max-permission",
-        help="Only include notes at this mcp permission level or lower",
+        help="Only include notes at this permission level or lower",
     ),
     limit: int = typer.Option(20, "--limit", min=1, max=200),
     offset: int = typer.Option(0, "--offset", min=0),
@@ -594,12 +594,12 @@ def cmd_list(
     min_permission: str | None = typer.Option(
         None,
         "--min-permission",
-        help="Only include notes at this mcp permission level or higher",
+        help="Only include notes at this permission level or higher",
     ),
     max_permission: str | None = typer.Option(
         None,
         "--max-permission",
-        help="Only include notes at this mcp permission level or lower",
+        help="Only include notes at this permission level or lower",
     ),
     sort: str = typer.Option("updated", "--sort"),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
@@ -885,7 +885,7 @@ def cmd_edit(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+        help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
     fields: Fields = typer.Option(
         Fields.minimal,
@@ -955,7 +955,7 @@ def cmd_append(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+        help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
     fields: Fields = typer.Option(
         Fields.minimal,
@@ -1015,7 +1015,7 @@ def cmd_delete(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+        help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -1084,7 +1084,7 @@ def cmd_rename(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the local mcp_permissions pre-check (web-scope tokens only)",
+        help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
     fields: Fields = typer.Option(
         Fields.minimal,

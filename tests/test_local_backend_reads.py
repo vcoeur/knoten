@@ -38,7 +38,7 @@ def _make_note(
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at=updated_at,
-        mcp_permissions="ALL",
+        permissions="ALL",
     )
 
 
@@ -128,7 +128,7 @@ def test_read_note_returns_full_note(tmp_settings: Settings) -> None:
     assert note.family == "permanent"
     assert "Second body" in note.body
     assert "[[- First]]" in note.body
-    assert note.mcp_permissions == "ALL"
+    assert note.permissions == "ALL"
 
 
 def test_read_note_missing_id_raises_not_found(tmp_settings: Settings) -> None:

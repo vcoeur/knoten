@@ -3,7 +3,7 @@
 Covers:
   * `NotesClient.append_note` hits `POST /api/notes/{id}/append` with
     `{"content": ...}` and returns the server's updated note.
-  * `append_note_remote` refuses when the local `mcp_permissions` is below
+  * `append_note_remote` refuses when the local `permissions` is below
     `APPEND` unless `--force` is passed.
   * `append_note_remote` round-trips through the local store: the note row
     and the mirror file get the new body.
@@ -22,7 +22,7 @@ from knoten.services.notes import append_note_remote, ingest_note
 from knoten.settings import Settings
 
 
-def _seed_local(store: Store, tmp_settings: Settings, *, mcp_permissions: str = "ALL") -> Note:
+def _seed_local(store: Store, tmp_settings: Settings, *, permissions: str = "ALL") -> Note:
     note = Note(
         id="11111111-1111-1111-1111-111111111111",
         filename="! Seed",
@@ -36,7 +36,7 @@ def _seed_local(store: Store, tmp_settings: Settings, *, mcp_permissions: str = 
         wikilinks=(),
         created_at="2024-01-01T00:00:00Z",
         updated_at="2024-01-02T00:00:00Z",
-        mcp_permissions=mcp_permissions,
+        permissions=permissions,
     )
     ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     return note
@@ -59,7 +59,7 @@ def test_append_to_note_backend_posts_to_append_endpoint(
             "frontmatter": {},
             "tags": [],
             "linkMap": {},
-            "mcpPermissions": "ALL",
+            "permissions": "ALL",
             "createdAt": "2024-01-01T00:00:00Z",
             "updatedAt": "2024-01-03T00:00:00Z",
         },
@@ -106,7 +106,7 @@ def test_append_note_remote_round_trips_through_store(
                 "frontmatter": {},
                 "tags": [],
                 "linkMap": {},
-                "mcpPermissions": "ALL",
+                "permissions": "ALL",
                 "createdAt": "2024-01-01T00:00:00Z",
                 "updatedAt": "2024-01-03T00:00:00Z",
             },
@@ -135,7 +135,7 @@ def test_append_note_remote_refuses_below_append_without_force(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     with Store(tmp_settings.paths.index_path) as store:
-        _seed_local(store, tmp_settings, mcp_permissions="READ")
+        _seed_local(store, tmp_settings, permissions="READ")
 
         with RemoteBackend(tmp_settings) as backend:
             with pytest.raises(LocalPermissionError) as exc_info:
@@ -158,7 +158,7 @@ def test_append_note_remote_force_bypasses_precheck(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     with Store(tmp_settings.paths.index_path) as store:
-        _seed_local(store, tmp_settings, mcp_permissions="READ")
+        _seed_local(store, tmp_settings, permissions="READ")
 
         # Server would accept it for a web-scope token; mock accordingly.
         httpx_mock.add_response(
@@ -179,7 +179,7 @@ def test_append_note_remote_force_bypasses_precheck(
                 "frontmatter": {},
                 "tags": [],
                 "linkMap": {},
-                "mcpPermissions": "READ",
+                "permissions": "READ",
                 "createdAt": "2024-01-01T00:00:00Z",
                 "updatedAt": "2024-01-03T00:00:00Z",
             },

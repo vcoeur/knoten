@@ -129,7 +129,7 @@ def reindex_from_files(
             wikilinks=wikilinks,
             created_at=full["created_at"],
             updated_at=full["updated_at"],
-            mcp_permissions=full.get("mcp_permissions") or "ALL",
+            permissions=full.get("permissions") or "ALL",
         )
 
         body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
