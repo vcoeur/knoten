@@ -332,9 +332,7 @@ class Store:
             # in-place column rename.
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
             if "mcp_permissions" in columns and "permissions" not in columns:
-                self.conn.execute(
-                    "ALTER TABLE notes RENAME COLUMN mcp_permissions TO permissions"
-                )
+                self.conn.execute("ALTER TABLE notes RENAME COLUMN mcp_permissions TO permissions")
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -738,8 +736,7 @@ class Store:
     def all_rows(self) -> list[StoreNoteRow]:
         """Every active note row, used by sync reconciliation."""
         rows = self.conn.execute(
-            "SELECT id, filename, path, updated_at, body_sha256, restricted, permissions "
-            "FROM notes"
+            "SELECT id, filename, path, updated_at, body_sha256, restricted, permissions FROM notes"
         ).fetchall()
         return [
             StoreNoteRow(

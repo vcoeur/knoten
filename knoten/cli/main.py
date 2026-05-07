@@ -26,6 +26,7 @@ import typer
 
 from knoten import __version__
 from knoten.cli.config import config_app, init_command
+from knoten.cli.inbox import inbox_app
 from knoten.cli.output import (
     OutputMode,
     emit_json,
@@ -88,6 +89,7 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(config_app, name="config")
+app.add_typer(inbox_app, name="inbox")
 
 
 @app.callback(invoke_without_command=True)

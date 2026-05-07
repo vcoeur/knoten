@@ -66,3 +66,4 @@ ignore = ["SIM105", "SIM117"]
 [tool.ruff.lint.per-file-ignores]
 # Typer's Option(...) default-arg pattern is idiomatic; B008 flags it.
 "knoten/cli/main.py" = ["B008"]
+"knoten/cli/inbox.py" = ["B008"]
