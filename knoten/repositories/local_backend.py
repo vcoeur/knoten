@@ -502,11 +502,22 @@ class LocalBackend(Backend):
             trash_abs.unlink()
         source_abs.rename(trash_abs)
 
-        moved = self._store.soft_delete_to_trash(
-            note_id,
-            trash_path=trash_relative,
-            deleted_at=_utcnow_iso(),
-        )
+        try:
+            moved = self._store.soft_delete_to_trash(
+                note_id,
+                trash_path=trash_relative,
+                deleted_at=_utcnow_iso(),
+            )
+        except Exception:
+            # Roll back the filesystem move if the SQL transaction failed —
+            # otherwise the next reconcile sees a notes row whose mirror file
+            # is gone (orphan), and the user is stuck unable to delete OR
+            # restore until they hand-edit the index.
+            try:
+                trash_abs.rename(source_abs)
+            except OSError:
+                pass
+            raise
         if not moved:
             trash_abs.rename(source_abs)
             raise NotFoundError(f"No note with id {note_id}")

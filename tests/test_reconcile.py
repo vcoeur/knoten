@@ -231,3 +231,30 @@ def test_sync_always_catches_remote_deletes_even_on_equal_totals(
         assert result.deleted == 1
         assert store.count_notes() == 1
         assert store.find_by_id(deleted_id) is None
+
+
+def test_reconcile_drops_phantom_row_when_remote_returns_404(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A row whose mirror file is missing AND whose remote 404s gets cleaned up.
+
+    Reproduces the partial-delete state from the 2026-05-08 incident: a local
+    delete moved the file to .trash/ but the SQL transaction failed, leaving
+    a notes row whose path no longer existed. `verify`/sync then crashed when
+    `_refetch` got a 404. The fix: catch NotFoundError, drop the local row.
+    """
+    from knoten.repositories.local_backend import LocalBackend
+
+    note_id = "deadbeef-dead-dead-dead-deadbeefdead"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_note(store, tmp_settings, note_id, body="phantom")
+    # Move the file out of the vault to simulate the partial-delete state.
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Seeded.md"
+    mirror.unlink()
+
+    with Store(tmp_settings.paths.index_path) as store, LocalBackend(tmp_settings) as backend:
+        result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
+        assert result.missing_refetched == 1
+        # The phantom row is gone — no crash, no orphan.
+        assert store.find_by_id(note_id) is None
+
