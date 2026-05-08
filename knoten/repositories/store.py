@@ -135,6 +135,40 @@ CREATE TABLE IF NOT EXISTS attachments (
 """
 
 
+# FTS5 special characters that cause `fts5: syntax error near "X"` when they
+# appear unquoted in a MATCH expression. We can't know whether the user wants
+# them as operators or as literal text, so the safe default is to phrase-quote
+# every whitespace-separated token that contains one. Explicitly omits `^`
+# because FTS5 uses `^` as a column filter and we never want to phrase that.
+_FTS5_RESERVED = set('=<>*():"^+-')
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Make a free-form user query safe to feed FTS5 MATCH.
+
+    FTS5's MATCH parser raises ``fts5: syntax error`` on a wide set of
+    punctuation that ordinary search inputs contain — citation keys
+    (``Bollier2025=``), URLs (``https://…``), filename prefixes
+    (``CiteKey.``), comparison-style queries, etc. The CLI shouldn't leak
+    parser errors to the user, so we wrap every whitespace-separated token
+    that contains a reserved character in double quotes (and double up any
+    embedded quotes). Tokens that are pure alphanumerics pass through
+    unchanged so plain word searches still hit the unicode61 tokenizer.
+
+    Returns the empty string for an empty input — caller should short-circuit.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return ""
+    safe_tokens: list[str] = []
+    for token in stripped.split():
+        if any(ch in _FTS5_RESERVED for ch in token):
+            safe_tokens.append('"' + token.replace('"', '""') + '"')
+        else:
+            safe_tokens.append(token)
+    return " ".join(safe_tokens)
+
+
 def _trigram_query(query: str) -> str:
     """Build an FTS5 query for the trigram tokenizer from free-form input.
 
@@ -1210,8 +1244,11 @@ class Store:
         vault_dir: Path,
         explain: bool = False,
     ) -> tuple[list[SearchHit], int]:
+        sanitized = _sanitize_fts_query(query)
+        if not sanitized:
+            return [], 0
         where_clauses: list[str] = ["notes_fts MATCH ?"]
-        params: list[Any] = [query]
+        params: list[Any] = [sanitized]
         if family:
             where_clauses.append("n.family = ?")
             params.append(family)

@@ -319,6 +319,51 @@ def test_v3_to_v4_migration_populates_trigram(tmp_path: Path) -> None:
         assert hits[0].id == "n1"
 
 
+def test_search_handles_citation_key_query_without_fts5_error(
+    store: Store, tmp_path: Path
+) -> None:
+    """`knoten search "Bollier2025="` must not leak FTS5 syntax errors.
+
+    Reproduces the 2026-05-08 bug where `=` in a free-text query crashed the
+    underlying MATCH parser. The sanitizer phrase-quotes any token containing
+    FTS5-reserved punctuation so the SELECT runs cleanly even when the input
+    happens to look like a citation key.
+    """
+    store.upsert_note(
+        _make_note(
+            note_id="ref",
+            filename="Bollier2025= Think Like a Commoner",
+            body="A short introduction.",
+            family="reference",
+            kind="book",
+        ),
+        path="literature/Bollier2025= Think Like a Commoner.md",
+        body_sha256="abc",
+    )
+    # Punctuation-only query that previously raised `fts5: syntax error near "="`.
+    hits, _total = store.search("Bollier2025=", vault_dir=tmp_path)
+    # The query is now phrase-matched; depending on tokenization the trailing
+    # `=` may or may not match. The contract being tested is "no exception" —
+    # the empty-result case is also acceptable.
+    assert isinstance(hits, list)
+    # And a normal token search still works.
+    hits, total = store.search("commoner", vault_dir=tmp_path)
+    assert total == 1
+    assert hits[0].id == "ref"
+
+
+def test_search_handles_url_in_query(store: Store, tmp_path: Path) -> None:
+    """A pasted URL must not crash search either."""
+    hits, _total = store.search("https://example.com/foo", vault_dir=tmp_path)
+    assert isinstance(hits, list)
+
+
+def test_search_empty_query_returns_nothing(store: Store, tmp_path: Path) -> None:
+    """Empty string and whitespace-only queries are short-circuited safely."""
+    assert store.search("", vault_dir=tmp_path) == ([], 0)
+    assert store.search("   ", vault_dir=tmp_path) == ([], 0)
+
+
 def test_v8_to_v9_renames_trashed_notes_permissions(tmp_path: Path) -> None:
     """A v8 DB with `mcp_permissions` on `trashed_notes` migrates cleanly.
 
