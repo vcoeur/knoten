@@ -636,6 +636,27 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def find_notes_referencing_attachment(self, storage_key: str) -> list[dict[str, str]]:
+        """Return active notes whose frontmatter has `attachment = storage_key`.
+
+        Used by `LocalBackend.download_attachment` to give a clearer error
+        when the local `attachments` table has no row for the key but the
+        vault still has a file-family note pointing at it — the smoking
+        gun for "vault was synced from a remote backend in another shell,
+        but this CLI is running in local mode and the blob was never
+        streamed down".
+        """
+        rows = self.conn.execute(
+            """
+            SELECT n.id, n.filename
+            FROM frontmatter_fields f
+            JOIN notes n ON n.id = f.note_id
+            WHERE f.name = 'attachment' AND f.value = ?
+            """,
+            (storage_key,),
+        ).fetchall()
+        return [{"id": row["id"], "filename": row["filename"]} for row in rows]
+
     def record_file_stat(self, note_id: str, *, path_mtime_ns: int, path_size: int) -> None:
         """Record the `(mtime_ns, size)` tuple for a note's mirror file.
 

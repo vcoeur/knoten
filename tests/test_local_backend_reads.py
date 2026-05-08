@@ -155,3 +155,45 @@ def test_attachments_round_trip(tmp_settings: Settings, tmp_path) -> None:
     assert download.bytes_written == 7
     assert download.content_type == "application/pdf"
     assert download.filename == "sample.pdf"
+
+
+def test_download_unknown_storage_key_raises_terse_not_found(
+    tmp_settings: Settings, tmp_path
+) -> None:
+    """No referencing note → keep the terse `No attachment with storage_key …` message."""
+    _seed_vault(tmp_settings)
+    with LocalBackend(tmp_settings) as backend:
+        with pytest.raises(NotFoundError, match=r"No attachment with storage_key"):
+            backend.download_attachment("missing.jpg", tmp_path / "out.jpg")
+
+
+def test_download_referenced_storage_key_hints_at_remote_mode(
+    tmp_settings: Settings, tmp_path
+) -> None:
+    """A file-family note pointing at a missing key → enriched error pointing at remote mode."""
+    file_note = Note(
+        id="44444444-4444-4444-4444-444444444444",
+        filename="2024-05-08+ inbox photo.jpg",
+        title="inbox photo.jpg",
+        family="file",
+        kind="file",
+        source="2024-05-08",
+        body="",
+        frontmatter={"attachment": "ghostkey.jpg"},
+        tags=(),
+        wikilinks=(),
+        created_at="2024-05-08T00:00:00Z",
+        updated_at="2024-05-08T00:00:00Z",
+        permissions="ALL",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        ingest_note(file_note, store=store, vault_dir=tmp_settings.paths.vault_dir)
+
+    with LocalBackend(tmp_settings) as backend:
+        with pytest.raises(NotFoundError) as excinfo:
+            backend.download_attachment("ghostkey.jpg", tmp_path / "out.jpg")
+
+    message = str(excinfo.value)
+    assert "ghostkey.jpg" in message
+    assert "2024-05-08+ inbox photo.jpg" in message
+    assert "KNOTEN_API_URL" in message

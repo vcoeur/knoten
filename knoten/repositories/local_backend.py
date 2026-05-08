@@ -610,6 +610,18 @@ class LocalBackend(Backend):
         self._refresh_index_if_stale()
         row = self._store.find_attachment(storage_key)
         if row is None:
+            referencing = self._store.find_notes_referencing_attachment(storage_key)
+            if referencing:
+                example = referencing[0]["filename"]
+                raise NotFoundError(
+                    f"No local blob for storage_key {storage_key} — but file-family "
+                    f"note {example!r} references it. The vault metadata was "
+                    "synced from a remote backend, but this CLI is running in "
+                    "local mode (KNOTEN_API_URL is empty), so the blob was never "
+                    "streamed down. Set KNOTEN_API_URL and KNOTEN_API_TOKEN "
+                    "(e.g. in ~/.config/knoten/.env) so knoten resolves to "
+                    "remote mode and downloads attachments on demand."
+                )
             raise NotFoundError(f"No attachment with storage_key {storage_key}")
 
         source_abs = self._vault_dir / ".attachments" / storage_key
