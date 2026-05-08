@@ -319,6 +319,127 @@ def test_v3_to_v4_migration_populates_trigram(tmp_path: Path) -> None:
         assert hits[0].id == "n1"
 
 
+def test_v8_to_v9_renames_trashed_notes_permissions(tmp_path: Path) -> None:
+    """A v8 DB with `mcp_permissions` on `trashed_notes` migrates cleanly.
+
+    Mirrors the schema state real users had after upgrading from v7 to v8: the
+    `notes` rename happened, but `trashed_notes` was missed because its
+    `CREATE TABLE IF NOT EXISTS` clause is a no-op for an existing table.
+    Without this migration step, `knoten delete` crashes with
+    `table trashed_notes has no column named permissions`.
+    """
+    db_path = tmp_path / "index.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        # Re-seed a v8-shaped trashed_notes with the OLD column name. Other
+        # tables are seeded with the post-rename name; we only care about the
+        # column on trashed_notes for this regression.
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                permissions       TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+            CREATE TABLE trashed_notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                original_path     TEXT NOT NULL,
+                trash_path        TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                deleted_at        TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '8')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
+        columns = {
+            row[1]
+            for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+        }
+        assert "permissions" in columns
+        assert "mcp_permissions" not in columns
+
+
+def test_v8_without_permissions_column_gets_added(tmp_path: Path) -> None:
+    """An older fixture lacking *both* names gets `permissions` added defensively."""
+    db_path = tmp_path / "index.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                permissions       TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+            CREATE TABLE trashed_notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                original_path     TEXT NOT NULL,
+                trash_path        TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                deleted_at        TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '8')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        columns = {
+            row[1]
+            for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+        }
+        assert "permissions" in columns
+
+
 def test_tag_and_kind_counts(store: Store) -> None:
     store.upsert_note(
         _make_note(note_id="a", filename="! One", body="", tags=("search", "encryption")),

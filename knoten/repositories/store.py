@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -333,6 +333,25 @@ class Store:
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
             if "mcp_permissions" in columns and "permissions" not in columns:
                 self.conn.execute("ALTER TABLE notes RENAME COLUMN mcp_permissions TO permissions")
+        if from_version < 9:
+            # v8 -> v9: same `mcp_permissions` -> `permissions` rename on the
+            # `trashed_notes` table. The v8 step missed it because `_SCHEMA`
+            # uses `CREATE TABLE IF NOT EXISTS` (a no-op on existing tables),
+            # so a database upgraded from v6/v7 retained the old column name —
+            # `knoten delete` then crashed with `table trashed_notes has no
+            # column named permissions`. Defensive: also ADD the column if it is
+            # missing entirely (early test fixtures predating either name).
+            columns = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+            }
+            if "mcp_permissions" in columns and "permissions" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE trashed_notes RENAME COLUMN mcp_permissions TO permissions"
+                )
+            elif "permissions" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE trashed_notes ADD COLUMN permissions TEXT NOT NULL DEFAULT 'ALL'"
+                )
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
