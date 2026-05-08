@@ -1304,8 +1304,8 @@ class Store:
         rows = self.conn.execute(
             f"""
             SELECT
-                n.id, n.title, n.family, n.kind, n.source, n.path, n.permissions,
-                n.updated_at,
+                n.id, n.filename, n.title, n.family, n.kind, n.source, n.path,
+                n.permissions, n.updated_at,
                 bm25(notes_fts, 1.0, 10.0, 1.0, 5.0) AS score,
                 snippet(notes_fts, 2, '<<', '>>', '...', 16) AS snippet{explain_columns}
             FROM notes_fts
@@ -1330,6 +1330,7 @@ class Store:
             hits.append(
                 SearchHit(
                     id=row["id"],
+                    filename=row["filename"],
                     title=row["title"],
                     family=row["family"],
                     kind=row["kind"],
@@ -1461,6 +1462,7 @@ class Store:
             hits.append(
                 SearchHit(
                     id=row["id"],
+                    filename=row["filename"],
                     title=row["title"],
                     family=row["family"],
                     kind=row["kind"],

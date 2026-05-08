@@ -363,6 +363,48 @@ def test_create_resolves_pre_existing_broken_wikilinks(store: Store) -> None:
     assert post["target_id"] == "commons"
 
 
+def test_search_hit_json_shape_includes_filename(store: Store, tmp_path: Path) -> None:
+    """Lock the documented JSON hit shape — every key must be present.
+
+    Reproduces the 2026-05-08 surprise where iterating over hits with
+    `python3 -c "...h['filename']..."` raised KeyError because the dataclass
+    had not been carrying `filename`. The skill (and the integration scripts
+    built on top of it) document `filename` as a stable hit key.
+    """
+    from knoten.services.notes import hit_to_dict
+
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Locked shape",
+            body="body for shape lock",
+        ),
+        path="note/! Locked shape.md",
+        body_sha256="x",
+    )
+    hits, _ = store.search("shape", vault_dir=tmp_path)
+    assert hits
+    payload = hit_to_dict(hits[0])
+    expected = {
+        "id",
+        "filename",
+        "title",
+        "family",
+        "kind",
+        "source",
+        "path",
+        "absolute_path",
+        "tags",
+        "score",
+        "snippet",
+        "updated_at",
+        "permissions",
+    }
+    missing = expected - payload.keys()
+    assert not missing, f"hit missing documented keys: {missing}"
+    assert payload["filename"] == "! Locked shape"
+
+
 def test_search_handles_citation_key_query_without_fts5_error(
     store: Store, tmp_path: Path
 ) -> None:

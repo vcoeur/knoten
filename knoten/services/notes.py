@@ -317,6 +317,7 @@ def list_summaries_to_dicts(
 def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": hit.id,
+        "filename": hit.filename,
         "title": hit.title,
         "family": hit.family,
         "kind": hit.kind,
