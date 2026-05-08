@@ -509,6 +509,17 @@ class Store:
                     [(note.id, link.target_title, link.target_id) for link in note.wikilinks],
                 )
 
+            # Resolve any pre-existing broken wikilinks that point at this
+            # note's filename: other notes may have inserted `(target_title,
+            # NULL)` rows when they were ingested before this one. Without
+            # this sweep, `knoten read` would keep reporting them as broken
+            # until the next `sync --full` rebuilt the resolution table.
+            conn.execute(
+                "UPDATE wikilinks SET target_id = ? "
+                "WHERE target_title = ? AND target_id IS NULL",
+                (note.id, note.filename),
+            )
+
             conn.execute("DELETE FROM frontmatter_fields WHERE note_id = ?", (note.id,))
             scalar_rows: list[tuple[str, str, str]] = []
             for key, value in note.frontmatter.items():
