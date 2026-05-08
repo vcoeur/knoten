@@ -206,7 +206,7 @@ def cmd_add(
         kind = _classify_argument(argument, force=force)
         load_settings, build_backend, require_token = _load_runtime()
         settings = load_settings()
-        require_token(settings)
+        require_token(settings, for_write="inbox add")
         from knoten.repositories.lock import acquire_lock
         from knoten.repositories.store import Store
         from knoten.services.notes import create_note_remote, upload_file_remote
@@ -430,7 +430,7 @@ def cmd_append(
         kind = _classify_argument(argument, force=force)
         load_settings, build_backend, require_token = _load_runtime()
         settings = load_settings()
-        require_token(settings)
+        require_token(settings, for_write="inbox append")
         from knoten.repositories.lock import acquire_lock
         from knoten.repositories.store import Store
         from knoten.services.notes import (

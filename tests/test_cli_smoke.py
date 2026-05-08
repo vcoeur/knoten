@@ -82,9 +82,10 @@ def test_search_fuzzy_empty_store(monkeypatch, tmp_path) -> None:
 
 
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
-    # Explicitly set to "" so environs does not fall back to the repo-level
-    # .env (which may or may not exist depending on the user's setup).
+    # Force remote mode so the missing-token path is exercised; without an
+    # api_url the CLI would resolve to local mode and skip the token check.
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
     monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync"])
@@ -95,6 +96,7 @@ def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
 def test_error_envelope_config_error_json(monkeypatch, tmp_path) -> None:
     """ConfigError with --json must emit a parseable error envelope on stdout."""
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
     monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync", "--json"])
@@ -121,6 +123,7 @@ def test_error_envelope_not_found_json(monkeypatch, tmp_path) -> None:
 def test_error_envelope_plaintext_without_json(monkeypatch, tmp_path) -> None:
     """Without --json, errors emit plain text and no JSON envelope."""
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")
     monkeypatch.setenv("KNOTEN_API_TOKEN", "")
     runner = CliRunner()
     result = runner.invoke(app, ["sync"])
