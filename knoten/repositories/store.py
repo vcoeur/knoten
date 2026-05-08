@@ -515,8 +515,7 @@ class Store:
             # this sweep, `knoten read` would keep reporting them as broken
             # until the next `sync --full` rebuilt the resolution table.
             conn.execute(
-                "UPDATE wikilinks SET target_id = ? "
-                "WHERE target_title = ? AND target_id IS NULL",
+                "UPDATE wikilinks SET target_id = ? WHERE target_title = ? AND target_id IS NULL",
                 (note.id, note.filename),
             )
 

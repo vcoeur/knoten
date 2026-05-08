@@ -257,4 +257,3 @@ def test_reconcile_drops_phantom_row_when_remote_returns_404(
         assert result.missing_refetched == 1
         # The phantom row is gone — no crash, no orphan.
         assert store.find_by_id(note_id) is None
-

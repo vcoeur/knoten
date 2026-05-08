@@ -405,9 +405,7 @@ def test_search_hit_json_shape_includes_filename(store: Store, tmp_path: Path) -
     assert payload["filename"] == "! Locked shape"
 
 
-def test_search_handles_citation_key_query_without_fts5_error(
-    store: Store, tmp_path: Path
-) -> None:
+def test_search_handles_citation_key_query_without_fts5_error(store: Store, tmp_path: Path) -> None:
     """`knoten search "Bollier2025="` must not leak FTS5 syntax errors.
 
     Reproduces the 2026-05-08 bug where `=` in a free-text query crashed the

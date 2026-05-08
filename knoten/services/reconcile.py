@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from knoten.repositories.backend import Backend
-from knoten.repositories.errors import NotFoundError, NoteForbiddenError
+from knoten.repositories.errors import NoteForbiddenError, NotFoundError
 from knoten.repositories.store import Store, StoreNoteRow
 from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
 from knoten.settings import Settings
