@@ -1,8 +1,9 @@
-"""Test the config-drift guard added in v0.4.0.
+"""Test the bidirectional-sync behaviour added in v0.4.0.
 
-When the vault has a `last_sync_at` recorded but `KNOTEN_API_URL` is empty,
-writes must error rather than land silently in the local-only vault.
-Mirrors the data-loss scenario from `projects/2026-05/2026-05-08-knoten-fixes`.
+When the vault has a `last_sync_at` recorded but `KNOTEN_API_URL` is empty
+(config drift), writes still succeed locally — but each new row is marked
+`synced=0`. The next remote sync's push pass drains the queue.
+A stderr banner surfaces the degraded mode for every non-config command.
 """
 
 from __future__ import annotations
@@ -42,8 +43,6 @@ def _seed_state_with_prior_sync(monkeypatch, tmp_path: Path) -> None:
 def _invoke(args: list[str]) -> tuple[int, str, str]:
     runner = CliRunner()
     result = runner.invoke(app, args)
-    # Newer click >=8.2: result.stderr is always separately captured.
-    # Older versions need mix_stderr=False; we accept either by trying both.
     try:
         err = result.stderr
     except (AttributeError, ValueError):
@@ -51,36 +50,42 @@ def _invoke(args: list[str]) -> tuple[int, str, str]:
     return result.exit_code, result.stdout, err or ""
 
 
-def test_create_blocked_when_prior_sync_but_url_empty(auto_mode_no_api_url, monkeypatch) -> None:
+def test_create_succeeds_in_drift_state(auto_mode_no_api_url, monkeypatch) -> None:
+    """Writes are not blocked — local-only writes are legitimate."""
     _seed_state_with_prior_sync(monkeypatch, auto_mode_no_api_url)
-    code, out, _err = _invoke(
-        ["create", "--filename", "- Drift test", "--body", "x", "--json"]
-    )
-    assert code == 4, out
-    payload = json.loads(out)
-    assert payload["error"] == "config"
-    assert "previously synced" in payload["message"]
-    assert "create" in payload["message"]
-
-
-def test_create_allowed_on_fresh_vault_with_no_prior_sync(auto_mode_no_api_url) -> None:
-    code, out, _err = _invoke(
-        ["create", "--filename", "- Fresh", "--body", "x", "--json"]
-    )
+    code, out, _err = _invoke(["create", "--filename", "- Drift test", "--body", "x", "--json"])
     assert code == 0, out
     payload = json.loads(out)
-    assert payload["filename"] == "- Fresh"
+    assert payload["filename"] == "- Drift test"
 
 
-def test_create_allowed_when_explicit_local_mode(monkeypatch, tmp_path: Path) -> None:
-    _seed_state_with_prior_sync(monkeypatch, tmp_path)
-    monkeypatch.setenv("KNOTEN_MODE", "local")
-    monkeypatch.setenv("KNOTEN_API_URL", "")
-    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
-    code, out, _err = _invoke(
-        ["create", "--filename", "- Explicit local", "--body", "x", "--json"]
-    )
+def _read_synced(note_id: str) -> int:
+    """Open the live SQLite mirror via paths.resolve() and return synced for note_id."""
+    from knoten.paths import resolve
+
+    paths = resolve()
+    import sqlite3
+
+    with sqlite3.connect(paths.index_path) as conn:
+        row = conn.execute("SELECT synced FROM notes WHERE id = ?", (note_id,)).fetchone()
+    return int(row[0]) if row else -1
+
+
+def test_create_marks_row_synced_zero_in_drift_state(auto_mode_no_api_url, monkeypatch) -> None:
+    """Notes created in drifted local mode get `synced=0` for later push."""
+    _seed_state_with_prior_sync(monkeypatch, auto_mode_no_api_url)
+    code, out, _ = _invoke(["create", "--filename", "- Drift sync test", "--body", "x", "--json"])
     assert code == 0, out
+    note_id = json.loads(out)["id"]
+    assert _read_synced(note_id) == 0
+
+
+def test_create_on_fresh_vault_marks_synced_zero(auto_mode_no_api_url) -> None:
+    """Even on a fresh vault with no prior sync, local writes track unsynced state."""
+    code, out, _ = _invoke(["create", "--filename", "- Fresh", "--body", "x", "--json"])
+    assert code == 0, out
+    note_id = json.loads(out)["id"]
+    assert _read_synced(note_id) == 0
 
 
 def test_read_emits_local_mode_banner_when_drift_detected(
@@ -107,32 +112,3 @@ def test_no_banner_when_explicit_local_mode(monkeypatch, tmp_path: Path) -> None
     code, _out, err = _invoke(["list", "--json"])
     assert code == 0
     assert "warning" not in err.lower()
-
-
-def test_edit_blocked_in_drift_state(auto_mode_no_api_url, monkeypatch) -> None:
-    # First create a note in fresh state, then seed drift, then try to edit.
-    code, out, _ = _invoke(["create", "--filename", "- Pre-drift", "--body", "v1", "--json"])
-    assert code == 0
-    note_id = json.loads(out)["id"]
-    _seed_state_with_prior_sync(monkeypatch, auto_mode_no_api_url)
-    code, out, _ = _invoke(["edit", "--body", "v2", "--json", "--", note_id])
-    assert code == 4
-    assert json.loads(out)["error"] == "config"
-
-
-def test_append_blocked_in_drift_state(auto_mode_no_api_url, monkeypatch) -> None:
-    code, out, _ = _invoke(["create", "--filename", "- Pre-drift", "--body", "v1", "--json"])
-    assert code == 0
-    note_id = json.loads(out)["id"]
-    _seed_state_with_prior_sync(monkeypatch, auto_mode_no_api_url)
-    code, out, _ = _invoke(["append", "--content", "more", "--json", "--", note_id])
-    assert code == 4
-
-
-def test_delete_blocked_in_drift_state(auto_mode_no_api_url, monkeypatch) -> None:
-    code, out, _ = _invoke(["create", "--filename", "- Doomed", "--body", "v1", "--json"])
-    assert code == 0
-    note_id = json.loads(out)["id"]
-    _seed_state_with_prior_sync(monkeypatch, auto_mode_no_api_url)
-    code, out, _ = _invoke(["delete", "--yes", "--json", "--", note_id])
-    assert code == 4

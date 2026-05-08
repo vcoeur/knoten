@@ -174,33 +174,17 @@ def _load() -> Settings:
 def _require_token(settings: Settings, *, for_write: str | None = None) -> None:
     """Verify the CLI is configured to talk to a remote backend (when needed).
 
-    `for_write` is the operation name (e.g. ``"create"``, ``"edit"``). When
-    set, this also blocks the silent-write-loss vector: if the vault has a
-    prior `last_sync_at` recorded but `KNOTEN_API_URL` is now empty (config
-    drift), the write would land in the local-only vault and be reconciled
-    away on next sync. Surface a hard `config` error instead.
+    `for_write` is accepted but only used as a no-op marker for now — local
+    writes are intentionally allowed in any mode (offline-first). The local
+    mirror tracks them via `notes.synced` and the next remote `sync` pushes
+    them upstream rather than reconciling them away. The argument is kept on
+    the signature so callsites stay self-documenting.
     """
-    if settings.effective_mode == "remote":
-        if not settings.api_token:
-            raise ConfigError(
-                "KNOTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
-            )
-        return
-    # effective_mode == "local"
-    if settings.mode == MODE_LOCAL:
-        return  # explicit opt-in — local-only writes are intentional
-    if for_write is None:
-        return  # read commands are fine in auto-resolved-to-local
-    state = load_state(settings.paths.state_file)
-    if state.last_sync_at is None:
-        return  # fresh vault, never synced — local-only writes are fine
-    raise ConfigError(
-        f"Refusing to '{for_write}': KNOTEN_API_URL is not set, but this vault was previously "
-        f"synced from a remote backend (last_sync_at={state.last_sync_at!r}). Writes in "
-        "local-only mode will be reconciled away on the next sync.\n"
-        f"Restore your remote config at {settings.paths.env_file}, or set KNOTEN_MODE=local "
-        "to confirm switching to a local-only vault."
-    )
+    del for_write  # currently unused — kept for callsite documentation
+    if settings.effective_mode == "remote" and not settings.api_token:
+        raise ConfigError(
+            "KNOTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
+        )
 
 
 def _build_backend(settings: Settings) -> Backend:

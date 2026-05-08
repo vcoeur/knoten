@@ -379,8 +379,7 @@ def test_v8_to_v9_renames_trashed_notes_permissions(tmp_path: Path) -> None:
     with Store(db_path) as migrated:
         assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
         columns = {
-            row[1]
-            for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+            row[1] for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
         }
         assert "permissions" in columns
         assert "mcp_permissions" not in columns
@@ -434,8 +433,7 @@ def test_v8_without_permissions_column_gets_added(tmp_path: Path) -> None:
 
     with Store(db_path) as migrated:
         columns = {
-            row[1]
-            for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+            row[1] for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
         }
         assert "permissions" in columns
 

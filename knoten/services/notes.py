@@ -101,6 +101,7 @@ def ingest_note(
     store: Store,
     vault_dir: Path,
     previous_path: str | None = None,
+    synced: bool = True,
 ) -> str:
     """Upsert the store row + write the mirror file. Returns the relative path.
 
@@ -110,13 +111,17 @@ def ingest_note(
     recoverable by the next `reconcile_local` pass. Writing the file first
     would leave a window where on-disk content disagrees with the FTS5
     index until the next sync re-fetched the note.
+
+    `synced=True` (default) marks the row as in sync with the remote. The
+    sync service uses this when ingesting fetched notes. LocalBackend writes
+    pass `synced=False` so the next remote sync's push pass picks them up.
     """
     relative_path = path_for_note(note)
     body_sha = hashlib.sha256(note.body.encode("utf-8")).hexdigest()
     content = render_note_markdown(note)
 
     # 1. Commit the store + FTS5 + derived rows in one transaction.
-    store.upsert_note(note, path=relative_path, body_sha256=body_sha)
+    store.upsert_note(note, path=relative_path, body_sha256=body_sha, synced=synced)
 
     # 2. Write the mirror file atomically. If this fails, the store already
     #    points at `relative_path`; reconcile will detect the missing file
@@ -435,6 +440,17 @@ def download_file_remote(
     }
 
 
+def _is_local_backend(backend: Backend) -> bool:
+    """True if the backend writes to the local vault only (no remote round-trip).
+
+    Lazy import keeps this module free of the LocalBackend dependency at
+    parse time — services/notes is imported very early in the CLI startup.
+    """
+    from knoten.repositories.local_backend import LocalBackend
+
+    return isinstance(backend, LocalBackend)
+
+
 def create_note_remote(
     *,
     backend: Backend,
@@ -456,7 +472,14 @@ def create_note_remote(
     )
     created_id = backend.create_note(draft)
     fresh = backend.read_note(created_id)
-    ingest_note(fresh, store=store, vault_dir=vault_dir)
+    # Local-backend writes never round-trip through a remote; the new row is
+    # `synced=0` until a remote sync's push pass uploads it.
+    ingest_note(
+        fresh,
+        store=store,
+        vault_dir=vault_dir,
+        synced=not _is_local_backend(backend),
+    )
     return fresh
 
 
@@ -514,7 +537,8 @@ def edit_note_remote(
 
     update_result = backend.update_note(note_id, patch)
     fresh = backend.read_note(note_id)
-    ingest_note(fresh, store=store, vault_dir=vault_dir, previous_path=previous_path)
+    synced = not _is_local_backend(backend)
+    ingest_note(fresh, store=store, vault_dir=vault_dir, previous_path=previous_path, synced=synced)
 
     # Rename cascade: when the server rewrites [[old]] → [[new]] in other
     # notes' bodies, it returns them in `affected_notes`. Re-fetch each and
@@ -523,7 +547,7 @@ def edit_note_remote(
         if affected_id == note_id:
             continue
         affected_note = backend.read_note(affected_id)
-        ingest_note(affected_note, store=store, vault_dir=vault_dir)
+        ingest_note(affected_note, store=store, vault_dir=vault_dir, synced=synced)
 
     return fresh
 
@@ -566,7 +590,13 @@ def append_note_remote(
     previous_path = row["path"]
     backend.append_to_note(note_id, content)
     fresh = backend.read_note(note_id)
-    ingest_note(fresh, store=store, vault_dir=vault_dir, previous_path=previous_path)
+    ingest_note(
+        fresh,
+        store=store,
+        vault_dir=vault_dir,
+        previous_path=previous_path,
+        synced=not _is_local_backend(backend),
+    )
     return fresh
 
 
@@ -575,7 +605,7 @@ def restore_note_remote(*, backend: Backend, store: Store, vault_dir: Path, note
         raise UserError("restore only accepts UUIDs (trash lookups are by id)")
     backend.restore_note(note_id)
     fresh = backend.read_note(note_id)
-    ingest_note(fresh, store=store, vault_dir=vault_dir)
+    ingest_note(fresh, store=store, vault_dir=vault_dir, synced=not _is_local_backend(backend))
     return fresh
 
 
