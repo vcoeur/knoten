@@ -195,8 +195,8 @@ The `=`, `.`, `+` suffixes after the citation key are the family discriminator a
 Manually typing reference metadata for academic papers — authors, year, DOI, journal, abstract — is slow and error-prone. [`quelle`](https://quelle.vcoeur.com) resolves a paper by DOI, arXiv id, or free-text title and returns normalised JSON: authors, year, DOI, journal, open-access PDF URL if one exists. The natural pipeline is:
 
 ```bash
-# 1. Resolve the paper.
-quelle fetch 10.1109/83.902291 --json > /tmp/paper.json
+# 1. Resolve the paper. (--json is a top-level flag — place it before the subcommand.)
+quelle --json fetch 10.1109/83.902291 > /tmp/paper.json
 
 # 2. Derive a citation key and title from the JSON.
 cite=$(jq -r '.authors[0].family + (.year | tostring)' /tmp/paper.json)
@@ -210,8 +210,9 @@ knoten create \
   --json
 
 # 4. If an open-access PDF is available, download and attach it.
-quelle fetch 10.1109/83.902291 --download-pdf
-knoten upload "$(quelle config path data)/pdfs/10.1109_83.902291.pdf" \
+quelle --json fetch 10.1109/83.902291 --download-pdf > /tmp/paper.json
+pdf=$(jq -r '.local_pdf_path // empty' /tmp/paper.json)
+[ -n "$pdf" ] && knoten upload "$pdf" \
   --filename "${cite}+ ${title}.pdf" \
   --json
 ```
