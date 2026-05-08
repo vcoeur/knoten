@@ -120,6 +120,25 @@ def test_error_envelope_not_found_json(monkeypatch, tmp_path) -> None:
     assert "message" in payload
 
 
+def test_kind_filter_hint_when_family_has_matches(monkeypatch, tmp_path) -> None:
+    """`--kind reference` with no hits hints at `--family reference` when the family has rows."""
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_URL", "")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
+    monkeypatch.setenv("KNOTEN_MODE", "local")
+    runner = CliRunner()
+    runner.invoke(
+        app,
+        ["create", "--filename", "Bollier2025= Foo", "--body", "x", "--kind", "book", "--json"],
+    )
+    result = runner.invoke(app, ["list", "--kind", "reference", "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["total"] == 0
+    assert "hint" in payload
+    assert "--family reference" in payload["hint"]
+
+
 def test_error_envelope_plaintext_without_json(monkeypatch, tmp_path) -> None:
     """Without --json, errors emit plain text and no JSON envelope."""
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))

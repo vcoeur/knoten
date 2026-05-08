@@ -575,6 +575,7 @@ def cmd_search(
                     explain=explain,
                 )
                 source = "local"
+            hint = _family_kind_hint(store, kind=kind, total=total)
         payload = {
             "query": query,
             "total": total,
@@ -583,9 +584,39 @@ def cmd_search(
             "hits": [hit_to_dict(h) for h in hits],
             "source": source,
         }
+        if hint:
+            payload["hint"] = hint
         render_search_hits(payload, mode=mode)
+        if hint and not mode.json:
+            sys.stderr.write(f"hint: {hint}\n")
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _family_kind_hint(store: Store, *, kind: str | None, total: int) -> str | None:
+    """Suggest `--family <kind>` when `--kind <kind>` returned no hits.
+
+    Several kind names are also family names (e.g. `reference`), and a user
+    typing `--kind reference` to filter for references would silently miss
+    every book / article / web / media row because those have their own
+    literal `kind` value. When the literal-kind query returns 0 but the
+    family-by-the-same-name has matches, we surface that as a hint instead
+    of letting the user assume their data is missing.
+    """
+    if total > 0 or kind is None:
+        return None
+    rows = store.conn.execute(
+        "SELECT COUNT(*) AS c FROM notes WHERE family = ?", (kind,)
+    ).fetchone()
+    if rows is None:
+        return None
+    family_total = int(rows["c"])
+    if family_total <= 0:
+        return None
+    return (
+        f"--kind {kind!r} matched 0 rows, but {family_total} note(s) live in the "
+        f"{kind!r} family under other kinds. Did you mean --family {kind}?"
+    )
 
 
 @app.command("read")
@@ -663,8 +694,13 @@ def cmd_list(
             )
             vault_dir = settings.paths.vault_dir
             notes = list_summaries_to_dicts(summaries, vault_dir=vault_dir, store=store)
+            hint = _family_kind_hint(store, kind=kind, total=total)
         payload = {"total": total, "limit": limit, "offset": offset, "notes": notes}
+        if hint:
+            payload["hint"] = hint
         render_summary_list(payload, mode=mode)
+        if hint and not mode.json:
+            sys.stderr.write(f"hint: {hint}\n")
     except Exception as exc:
         _fail(exc, mode=mode)
 
