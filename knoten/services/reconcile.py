@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from knoten.repositories.backend import Backend
-from knoten.repositories.errors import NoteForbiddenError
+from knoten.repositories.errors import NoteForbiddenError, NotFoundError
 from knoten.repositories.store import Store, StoreNoteRow
-from knoten.services.notes import ingest_note, ingest_placeholder
+from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
 from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
@@ -179,6 +179,13 @@ def _refetch(
             vault_dir=settings.paths.vault_dir,
             previous_path=row.path,
         )
+        return
+    except NotFoundError:
+        # The remote no longer has this note (deleted server-side, or this
+        # row is left over from a partial local delete). Drop the local row
+        # + file so the next sync starts clean instead of crashing the whole
+        # reconcile pass over a single phantom id.
+        delete_ingested(store, settings.paths.vault_dir, row.id)
         return
     previous = store.get_row(note.id)
     ingest_note(

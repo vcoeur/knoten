@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     path_mtime_ns     INTEGER NOT NULL DEFAULT 0,
-    path_size         INTEGER NOT NULL DEFAULT 0
+    path_size         INTEGER NOT NULL DEFAULT 0,
+    -- 1 = ingested from remote (or successfully pushed up); 0 = created or
+    -- edited locally but not yet pushed. The push pass at the start of every
+    -- remote sync drains synced=0 rows by POSTing them upstream.
+    synced            INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_filename ON notes(filename);
@@ -129,6 +133,40 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at     TEXT NOT NULL
 );
 """
+
+
+# FTS5 special characters that cause `fts5: syntax error near "X"` when they
+# appear unquoted in a MATCH expression. We can't know whether the user wants
+# them as operators or as literal text, so the safe default is to phrase-quote
+# every whitespace-separated token that contains one. Explicitly omits `^`
+# because FTS5 uses `^` as a column filter and we never want to phrase that.
+_FTS5_RESERVED = set('=<>*():"^+-')
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Make a free-form user query safe to feed FTS5 MATCH.
+
+    FTS5's MATCH parser raises ``fts5: syntax error`` on a wide set of
+    punctuation that ordinary search inputs contain — citation keys
+    (``Bollier2025=``), URLs (``https://…``), filename prefixes
+    (``CiteKey.``), comparison-style queries, etc. The CLI shouldn't leak
+    parser errors to the user, so we wrap every whitespace-separated token
+    that contains a reserved character in double quotes (and double up any
+    embedded quotes). Tokens that are pure alphanumerics pass through
+    unchanged so plain word searches still hit the unicode61 tokenizer.
+
+    Returns the empty string for an empty input — caller should short-circuit.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return ""
+    safe_tokens: list[str] = []
+    for token in stripped.split():
+        if any(ch in _FTS5_RESERVED for ch in token):
+            safe_tokens.append('"' + token.replace('"', '""') + '"')
+        else:
+            safe_tokens.append(token)
+    return " ".join(safe_tokens)
 
 
 def _trigram_query(query: str) -> str:
@@ -333,6 +371,38 @@ class Store:
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
             if "mcp_permissions" in columns and "permissions" not in columns:
                 self.conn.execute("ALTER TABLE notes RENAME COLUMN mcp_permissions TO permissions")
+        if from_version < 9:
+            # v8 -> v9: same `mcp_permissions` -> `permissions` rename on the
+            # `trashed_notes` table. The v8 step missed it because `_SCHEMA`
+            # uses `CREATE TABLE IF NOT EXISTS` (a no-op on existing tables),
+            # so a database upgraded from v6/v7 retained the old column name —
+            # `knoten delete` then crashed with `table trashed_notes has no
+            # column named permissions`. Defensive: also ADD the column if it is
+            # missing entirely (early test fixtures predating either name).
+            columns = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+            }
+            if "mcp_permissions" in columns and "permissions" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE trashed_notes RENAME COLUMN mcp_permissions TO permissions"
+                )
+            elif "permissions" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE trashed_notes ADD COLUMN permissions TEXT NOT NULL DEFAULT 'ALL'"
+                )
+        if from_version < 10:
+            # v9 -> v10: `synced` flag on `notes` so bidirectional sync can
+            # distinguish "ingested from remote" from "created locally and not
+            # yet pushed". Existing rows are conservatively marked `synced=1`
+            # — they were either fetched from remote in a prior sync, or
+            # created in local-only mode under earlier knoten versions and the
+            # user has had ample opportunity to notice their absence on the
+            # remote. Defaulting them to `synced=0` would push them back up
+            # next sync, possibly creating dupes for users who explicitly
+            # rejected them on the remote side.
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
+            if "synced" not in columns:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN synced INTEGER NOT NULL DEFAULT 1")
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -364,6 +434,7 @@ class Store:
         body_sha256: str,
         path_mtime_ns: int = 0,
         path_size: int = 0,
+        synced: bool = True,
     ) -> None:
         """Insert or replace a note and its derived rows (tags, wikilinks, FTS).
 
@@ -374,15 +445,20 @@ class Store:
         `path_mtime_ns` / `path_size` record the stat of the mirror file
         after it was written, so `LocalBackend._refresh_index_if_stale`
         can detect external edits without re-hashing every file.
+
+        `synced=True` (default) marks the note as in sync with the remote —
+        appropriate when ingesting a fetched note. LocalBackend writes pass
+        `synced=False` so the next remote sync's push pass can drain them.
         """
+        synced_int = 1 if synced else 0
         with self.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO notes (
                     id, filename, title, family, kind, source, path,
                     frontmatter_json, body_sha256, restricted, permissions,
-                    created_at, updated_at, path_mtime_ns, path_size
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    created_at, updated_at, path_mtime_ns, path_size, synced
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     filename = excluded.filename,
                     title = excluded.title,
@@ -396,7 +472,8 @@ class Store:
                     permissions = excluded.permissions,
                     updated_at = excluded.updated_at,
                     path_mtime_ns = excluded.path_mtime_ns,
-                    path_size = excluded.path_size
+                    path_size = excluded.path_size,
+                    synced = excluded.synced
                 """,
                 (
                     note.id,
@@ -413,6 +490,7 @@ class Store:
                     note.updated_at,
                     path_mtime_ns,
                     path_size,
+                    synced_int,
                 ),
             )
 
@@ -430,6 +508,16 @@ class Store:
                     "VALUES(?, ?, ?)",
                     [(note.id, link.target_title, link.target_id) for link in note.wikilinks],
                 )
+
+            # Resolve any pre-existing broken wikilinks that point at this
+            # note's filename: other notes may have inserted `(target_title,
+            # NULL)` rows when they were ingested before this one. Without
+            # this sweep, `knoten read` would keep reporting them as broken
+            # until the next `sync --full` rebuilt the resolution table.
+            conn.execute(
+                "UPDATE wikilinks SET target_id = ? WHERE target_title = ? AND target_id IS NULL",
+                (note.id, note.filename),
+            )
 
             conn.execute("DELETE FROM frontmatter_fields WHERE note_id = ?", (note.id,))
             scalar_rows: list[tuple[str, str, str]] = []
@@ -550,6 +638,62 @@ class Store:
 
     def all_ids(self) -> set[str]:
         return {row["id"] for row in self.conn.execute("SELECT id FROM notes").fetchall()}
+
+    def unsynced_note_ids(self) -> list[str]:
+        """Return ids of notes whose `synced=0` — locally created or edited but not pushed."""
+        return [
+            row["id"]
+            for row in self.conn.execute(
+                "SELECT id FROM notes WHERE synced = 0 ORDER BY created_at"
+            ).fetchall()
+        ]
+
+    def mark_synced(self, note_id: str) -> None:
+        """Flip a note's `synced` flag to 1. Called after a successful remote push."""
+        with self.transaction() as conn:
+            conn.execute("UPDATE notes SET synced = 1 WHERE id = ?", (note_id,))
+
+    def reid_note(self, old_id: str, new_id: str) -> None:
+        """Swap a note's id, cascading to derived tables.
+
+        Used by the sync push pass: a note created in local-only mode has a
+        client-generated UUID; once the remote accepts the create, the server
+        returns its own UUID and we need to align the local mirror so future
+        sync pulls/edits find the right row. Foreign keys are temporarily
+        disabled so the cascading UPDATEs do not trip ON DELETE CASCADE.
+        """
+        if old_id == new_id:
+            return
+        # PRAGMA foreign_keys is connection-scoped and cannot run inside a
+        # transaction; commit any pending work first.
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self.transaction() as conn:
+                conn.execute("UPDATE notes SET id = ? WHERE id = ?", (new_id, old_id))
+                conn.execute("UPDATE tags SET note_id = ? WHERE note_id = ?", (new_id, old_id))
+                conn.execute(
+                    "UPDATE wikilinks SET source_id = ? WHERE source_id = ?",
+                    (new_id, old_id),
+                )
+                conn.execute(
+                    "UPDATE wikilinks SET target_id = ? WHERE target_id = ?",
+                    (new_id, old_id),
+                )
+                conn.execute(
+                    "UPDATE frontmatter_fields SET note_id = ? WHERE note_id = ?",
+                    (new_id, old_id),
+                )
+                conn.execute(
+                    "UPDATE notes_fts SET note_id = ? WHERE note_id = ?",
+                    (new_id, old_id),
+                )
+                conn.execute(
+                    "UPDATE notes_fts_trigram SET note_id = ? WHERE note_id = ?",
+                    (new_id, old_id),
+                )
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
     def soft_delete_to_trash(
         self,
@@ -711,7 +855,8 @@ class Store:
                 UPDATE notes
                 SET body_sha256   = ?,
                     path_mtime_ns = ?,
-                    path_size     = ?
+                    path_size     = ?,
+                    synced        = 0
                 WHERE id = ? AND restricted = 0
                 """,
                 (body_sha256, path_mtime_ns, path_size, note_id),
@@ -1109,8 +1254,11 @@ class Store:
         vault_dir: Path,
         explain: bool = False,
     ) -> tuple[list[SearchHit], int]:
+        sanitized = _sanitize_fts_query(query)
+        if not sanitized:
+            return [], 0
         where_clauses: list[str] = ["notes_fts MATCH ?"]
-        params: list[Any] = [query]
+        params: list[Any] = [sanitized]
         if family:
             where_clauses.append("n.family = ?")
             params.append(family)
@@ -1155,8 +1303,8 @@ class Store:
         rows = self.conn.execute(
             f"""
             SELECT
-                n.id, n.title, n.family, n.kind, n.source, n.path, n.permissions,
-                n.updated_at,
+                n.id, n.filename, n.title, n.family, n.kind, n.source, n.path,
+                n.permissions, n.updated_at,
                 bm25(notes_fts, 1.0, 10.0, 1.0, 5.0) AS score,
                 snippet(notes_fts, 2, '<<', '>>', '...', 16) AS snippet{explain_columns}
             FROM notes_fts
@@ -1181,6 +1329,7 @@ class Store:
             hits.append(
                 SearchHit(
                     id=row["id"],
+                    filename=row["filename"],
                     title=row["title"],
                     family=row["family"],
                     kind=row["kind"],
@@ -1312,6 +1461,7 @@ class Store:
             hits.append(
                 SearchHit(
                     id=row["id"],
+                    filename=row["filename"],
                     title=row["title"],
                     family=row["family"],
                     kind=row["kind"],

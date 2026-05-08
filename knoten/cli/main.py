@@ -78,7 +78,7 @@ from knoten.services.notes import (
 from knoten.services.reconcile import reconcile_local
 from knoten.services.reindex import reindex_from_files
 from knoten.services.sync import full_sync, incremental_sync
-from knoten.settings import Settings, load_settings
+from knoten.settings import MODE_LOCAL, Settings, load_settings
 
 app = typer.Typer(
     help=(
@@ -107,10 +107,42 @@ def _root(
     The `invoke_without_command=True` + `no_args_is_help=True` combo lets
     `knoten --version` short-circuit without triggering the usage text; a
     bare `knoten` with no subcommand still falls through to the help view.
+
+    Also prints a stderr warning when knoten is in local-only mode after a
+    previous remote sync — i.e. a config drift that would otherwise silently
+    reroute writes into the local vault and lose them on next sync.
     """
     if version:
         typer.echo(f"knoten {__version__}")
         raise typer.Exit(0)
+    if ctx.invoked_subcommand and ctx.invoked_subcommand != "config":
+        _maybe_emit_local_mode_banner()
+
+
+def _maybe_emit_local_mode_banner() -> None:
+    """Warn on stderr when knoten is in degraded local mode after remote sync.
+
+    Quiet for fresh installs (no prior sync) and for users who explicitly opted
+    into local-only operation via `KNOTEN_MODE=local`. Loud when the vault has
+    a `last_sync_at` recorded — that means the user was previously talking to
+    a remote backend and something has gone missing.
+    """
+    try:
+        settings = load_settings()
+    except Exception:
+        return  # settings load itself failed — let the actual command surface it
+    if settings.effective_mode != "local" or settings.mode == MODE_LOCAL:
+        return
+    state = load_state(settings.paths.state_file)
+    if state.last_sync_at is None:
+        return
+    sys.stderr.write(
+        "warning: knoten is in local-only mode (KNOTEN_API_URL is empty), but this vault was "
+        f"previously synced from a remote backend (last_sync_at={state.last_sync_at!r}). "
+        "Writes will not propagate to the remote and may be reconciled away on the next sync.\n"
+        f"  Restore your remote config at {settings.paths.env_file}, or set KNOTEN_MODE=local "
+        "to silence this warning.\n"
+    )
 
 
 @app.command("init")
@@ -139,12 +171,17 @@ def _load() -> Settings:
     return load_settings()
 
 
-def _require_token(settings: Settings) -> None:
-    if settings.effective_mode == "local":
-        # Local mode has no server to authenticate against. The token is
-        # meaningless and every command works without it.
-        return
-    if not settings.api_token:
+def _require_token(settings: Settings, *, for_write: str | None = None) -> None:
+    """Verify the CLI is configured to talk to a remote backend (when needed).
+
+    `for_write` is accepted but only used as a no-op marker for now — local
+    writes are intentionally allowed in any mode (offline-first). The local
+    mirror tracks them via `notes.synced` and the next remote `sync` pushes
+    them upstream rather than reconciling them away. The argument is kept on
+    the signature so callsites stay self-documenting.
+    """
+    del for_write  # currently unused — kept for callsite documentation
+    if settings.effective_mode == "remote" and not settings.api_token:
         raise ConfigError(
             "KNOTEN_API_TOKEN is not set. Copy .env.example to .env and add an API token."
         )
@@ -538,6 +575,7 @@ def cmd_search(
                     explain=explain,
                 )
                 source = "local"
+            hint = _family_kind_hint(store, kind=kind, total=total)
         payload = {
             "query": query,
             "total": total,
@@ -546,9 +584,39 @@ def cmd_search(
             "hits": [hit_to_dict(h) for h in hits],
             "source": source,
         }
+        if hint:
+            payload["hint"] = hint
         render_search_hits(payload, mode=mode)
+        if hint and not mode.json:
+            sys.stderr.write(f"hint: {hint}\n")
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _family_kind_hint(store: Store, *, kind: str | None, total: int) -> str | None:
+    """Suggest `--family <kind>` when `--kind <kind>` returned no hits.
+
+    Several kind names are also family names (e.g. `reference`), and a user
+    typing `--kind reference` to filter for references would silently miss
+    every book / article / web / media row because those have their own
+    literal `kind` value. When the literal-kind query returns 0 but the
+    family-by-the-same-name has matches, we surface that as a hint instead
+    of letting the user assume their data is missing.
+    """
+    if total > 0 or kind is None:
+        return None
+    rows = store.conn.execute(
+        "SELECT COUNT(*) AS c FROM notes WHERE family = ?", (kind,)
+    ).fetchone()
+    if rows is None:
+        return None
+    family_total = int(rows["c"])
+    if family_total <= 0:
+        return None
+    return (
+        f"--kind {kind!r} matched 0 rows, but {family_total} note(s) live in the "
+        f"{kind!r} family under other kinds. Did you mean --family {kind}?"
+    )
 
 
 @app.command("read")
@@ -626,8 +694,13 @@ def cmd_list(
             )
             vault_dir = settings.paths.vault_dir
             notes = list_summaries_to_dicts(summaries, vault_dir=vault_dir, store=store)
+            hint = _family_kind_hint(store, kind=kind, total=total)
         payload = {"total": total, "limit": limit, "offset": offset, "notes": notes}
+        if hint:
+            payload["hint"] = hint
         render_summary_list(payload, mode=mode)
+        if hint and not mode.json:
+            sys.stderr.write(f"hint: {hint}\n")
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -824,7 +897,7 @@ def cmd_create(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="create")
         body_text = _resolve_body(body, body_file)
         if ai:
             if body_text is None:
@@ -902,7 +975,7 @@ def cmd_edit(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="edit")
         body_text = _resolve_body(body, body_file)
         if ai:
             if body_text is None:
@@ -977,7 +1050,7 @@ def cmd_append(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="append")
         if content is not None and content_file is not None:
             raise UserError("--content and --content-file are mutually exclusive")
         if content is None and content_file is None:
@@ -1025,7 +1098,7 @@ def cmd_delete(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="delete")
         if mode.json and not yes:
             raise UserError("In --json mode you must pass --yes to confirm deletion")
         if not mode.json and not yes:
@@ -1066,7 +1139,7 @@ def cmd_restore(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="restore")
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             vault_dir = settings.paths.vault_dir
             with _build_backend(settings) as backend:
@@ -1173,7 +1246,7 @@ def cmd_upload(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings)
+        _require_token(settings, for_write="upload")
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note, upload = upload_file_remote(

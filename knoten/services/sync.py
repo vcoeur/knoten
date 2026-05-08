@@ -15,17 +15,23 @@ wants an offline archive; that is out of scope for v1.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from knoten.models import NoteSummary
-from knoten.repositories.backend import Backend
-from knoten.repositories.errors import NoteForbiddenError
+from knoten.repositories.backend import Backend, NoteDraft, NotePatch
+from knoten.repositories.errors import KnotenError, NoteForbiddenError
 from knoten.repositories.store import Store
 from knoten.repositories.sync_state import load_state, save_state
-from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
+from knoten.services.notes import (
+    _strip_frontmatter,
+    delete_ingested,
+    ingest_note,
+    ingest_placeholder,
+)
 from knoten.services.reconcile import reconcile_local
 from knoten.settings import Settings
 
@@ -93,10 +99,122 @@ class SyncResult:
     mismatched_refetched: int = 0
     orphans_removed: int = 0
     verified_hashes: bool = False
+    # Bidirectional sync — push pass results.
+    pushed_creates: int = 0
+    pushed_edits: int = 0
+    push_failed: int = 0
+    push_preserved_local_only: int = 0
 
 
 def _utcnow_iso() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class PushOutcome:
+    creates: int = 0
+    edits: int = 0
+    failed: int = 0
+    preserved_local_only: int = 0
+    pushed_ids: set[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.pushed_ids is None:
+            self.pushed_ids = set()
+
+
+def push_local_writes(
+    *,
+    backend: Backend,
+    store: Store,
+    settings: Settings,
+    remote_ids_seen: set[str],
+    progress: ProgressCallback | None = None,
+) -> PushOutcome:
+    """Push local-only changes (notes with `synced=0`) to the remote.
+
+    Drains rows where `synced=0` — notes created or edited locally while
+    `KNOTEN_API_URL` was empty, or by `LocalBackend` writes that never had a
+    remote round-trip. For each:
+
+    - If the row's `id` is in `remote_ids_seen`, the note exists on the
+      server — push as an edit (`PUT /api/notes/{id}`).
+    - Otherwise the server doesn't know about it yet — `POST /api/notes`. The
+      server returns its own UUID; if it differs from the local one we cascade
+      the swap through `Store.reid_note` so the local mirror's tags / wikilinks
+      / FTS rows align with the canonical server-side ID.
+
+    Failures (network, conflict, validation) leave `synced=0` so the next sync
+    attempt retries. Notes never get silently dropped.
+    """
+    log: ProgressCallback = progress or _noop
+    outcome = PushOutcome()
+    pending = store.unsynced_note_ids()
+    if not pending:
+        return outcome
+
+    log(f"→ Pushing {len(pending)} local-only change(s) to remote")
+    for note_id in pending:
+        row = store.find_by_id(note_id)
+        if row is None:
+            continue
+        filename = row["filename"]
+        absolute_path = settings.paths.vault_dir / row["path"]
+        try:
+            raw = absolute_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            log(f"  ✗ '{filename}': mirror file unreadable ({exc}) — preserving locally")
+            outcome.failed += 1
+            outcome.preserved_local_only += 1
+            continue
+        body = _strip_frontmatter(raw)
+        try:
+            frontmatter = json.loads(row.get("frontmatter_json") or "{}")
+            if not isinstance(frontmatter, dict):
+                frontmatter = {}
+        except (TypeError, ValueError):
+            frontmatter = {}
+        tags = list(store.tags_for_note(note_id))
+
+        try:
+            if note_id in remote_ids_seen:
+                # Edit existing note on the remote.
+                backend.update_note(
+                    note_id,
+                    NotePatch(
+                        body=body,
+                        frontmatter=frontmatter,
+                    ),
+                )
+                store.mark_synced(note_id)
+                outcome.edits += 1
+                outcome.pushed_ids.add(note_id)
+                log(f"  ↑ edited '{filename}'")
+            else:
+                # Create on the remote — server may assign a new UUID.
+                draft = NoteDraft(
+                    filename=filename,
+                    body=body,
+                    kind=row.get("kind"),
+                    frontmatter=frontmatter,
+                    tags=tuple(tags),
+                )
+                new_id = backend.create_note(draft)
+                if new_id != note_id:
+                    store.reid_note(note_id, new_id)
+                store.mark_synced(new_id)
+                outcome.creates += 1
+                outcome.pushed_ids.add(new_id)
+                log(f"  ↑ created '{filename}' ({note_id} -> {new_id})")
+        except KnotenError as exc:
+            log(f"  ✗ '{filename}': push failed ({exc}) — preserving locally")
+            outcome.failed += 1
+            outcome.preserved_local_only += 1
+        except Exception as exc:  # noqa: BLE001 — sync should be resilient
+            log(f"  ✗ '{filename}': unexpected push error ({exc}) — preserving locally")
+            outcome.failed += 1
+            outcome.preserved_local_only += 1
+    return outcome
 
 
 def incremental_sync(
@@ -259,10 +377,45 @@ def incremental_sync(
             f"than the count query. Should not happen post-2026-04-12 fix."
         )
 
+    # Push pass — drain locally-authored writes (synced=0) before reconciling.
+    # Must run *before* delete detection: a synced=0 note that is "local but
+    # not on the remote" is a local create awaiting upload, not a remote
+    # deletion. Pushing first turns it into either (a) a synced=1 row whose
+    # id is now in `remote_ids_seen` (after re-iding) or (b) a still-synced=0
+    # row that the delete branch then preserves.
+    push_outcome = push_local_writes(
+        backend=backend,
+        store=store,
+        settings=settings,
+        remote_ids_seen=remote_ids_seen,
+        progress=log,
+    )
+    remote_ids_seen.update(push_outcome.pushed_ids)
+    if push_outcome.creates or push_outcome.edits:
+        log(
+            f"  pushed {push_outcome.creates} create(s), {push_outcome.edits} edit(s)"
+            + (f", {push_outcome.failed} failed" if push_outcome.failed else "")
+        )
+    elif push_outcome.failed:
+        log(f"  ⚠ {push_outcome.failed} push(es) failed — preserved locally for retry")
+
     # Delete detection — local IDs (pre-sync) absent from the remote set.
     # Notes ingested during this run are implicitly in the remote set, so
-    # they cannot be flagged for deletion.
-    to_delete = local_ids_before - remote_ids_seen
+    # they cannot be flagged for deletion. Rows that are still `synced=0`
+    # after the push pass are local-only writes whose push failed; preserve
+    # them so the next sync can retry rather than reconciling them away.
+    candidate_to_delete = local_ids_before - remote_ids_seen
+    to_delete: set[str] = set()
+    preserved = 0
+    for note_id in candidate_to_delete:
+        row = store.find_by_id(note_id)
+        if row is None:
+            continue
+        if int(row.get("synced", 1)) == 0:
+            preserved += 1
+            log(f"    ⏸ '{row['filename']}' (local-only, push failed) — preserving")
+            continue
+        to_delete.add(note_id)
     if to_delete:
         log(f"  {len(to_delete)} local row(s) absent from the remote")
         for note_id in to_delete:
@@ -273,6 +426,8 @@ def incremental_sync(
         deleted = len(to_delete)
     else:
         log("  no remote deletions detected")
+    if preserved:
+        push_outcome.preserved_local_only += preserved
 
     # Reconciliation — always existence + orphan check, hashes only on opt-in.
     log("→ Reconciling local mirror" + (" (with body-hash verification)" if verify_hashes else ""))
@@ -316,6 +471,10 @@ def incremental_sync(
         mismatched_refetched=reconcile.mismatched_refetched,
         orphans_removed=reconcile.orphans_removed,
         verified_hashes=reconcile.verified_hashes,
+        pushed_creates=push_outcome.creates,
+        pushed_edits=push_outcome.edits,
+        push_failed=push_outcome.failed,
+        push_preserved_local_only=push_outcome.preserved_local_only,
     )
 
 

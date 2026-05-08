@@ -226,8 +226,8 @@ def test_permission_filter_rejects_unknown_level(store: Store) -> None:
 # ── schema migration v1/v2 → v3 ────────────────────────────────────────
 
 
-def test_schema_version_is_v8() -> None:
-    assert SCHEMA_VERSION == 8
+def test_schema_version_is_current() -> None:
+    assert SCHEMA_VERSION == 10
 
 
 def _seed_v1_database(path: Path) -> None:

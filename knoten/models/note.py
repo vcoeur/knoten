@@ -99,6 +99,7 @@ class SearchHit:
     """A single FTS5 result row."""
 
     id: str
+    filename: str
     title: str
     family: str
     kind: str

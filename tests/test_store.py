@@ -319,6 +319,254 @@ def test_v3_to_v4_migration_populates_trigram(tmp_path: Path) -> None:
         assert hits[0].id == "n1"
 
 
+def test_create_resolves_pre_existing_broken_wikilinks(store: Store) -> None:
+    """A note's creation backfills `target_id` on every existing broken link to it.
+
+    Reproduces a subtle case during stub-creation flows: writing a reference
+    note that links to `[[& Commons]]` before the topic stub exists records
+    `target_id=NULL`. When the stub is later created, `knoten read` should
+    immediately resolve the link without needing a `sync --full` to rebuild
+    the wikilinks table.
+    """
+    referrer = _make_note(
+        note_id="ref",
+        filename="Bollier2025= Think Like a Commoner",
+        body="Linked to [[& Commons]]",
+        wikilinks=(WikiLink(target_title="& Commons", target_id=None),),
+        family="reference",
+        kind="book",
+    )
+    store.upsert_note(
+        referrer, path="literature/Bollier2025= Think Like a Commoner.md", body_sha256="r"
+    )
+    pre = store.conn.execute(
+        "SELECT target_id FROM wikilinks WHERE source_id = ? AND target_title = ?",
+        ("ref", "& Commons"),
+    ).fetchone()
+    assert pre["target_id"] is None
+
+    store.upsert_note(
+        _make_note(
+            note_id="commons",
+            filename="& Commons",
+            body="Definitional body.",
+            family="topic",
+            kind="topic",
+        ),
+        path="entity/& Commons.md",
+        body_sha256="c",
+    )
+    post = store.conn.execute(
+        "SELECT target_id FROM wikilinks WHERE source_id = ? AND target_title = ?",
+        ("ref", "& Commons"),
+    ).fetchone()
+    assert post["target_id"] == "commons"
+
+
+def test_search_hit_json_shape_includes_filename(store: Store, tmp_path: Path) -> None:
+    """Lock the documented JSON hit shape — every key must be present.
+
+    Reproduces the 2026-05-08 surprise where iterating over hits with
+    `python3 -c "...h['filename']..."` raised KeyError because the dataclass
+    had not been carrying `filename`. The skill (and the integration scripts
+    built on top of it) document `filename` as a stable hit key.
+    """
+    from knoten.services.notes import hit_to_dict
+
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Locked shape",
+            body="body for shape lock",
+        ),
+        path="note/! Locked shape.md",
+        body_sha256="x",
+    )
+    hits, _ = store.search("shape", vault_dir=tmp_path)
+    assert hits
+    payload = hit_to_dict(hits[0])
+    expected = {
+        "id",
+        "filename",
+        "title",
+        "family",
+        "kind",
+        "source",
+        "path",
+        "absolute_path",
+        "tags",
+        "score",
+        "snippet",
+        "updated_at",
+        "permissions",
+    }
+    missing = expected - payload.keys()
+    assert not missing, f"hit missing documented keys: {missing}"
+    assert payload["filename"] == "! Locked shape"
+
+
+def test_search_handles_citation_key_query_without_fts5_error(store: Store, tmp_path: Path) -> None:
+    """`knoten search "Bollier2025="` must not leak FTS5 syntax errors.
+
+    Reproduces the 2026-05-08 bug where `=` in a free-text query crashed the
+    underlying MATCH parser. The sanitizer phrase-quotes any token containing
+    FTS5-reserved punctuation so the SELECT runs cleanly even when the input
+    happens to look like a citation key.
+    """
+    store.upsert_note(
+        _make_note(
+            note_id="ref",
+            filename="Bollier2025= Think Like a Commoner",
+            body="A short introduction.",
+            family="reference",
+            kind="book",
+        ),
+        path="literature/Bollier2025= Think Like a Commoner.md",
+        body_sha256="abc",
+    )
+    # Punctuation-only query that previously raised `fts5: syntax error near "="`.
+    hits, _total = store.search("Bollier2025=", vault_dir=tmp_path)
+    # The query is now phrase-matched; depending on tokenization the trailing
+    # `=` may or may not match. The contract being tested is "no exception" —
+    # the empty-result case is also acceptable.
+    assert isinstance(hits, list)
+    # And a normal token search still works.
+    hits, total = store.search("commoner", vault_dir=tmp_path)
+    assert total == 1
+    assert hits[0].id == "ref"
+
+
+def test_search_handles_url_in_query(store: Store, tmp_path: Path) -> None:
+    """A pasted URL must not crash search either."""
+    hits, _total = store.search("https://example.com/foo", vault_dir=tmp_path)
+    assert isinstance(hits, list)
+
+
+def test_search_empty_query_returns_nothing(store: Store, tmp_path: Path) -> None:
+    """Empty string and whitespace-only queries are short-circuited safely."""
+    assert store.search("", vault_dir=tmp_path) == ([], 0)
+    assert store.search("   ", vault_dir=tmp_path) == ([], 0)
+
+
+def test_v8_to_v9_renames_trashed_notes_permissions(tmp_path: Path) -> None:
+    """A v8 DB with `mcp_permissions` on `trashed_notes` migrates cleanly.
+
+    Mirrors the schema state real users had after upgrading from v7 to v8: the
+    `notes` rename happened, but `trashed_notes` was missed because its
+    `CREATE TABLE IF NOT EXISTS` clause is a no-op for an existing table.
+    Without this migration step, `knoten delete` crashes with
+    `table trashed_notes has no column named permissions`.
+    """
+    db_path = tmp_path / "index.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        # Re-seed a v8-shaped trashed_notes with the OLD column name. Other
+        # tables are seeded with the post-rename name; we only care about the
+        # column on trashed_notes for this regression.
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                permissions       TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+            CREATE TABLE trashed_notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                original_path     TEXT NOT NULL,
+                trash_path        TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                mcp_permissions   TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                deleted_at        TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '8')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
+        columns = {
+            row[1] for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+        }
+        assert "permissions" in columns
+        assert "mcp_permissions" not in columns
+
+
+def test_v8_without_permissions_column_gets_added(tmp_path: Path) -> None:
+    """An older fixture lacking *both* names gets `permissions` added defensively."""
+    db_path = tmp_path / "index.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                permissions       TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+            CREATE TABLE trashed_notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                original_path     TEXT NOT NULL,
+                trash_path        TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                deleted_at        TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '8')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        columns = {
+            row[1] for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+        }
+        assert "permissions" in columns
+
+
 def test_tag_and_kind_counts(store: Store) -> None:
     store.upsert_note(
         _make_note(note_id="a", filename="! One", body="", tags=("search", "encryption")),

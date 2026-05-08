@@ -243,7 +243,7 @@ class LocalBackend(Backend):
             updated_at=now,
             permissions="ALL",
         )
-        ingest_note(note, store=self._store, vault_dir=self._vault_dir)
+        ingest_note(note, store=self._store, vault_dir=self._vault_dir, synced=False)
         return note_id
 
     def update_note(self, note_id: str, patch: NotePatch) -> NoteUpdateResult:
@@ -306,6 +306,7 @@ class LocalBackend(Backend):
             store=self._store,
             vault_dir=self._vault_dir,
             previous_path=previous_path,
+            synced=False,
         )
         return NoteUpdateResult(note_id=note_id, affected_notes=())
 
@@ -426,6 +427,7 @@ class LocalBackend(Backend):
                 store=self._store,
                 vault_dir=self._vault_dir,
                 previous_path=row["path"],
+                synced=False,
             )
 
             affected_ids: list[str] = []
@@ -456,11 +458,7 @@ class LocalBackend(Backend):
                     updated_at=_utcnow_iso(),
                     permissions=source_row.get("permissions") or "ALL",
                 )
-                ingest_note(
-                    source_note,
-                    store=self._store,
-                    vault_dir=self._vault_dir,
-                )
+                ingest_note(source_note, store=self._store, vault_dir=self._vault_dir, synced=False)
                 affected_ids.append(source_row["id"])
 
         except Exception:
@@ -504,11 +502,22 @@ class LocalBackend(Backend):
             trash_abs.unlink()
         source_abs.rename(trash_abs)
 
-        moved = self._store.soft_delete_to_trash(
-            note_id,
-            trash_path=trash_relative,
-            deleted_at=_utcnow_iso(),
-        )
+        try:
+            moved = self._store.soft_delete_to_trash(
+                note_id,
+                trash_path=trash_relative,
+                deleted_at=_utcnow_iso(),
+            )
+        except Exception:
+            # Roll back the filesystem move if the SQL transaction failed —
+            # otherwise the next reconcile sees a notes row whose mirror file
+            # is gone (orphan), and the user is stuck unable to delete OR
+            # restore until they hand-edit the index.
+            try:
+                trash_abs.rename(source_abs)
+            except OSError:
+                pass
+            raise
         if not moved:
             trash_abs.rename(source_abs)
             raise NotFoundError(f"No note with id {note_id}")
@@ -569,7 +578,7 @@ class LocalBackend(Backend):
             updated_at=_utcnow_iso(),
             permissions=trashed.get("permissions") or "ALL",
         )
-        ingest_note(note, store=self._store, vault_dir=self._vault_dir)
+        ingest_note(note, store=self._store, vault_dir=self._vault_dir, synced=False)
         self._store.discard_trashed(note_id)
 
     def upload_attachment(
