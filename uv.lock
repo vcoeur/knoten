@@ -213,7 +213,6 @@ wheels = [
 
 [[package]]
 name = "knoten"
-version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "environs" },
