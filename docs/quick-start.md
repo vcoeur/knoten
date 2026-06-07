@@ -32,28 +32,23 @@ The first `knoten` call creates the vault, the SQLite index, and a commented `.e
 
 macOS and Windows use their respective platform locations — see [Install](install.md#cross-os-paths) for the full table.
 
-## 2. Install the example skill
+## 2. Install the skill
 
-`knoten` ships a generic [`SKILL.md`](https://github.com/vcoeur/knoten/blob/main/SKILL.md) at the root of its repo. It wraps every read/write/sync command, always passes `--json`, and is deliberately opinion-free about vault conventions so you can fork it and impose your own.
-
-Drop it into one of these locations:
+`knoten` bundles a generic agent skill (`SKILL.md`) — it wraps every read/write/sync command, always passes `--json`, and is deliberately opinion-free about vault conventions so you can fork it and impose your own. Install it with the CLI:
 
 ```bash
 # Globally available in every Claude Code session
-mkdir -p ~/.claude/skills/knoten
-curl -fsSL https://raw.githubusercontent.com/vcoeur/knoten/main/SKILL.md \
-  -o ~/.claude/skills/knoten/SKILL.md
+knoten skill install --claude      # -> ~/.claude/skills/knoten/SKILL.md
 ```
 
 Or project-local — auto-loaded only inside a specific repo:
 
 ```bash
-mkdir -p <your-project>/.claude/skills/knoten
-curl -fsSL https://raw.githubusercontent.com/vcoeur/knoten/main/SKILL.md \
-  -o <your-project>/.claude/skills/knoten/SKILL.md
+cd <your-project>
+knoten skill install --project     # -> ./.agents/skills/knoten/SKILL.md
 ```
 
-Reload skills in Claude Code (or start a new session) and `/knoten` becomes a slash command that takes a natural-language request as its argument.
+`knoten skill install --user` targets `~/.config/agents/skills/knoten/` for harnesses that read there; `knoten skill status` shows where the skill is installed and whether it matches the bundled copy. Reload skills in Claude Code (or start a new session) and `/knoten` becomes a slash command that takes a natural-language request as its argument.
 
 ## 3. Your first session
 
@@ -149,11 +144,11 @@ That is the entire round trip: install, drop a skill, create, search, link, rena
 ## Where to go from here
 
 - Your vault so far has two notes and no structure. The **[Vault structure](vault-structure.md)** page describes the folder and filename convention I actually use day-to-day — eleven note families, filename prefixes, the journal-vs-permanent distinction, entity stubs, and how [`quelle`](https://quelle.vcoeur.com) feeds literature notes from DOIs and arXiv IDs so you do not have to type reference metadata by hand.
-- When you outgrow the generic skill, fork it. The comments inside `SKILL.md` call out the sections to replace (conventions, post-write side-effects, batch operations).
+- When you outgrow the generic skill, fork it — copy the installed `SKILL.md` into a new, vault-specific skill that references it for mechanics and adds your own conventions (note families, post-write side-effects, batch operations). Keep the bundled one convention-free so `knoten skill install --force` can refresh it.
 - The full CLI surface — every verb, every flag, every envelope — lives in **[Commands](commands.md)**.
 
 ## Troubleshooting
 
 - `command not found: knoten` — `pipx install knoten` did not add its bin dir to your `$PATH`. Run `pipx ensurepath` and reopen the shell.
-- `/knoten` is not recognised in Claude Code — the skill file is not being picked up. Confirm the path is exactly `~/.claude/skills/knoten/SKILL.md` (global) or `<project>/.claude/skills/knoten/SKILL.md` (project-local), then restart Claude Code.
+- `/knoten` is not recognised in Claude Code — the skill file is not being picked up. Run `knoten skill status` to confirm it landed at `~/.claude/skills/knoten/SKILL.md` (from `knoten skill install --claude`), then restart Claude Code.
 - Search returns nothing even though you just created a note — run `knoten reindex` to rebuild the FTS tables from the on-disk files. In local mode this is almost never needed, but if you edited the vault directly while `knoten` was mid-walk, the FTS can briefly drift.

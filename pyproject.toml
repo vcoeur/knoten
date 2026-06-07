@@ -15,6 +15,9 @@ dependencies = [
     "rich>=13.9",
     "typer>=0.16",
 ]
+# `mcp` is opt-in: only `knoten mcp serve` needs it. The CLI is the primary
+# integration, so the SDK is not a core dependency.
+optional-dependencies = { mcp = ["mcp>=1.0"] }
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -47,6 +50,11 @@ source = "vcs"
 [tool.hatch.build.targets.wheel]
 packages = ["knoten"]
 
+# Ship the bundled agent skill as package data so `knoten skill install` can
+# copy it out of an installed wheel (not just a source checkout).
+[tool.hatch.build.targets.wheel.force-include]
+"knoten/skill/SKILL.md" = "knoten/skill/SKILL.md"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
@@ -71,3 +79,5 @@ ignore = ["SIM105", "SIM117"]
 # Typer's Option(...) default-arg pattern is idiomatic; B008 flags it.
 "knoten/cli/main.py" = ["B008"]
 "knoten/cli/inbox.py" = ["B008"]
+"knoten/cli/skill.py" = ["B008"]
+"knoten/cli/mcp_server.py" = ["B008"]

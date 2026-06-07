@@ -260,9 +260,19 @@ make sync-full  # full rebuild
 
 Tests use pytest-httpx to mock the backend — there is no dependency on a running server for the unit test suite.
 
-## Claude Code skill
+## Agent skill + MCP
 
-A minimal example [`SKILL.md`](SKILL.md) ships at the repo root — drop it into `~/.claude/skills/knoten/` (or `<project>/.claude/skills/knoten/`) to drive the CLI from a Claude Code session. It is deliberately generic: search, read, list, backlinks, graph, and the write commands, with no opinion about vault conventions. Fork it and add your own rules.
+knoten bundles a convention-free agent skill (`SKILL.md`) that teaches an LLM to drive the CLI safely — `--json` everywhere, structured errors, permissions, batch writes, shell-quoting. Install it with the CLI:
+
+```bash
+knoten skill install --user        # ~/.config/agents/skills/knoten/SKILL.md (default)
+knoten skill install --claude      # ~/.claude/skills/knoten/SKILL.md
+knoten skill status                # where it's installed + whether it matches the bundled copy
+```
+
+The skill is deliberately opinion-free about vault conventions — layer your own in a separate skill that references it. An agent can self-orient from `knoten schema --json` (the whole contract: commands, flags, families, permissions, error kinds) without reading any docs.
+
+For agents that prefer MCP tools to a shell, `knoten mcp serve` exposes the vault over the [Model Context Protocol](https://modelcontextprotocol.io/) as a thin facade over the same service layer — opt-in via the `mcp` extra (`uv tool install 'knoten[mcp]'`). The CLI remains the primary integration.
 
 ## Status
 

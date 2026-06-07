@@ -5,7 +5,15 @@ description: Full CLI reference for knoten — read, write, sync, graph, and con
 
 # Commands
 
-Every command accepts `--json` for machine-readable output. On a TTY without `--json`, output is rendered with rich tables and highlighted snippets. Claude skills should always pass `--json`.
+Every command accepts `--json` for machine-readable output. On a TTY without `--json`, output is rendered with rich tables and highlighted snippets. Agent skills should always pass `--json`.
+
+### `knoten schema`
+
+Dump the whole machine-readable contract — every command and its flags, the family/prefix/kind table, the permission ladder, and the error kinds with their exit codes. Introspected from the live app, so it never drifts. One call lets an agent self-orient without reading these docs.
+
+```bash
+knoten schema --json
+```
 
 ## Read commands
 
@@ -67,6 +75,23 @@ knoten tags
 knoten kinds --json
 ```
 
+### `knoten unresolved`
+
+Dangling wiki-link targets — links pointing at notes that don't exist yet — grouped by target, with the notes that reference each. Run it after a write to find the stubs you still need to create.
+
+```bash
+knoten unresolved --json
+```
+
+### `knoten path`
+
+Absolute path of a note's mirror file. Plain one-line output by default (grep-friendly); `{id, filename, path}` with `--json`.
+
+```bash
+knoten path "! Core insight"
+knoten path "! Core insight" --json
+```
+
 ## Write commands
 
 In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_URL` points at) and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
@@ -76,13 +101,32 @@ In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_UR
 ```bash
 knoten create --filename "! New idea" --body "First draft."
 echo "Draft body" | knoten create --filename "! New idea" --body-file - --json
+knoten create --filename "% Foo" --dry-run --json    # resolve family/kind + unresolved links, no write
 ```
+
+Seed typed frontmatter with `--frontmatter-file PATH.json` (ints/lists/null round-trip).
+
+**Batch.** Create many notes from a JSON array of drafts under one lock pass — one permission prompt, no per-call shell-escaping. Each item is `{filename, body?, kind?, tags?, frontmatter?, ai?}`; a single bad draft doesn't abort the rest.
+
+```bash
+knoten create --batch drafts.json --json      # or '-' to read the array from stdin
+```
+
+The result is `{operation, count, created, failed, results: [{index, ok, id|error}]}`. Add `--dry-run` to preview every draft without writing.
 
 ### `knoten edit`
 
 ```bash
 knoten edit "! New idea" --body "Revised body." --add-tag research
 knoten edit "! New idea" --body-file new-body.md --json
+knoten edit "! New idea" --dry-run --json     # validate (permissions, prefix, changes), no write
+```
+
+**Typed frontmatter.** `--set-frontmatter key=value` sends the value as a *string*. To change a numeric/list/bool/null field on an existing note, use `--set-frontmatter-json key=<json-literal>` so the type round-trips:
+
+```bash
+knoten edit "@ Jane Doe" --set-frontmatter-json birth-year=1990 --json
+knoten edit "Scott2019= …" --set-frontmatter-json 'authors=["[[@ Kim Scott]]"]' --json
 ```
 
 ### `knoten append`
@@ -95,10 +139,11 @@ knoten append "! New idea" --body "A later thought."
 
 ### `knoten rename`
 
-Rewrites `[[old-filename]]` wiki-links in every referencing note. Rolls back on partial failure. Family prefix must stay the same.
+Rewrites `[[old-filename]]` wiki-links in every referencing note. Rolls back on partial failure. Family prefix must stay the same. `--dry-run` validates the rename without writing.
 
 ```bash
 knoten rename "! New idea" "! Core insight" --json
+knoten rename "! New idea" "! Core insight" --dry-run --json
 ```
 
 ### `knoten delete` / `knoten restore`
@@ -177,4 +222,37 @@ Bootstraps the vault, state, and a commented `.env`. Idempotent — safe to re-r
 
 ```bash
 knoten init
+```
+
+### `knoten reset`
+
+Delete the local mirror (cache + vault). The next sync is forced full. Prompts unless `--yes`; in `--json` mode `--yes` is required.
+
+```bash
+knoten reset --yes
+knoten reset --yes --json
+```
+
+## Agent integration
+
+### `knoten skill`
+
+knoten ships a convention-free [agent skill](https://docs.claude.com/en/docs/claude-code/skills) (`SKILL.md`) that teaches an LLM to drive the CLI safely. Install it into a skills directory:
+
+```bash
+knoten skill install --user        # ~/.config/agents/skills/knoten/SKILL.md (default)
+knoten skill install --project     # ./.agents/skills/knoten/SKILL.md
+knoten skill install --claude      # ~/.claude/skills/knoten/SKILL.md
+knoten skill status                # where it's installed and whether it matches the bundled copy
+```
+
+The bundled skill is deliberately generic — layer your own vault conventions in a separate skill that references it.
+
+### `knoten mcp serve`
+
+Optional [Model Context Protocol](https://modelcontextprotocol.io/) server over the vault, for agents that prefer MCP tools to a shell. It is a thin facade over the same service layer the CLI uses — the CLI remains the primary integration. Needs the optional `mcp` dependency:
+
+```bash
+uv tool install 'knoten[mcp]'      # or: pipx inject knoten 'mcp>=1.0'
+knoten mcp serve                   # stdio transport
 ```

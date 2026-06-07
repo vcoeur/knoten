@@ -272,6 +272,48 @@ def render_counts(payload: dict[str, Any], key: str, *, mode: OutputMode) -> Non
             sys.stdout.write(f"{item.get('count', 0)}\t{item.get(key[:-1], item.get('tag', ''))}\n")
 
 
+def render_unresolved(payload: dict[str, Any], *, mode: OutputMode) -> None:
+    if mode.json:
+        emit_json(payload)
+        return
+    targets = payload.get("targets", [])
+    total = payload.get("total", len(targets))
+    if not targets:
+        _console.print("No unresolved wiki-links.")
+        return
+    if mode.tty:
+        table = Table(title=f"{len(targets)} / {total} unresolved target(s)")
+        table.add_column("Refs", justify="right", style="dim")
+        table.add_column("Target", style="bold")
+        table.add_column("Referenced by", overflow="fold", style="cyan")
+        for item in targets:
+            referrers = ", ".join(src.get("filename", "") for src in item.get("referenced_by", []))
+            table.add_row(str(item.get("reference_count", 0)), item.get("target", ""), referrers)
+        _console.print(table)
+    else:
+        for item in targets:
+            sys.stdout.write(f"{item.get('reference_count', 0)}\t{item.get('target', '')}\n")
+
+
+def render_dry_run(payload: dict[str, Any], *, mode: OutputMode) -> None:
+    if mode.json:
+        emit_json(payload)
+        return
+    operation = payload.get("operation", "?")
+    if mode.tty:
+        lines = [f"[bold yellow]dry-run[/bold yellow] {operation}"]
+        for key, value in payload.items():
+            if key in ("dry_run", "operation"):
+                continue
+            lines.append(f"  [bold]{key}[/bold]: {value}")
+        _console.print(Panel("\n".join(lines), expand=False))
+    else:
+        for key, value in payload.items():
+            if key in ("dry_run", "operation"):
+                continue
+            sys.stdout.write(f"{key}\t{value}\n")
+
+
 def render_status(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if mode.json:
         emit_json(payload)
