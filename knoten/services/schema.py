@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import click
 import typer
 
 from knoten import __version__
@@ -52,19 +51,27 @@ ERROR_KINDS: tuple[dict[str, Any], ...] = (
 )
 
 
-def _param_info(param: click.Parameter) -> dict[str, Any] | None:
-    """Describe a single click parameter, or None for things we don't surface."""
-    if isinstance(param, click.Argument):
+def _param_info(param: Any) -> dict[str, Any] | None:
+    """Describe a single Click parameter, or None for things we don't surface.
+
+    Duck-typed on `param.param_type_name` ("argument" / "option") instead of
+    `isinstance` against `click`: typer >= 0.25 vendors its own copy of click,
+    so an introspected param is not an instance of a separately-imported
+    `click`'s classes — an isinstance check silently returns False there and
+    the whole surface drops out of the schema.
+    """
+    kind = getattr(param, "param_type_name", None)
+    if kind == "argument":
         return {"name": param.name, "kind": "argument", "required": param.required}
-    if isinstance(param, click.Option):
+    if kind == "option":
         return {
             "name": param.name,
             "kind": "option",
             "flags": list(param.opts),
             "required": param.required,
-            "is_flag": param.is_flag,
-            "multiple": param.multiple,
-            "help": (param.help or "").strip(),
+            "is_flag": getattr(param, "is_flag", False),
+            "multiple": getattr(param, "multiple", False),
+            "help": (getattr(param, "help", "") or "").strip(),
         }
     return None
 
@@ -73,17 +80,20 @@ def _first_line(text: str | None) -> str:
     return (text or "").strip().split("\n", 1)[0].strip()
 
 
-def _command_info(name: str, cmd: click.Command) -> dict[str, Any]:
-    """Describe a command (and one level of subcommands for groups)."""
+def _command_info(name: str, cmd: Any) -> dict[str, Any]:
+    """Describe a command (and one level of subcommands for groups).
+
+    A group is detected by a populated `.commands` dict rather than an
+    `isinstance(cmd, click.Group)` check (see `_param_info` for why).
+    """
     info: dict[str, Any] = {
         "name": name,
         "help": _first_line(cmd.help or cmd.short_help),
         "params": [p for p in (_param_info(pp) for pp in cmd.params) if p],
     }
-    if isinstance(cmd, click.Group):
-        info["subcommands"] = [
-            _command_info(sub, cmd.commands[sub]) for sub in sorted(cmd.commands)
-        ]
+    subcommands = getattr(cmd, "commands", None)
+    if isinstance(subcommands, dict) and subcommands:
+        info["subcommands"] = [_command_info(sub, subcommands[sub]) for sub in sorted(subcommands)]
     return info
 
 
@@ -110,9 +120,8 @@ def build_schema() -> dict[str, Any]:
     from knoten.cli.main import app  # local import to avoid an import cycle
 
     cli = typer.main.get_command(app)
-    commands: list[dict[str, Any]] = []
-    if isinstance(cli, click.Group):
-        commands = [_command_info(name, cli.commands[name]) for name in sorted(cli.commands)]
+    cli_commands = getattr(cli, "commands", {})
+    commands = [_command_info(name, cli_commands[name]) for name in sorted(cli_commands)]
 
     return {
         "tool": "knoten",
