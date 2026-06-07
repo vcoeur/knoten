@@ -6,8 +6,21 @@ on:
       - 'v*'
 
 jobs:
+  smoke:
+    name: Clean-install smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # hatch-vcs needs full history + tags to derive the version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+      - name: Clean-install smoke
+        run: bash scripts/smoke-install.sh
+
   build-and-publish:
     name: Build and publish to PyPI
+    needs: smoke   # never publish a wheel that fails to install + self-describe clean
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC trusted publishing
