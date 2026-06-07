@@ -15,6 +15,7 @@ Exit codes (mapped from exception types in `app.repositories.errors`):
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import asdict
 from datetime import UTC
@@ -27,6 +28,7 @@ import typer
 from knoten import __version__
 from knoten.cli.config import config_app, init_command
 from knoten.cli.inbox import inbox_app
+from knoten.cli.mcp_server import mcp_app
 from knoten.cli.output import (
     OutputMode,
     emit_json,
@@ -34,12 +36,15 @@ from knoten.cli.output import (
     make_progress_callback,
     render_backlinks,
     render_counts,
+    render_dry_run,
     render_note,
     render_search_hits,
     render_status,
     render_summary_list,
     render_sync_result,
+    render_unresolved,
 )
+from knoten.cli.skill import skill_app
 from knoten.repositories.backend import Backend
 from knoten.repositories.errors import (
     AmbiguousTargetError,
@@ -69,6 +74,8 @@ from knoten.services.notes import (
     edit_note_remote,
     hit_to_dict,
     list_summaries_to_dicts,
+    preview_create,
+    preview_edit,
     read_note_full,
     resolve_target,
     restore_note_remote,
@@ -90,6 +97,8 @@ app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 app.add_typer(inbox_app, name="inbox")
+app.add_typer(skill_app, name="skill")
+app.add_typer(mcp_app, name="mcp")
 
 
 @app.callback(invoke_without_command=True)
@@ -149,6 +158,46 @@ def _maybe_emit_local_mode_banner() -> None:
 def cmd_init() -> None:
     """Create vault + state dirs and seed a default .env if missing."""
     init_command()
+
+
+@app.command("schema")
+def cmd_schema(
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Dump the machine-readable CLI contract — commands, flags, families,
+    permission ladder, and error kinds. No network, no vault access.
+
+    Lets a client (or an LLM) self-orient from one call instead of relying
+    on prose docs: every command and its flags are introspected from the
+    live app, and the family/permission/error tables are read from the
+    modules that own them, so the output never drifts from reality.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        from knoten.services.schema import build_schema
+
+        payload = build_schema()
+        if mode.json:
+            emit_json(payload)
+        else:
+            from rich.console import Console
+
+            console = Console()
+            console.print(
+                f"[bold]knoten {payload['version']}[/bold] — {len(payload['commands'])} commands"
+            )
+            console.print(
+                "[bold]families:[/bold] "
+                + ", ".join(f"{f['prefix']}→{f['family']}" for f in payload["families"])
+            )
+            console.print("[bold]permissions:[/bold] " + " < ".join(payload["permissions"]))
+            console.print(
+                "[bold]errors:[/bold] "
+                + ", ".join(f"{e['error']}({e['code']})" for e in payload["errors"])
+            )
+            console.print("[dim]pass --json for the full contract[/dim]")
+    except Exception as exc:
+        _fail(exc, mode=mode)
 
 
 class Fields(StrEnum):
@@ -644,15 +693,25 @@ def cmd_read(
 @app.command("path")
 def cmd_path(
     target: str = typer.Argument(..., help="Note UUID or filename (or prefix)"),
+    json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Print the absolute mirror path for a note. One line, no JSON envelope."""
+    """Print the absolute mirror path for a note.
+
+    Plain one-line path by default (grep-friendly); `{"id", "filename",
+    "path"}` with `--json`.
+    """
+    mode = OutputMode.detect(json_output)
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
             row = resolve_target(store, target)
-        sys.stdout.write(str((settings.paths.vault_dir / row["path"]).resolve()) + "\n")
+        absolute = str((settings.paths.vault_dir / row["path"]).resolve())
+        if mode.json:
+            emit_json({"id": row["id"], "filename": row["filename"], "path": absolute})
+        else:
+            sys.stdout.write(absolute + "\n")
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 @app.command("list")
@@ -827,6 +886,40 @@ def cmd_kinds(
         _fail(exc, mode=mode)
 
 
+@app.command("unresolved")
+def cmd_unresolved(
+    limit: int = typer.Option(0, "--limit", min=0, help="Max distinct targets to show (0 = all)"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List dangling wiki-link targets — links pointing at notes that don't
+    exist yet — grouped by target, with the notes that reference each. No
+    network. Use after a write to find the stubs you still need to create.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        with Store(settings.paths.index_path) as store:
+            rows = store.unresolved_wikilinks()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(row["target_title"], []).append(
+                {
+                    "id": row["source_id"],
+                    "filename": row["source_filename"],
+                    "title": row["source_title"],
+                }
+            )
+        targets = [
+            {"target": title, "reference_count": len(sources), "referenced_by": sources}
+            for title, sources in grouped.items()
+        ]
+        if limit:
+            targets = targets[:limit]
+        render_unresolved({"total": len(grouped), "targets": targets}, mode=mode)
+    except Exception as exc:
+        _fail(exc, mode=mode)
+
+
 # ---- write-path ---------------------------------------------------------
 
 
@@ -867,8 +960,10 @@ def _write_response(store: Store, vault_dir: Path, note_id: str, fields: Fields)
 
 @app.command("create")
 def cmd_create(
-    filename: str = typer.Option(
-        ..., "--filename", help="Full Kasten filename (e.g. '! Core idea')"
+    filename: str | None = typer.Option(
+        None,
+        "--filename",
+        help="Full Kasten filename (e.g. '! Core idea'). Omit when using --batch.",
     ),
     body: str | None = typer.Option(None, "--body"),
     body_file: Path | None = typer.Option(None, "--body-file"),
@@ -884,6 +979,17 @@ def cmd_create(
         "--ai",
         help="Wrap the body in `#ai begin` / `#ai end` markers (AI-authored content).",
     ),
+    batch: Path | None = typer.Option(
+        None,
+        "--batch",
+        help="Create many notes from a JSON array of drafts (use '-' for stdin), one lock "
+        "pass. Each item: {filename, body?, kind?, tags?, frontmatter?, ai?}.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Resolve and validate without creating; report family/kind/source + unresolved links.",
+    ),
     fields: Fields = typer.Option(
         Fields.minimal,
         "--fields",
@@ -897,6 +1003,13 @@ def cmd_create(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
+        if batch is not None:
+            if filename is not None:
+                raise UserError("--filename and --batch are mutually exclusive")
+            _run_create_batch(settings, batch, mode=mode, dry_run=dry_run)
+            return
+        if filename is None:
+            raise UserError("pass --filename <name> (or --batch <file> for bulk create)")
         _require_token(settings, for_write="create")
         body_text = _resolve_body(body, body_file)
         if ai:
@@ -904,6 +1017,18 @@ def cmd_create(
                 raise UserError("--ai requires --body or --body-file")
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
+        if dry_run:
+            with Store(settings.paths.index_path) as store:
+                preview = preview_create(
+                    store,
+                    filename=filename,
+                    body=body_text,
+                    kind=kind,
+                    tags=list(tag),
+                    frontmatter=frontmatter,
+                )
+            render_dry_run(preview, mode=mode)
+            return
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = create_note_remote(
@@ -920,6 +1045,135 @@ def cmd_create(
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _draft_from_batch_item(index: int, item: Any) -> dict[str, Any]:
+    """Validate one --batch item and return create_note_remote() kwargs."""
+    if not isinstance(item, dict):
+        raise UserError(f"--batch item {index} is not a JSON object")
+    filename = item.get("filename")
+    if not isinstance(filename, str) or not filename:
+        raise UserError(f"--batch item {index} is missing a 'filename' string")
+    body = item.get("body")
+    if body is not None and not isinstance(body, str):
+        raise UserError(f"--batch item {index} 'body' must be a string")
+    if item.get("ai"):
+        if body is None:
+            raise UserError(f"--batch item {index} sets 'ai' but has no 'body'")
+        body = _wrap_ai(body)
+    tags = item.get("tags") or []
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise UserError(f"--batch item {index} 'tags' must be an array of strings")
+    kind = item.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        raise UserError(f"--batch item {index} 'kind' must be a string")
+    frontmatter = item.get("frontmatter")
+    if frontmatter is not None and not isinstance(frontmatter, dict):
+        raise UserError(f"--batch item {index} 'frontmatter' must be an object")
+    return {
+        "filename": filename,
+        "body": body,
+        "kind": kind,
+        "tags": list(tags),
+        "frontmatter": frontmatter,
+    }
+
+
+def _read_batch_items(batch_path: Path) -> list[Any]:
+    raw = sys.stdin.read() if str(batch_path) == "-" else batch_path.read_text(encoding="utf-8")
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise UserError(f"--batch input is not valid JSON: {exc}") from exc
+    if not isinstance(items, list):
+        raise UserError("--batch input must be a JSON array of draft objects")
+    return items
+
+
+def _run_create_batch(
+    settings: Settings, batch_path: Path, *, mode: OutputMode, dry_run: bool
+) -> None:
+    """Create many notes under one lock pass; never aborts on a single bad draft.
+
+    Always emits a JSON summary on stdout (batch is a machine-oriented path):
+    `{operation, count, created, failed, results: [{index, ok, id|error}]}`.
+    A failed item carries `error`/`code`/`message`; the rest still run.
+    """
+    items = _read_batch_items(batch_path)
+    _require_token(settings, for_write="create")
+    results: list[dict[str, Any]] = []
+
+    if dry_run:
+        with Store(settings.paths.index_path) as store:
+            for index, item in enumerate(items):
+                try:
+                    draft = _draft_from_batch_item(index, item)
+                    preview = preview_create(
+                        store,
+                        filename=draft["filename"],
+                        body=draft["body"],
+                        kind=draft["kind"],
+                        tags=draft["tags"],
+                        frontmatter=draft["frontmatter"],
+                    )
+                    results.append({"index": index, "ok": True, **preview})
+                except Exception as exc:
+                    code, kind = _classify_error(exc)
+                    results.append(
+                        {
+                            "index": index,
+                            "ok": False,
+                            "error": kind,
+                            "code": code,
+                            "message": str(exc),
+                        }
+                    )
+        emit_json(
+            {
+                "operation": "create-batch",
+                "dry_run": True,
+                "count": len(results),
+                "results": results,
+            }
+        )
+        return
+
+    with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
+        with _build_backend(settings) as backend:
+            for index, item in enumerate(items):
+                try:
+                    draft = _draft_from_batch_item(index, item)
+                    note = create_note_remote(
+                        backend=backend,
+                        store=store,
+                        vault_dir=settings.paths.vault_dir,
+                        **draft,
+                    )
+                    results.append(
+                        {"index": index, "ok": True, "id": note.id, "filename": note.filename}
+                    )
+                except Exception as exc:
+                    code, kind = _classify_error(exc)
+                    results.append(
+                        {
+                            "index": index,
+                            "ok": False,
+                            "error": kind,
+                            "code": code,
+                            "message": str(exc),
+                            **_error_extras(exc),
+                        }
+                    )
+    created = sum(1 for r in results if r.get("ok"))
+    emit_json(
+        {
+            "operation": "create-batch",
+            "count": len(results),
+            "created": created,
+            "failed": len(results) - created,
+            "results": results,
+        }
+    )
 
 
 def _load_frontmatter_file(path: Path | None) -> dict[str, object] | None:
@@ -949,6 +1203,12 @@ def cmd_edit(
     body: str | None = typer.Option(None, "--body"),
     body_file: Path | None = typer.Option(None, "--body-file"),
     set_frontmatter: list[str] = typer.Option([], "--set-frontmatter"),
+    set_frontmatter_json: list[str] = typer.Option(
+        [],
+        "--set-frontmatter-json",
+        help="key=<json-literal> — set a TYPED frontmatter value (int/list/bool/null round-trip). "
+        "Use this for numbers/lists; --set-frontmatter sends strings only.",
+    ),
     unset_frontmatter: list[str] = typer.Option([], "--unset-frontmatter"),
     add_tag: list[str] = typer.Option([], "--add-tag"),
     remove_tag: list[str] = typer.Option([], "--remove-tag"),
@@ -961,6 +1221,11 @@ def cmd_edit(
         False,
         "--force",
         help="Bypass the local permissions pre-check (web-scope tokens only)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate (permissions, prefix, changes) without writing; report unresolved links.",
     ),
     fields: Fields = typer.Option(
         Fields.minimal,
@@ -987,6 +1252,35 @@ def cmd_edit(
                 raise UserError(f"--set-frontmatter expects key=value, got '{pair}'")
             key, _, value = pair.partition("=")
             fm_sets[key] = value
+        fm_json_sets: dict[str, Any] = {}
+        for pair in set_frontmatter_json:
+            if "=" not in pair:
+                raise UserError(f"--set-frontmatter-json expects key=<json>, got '{pair}'")
+            key, _, raw = pair.partition("=")
+            try:
+                fm_json_sets[key] = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise UserError(
+                    f"--set-frontmatter-json {key}=… value is not valid JSON: {exc}"
+                ) from exc
+        if dry_run:
+            with Store(settings.paths.index_path) as store:
+                preview = preview_edit(
+                    store,
+                    settings.paths.vault_dir,
+                    target=target,
+                    new_filename=filename,
+                    new_title=title,
+                    new_body=body_text,
+                    set_frontmatter=fm_sets,
+                    set_frontmatter_json=fm_json_sets,
+                    unset_frontmatter=list(unset_frontmatter),
+                    add_tags=list(add_tag),
+                    remove_tags=list(remove_tag),
+                    force=force,
+                )
+            render_dry_run(preview, mode=mode)
+            return
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = edit_note_remote(
@@ -998,6 +1292,7 @@ def cmd_edit(
                     new_title=title,
                     new_body=body_text,
                     set_frontmatter=fm_sets,
+                    set_frontmatter_json=fm_json_sets,
                     unset_frontmatter=list(unset_frontmatter),
                     add_tags=list(add_tag),
                     remove_tags=list(remove_tag),
@@ -1161,6 +1456,11 @@ def cmd_rename(
         "--force",
         help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the rename (permissions, immutable prefix) without writing.",
+    ),
     fields: Fields = typer.Option(
         Fields.minimal,
         "--fields",
@@ -1182,11 +1482,13 @@ def cmd_rename(
         body=None,
         body_file=None,
         set_frontmatter=[],
+        set_frontmatter_json=[],
         unset_frontmatter=[],
         add_tag=[],
         remove_tag=[],
         ai=False,
         force=force,
+        dry_run=dry_run,
         fields=fields,
         json_output=json_output,
     )
@@ -1381,25 +1683,42 @@ def _seconds_since(iso_timestamp: str | None) -> int | None:
 @app.command("reset")
 def cmd_reset(
     yes: bool = typer.Option(False, "--yes"),
+    json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Delete the local mirror. Next sync will be forced full."""
+    mode = OutputMode.detect(json_output)
     try:
         settings = _load()
+        if mode.json and not yes:
+            raise UserError("In --json mode you must pass --yes to confirm reset")
         if not yes:
             confirmed = typer.confirm(
                 f"Really delete {settings.paths.cache_dir} and {settings.paths.vault_dir}?",
                 default=False,
             )
             if not confirmed:
-                raise typer.Exit(0)
+                log("aborted", mode=mode)
+                return
         import shutil
 
-        if settings.paths.cache_dir.exists():
+        cache_removed = settings.paths.cache_dir.exists()
+        vault_removed = settings.paths.vault_dir.exists()
+        if cache_removed:
             shutil.rmtree(settings.paths.cache_dir)
-        if settings.paths.vault_dir.exists():
+        if vault_removed:
             shutil.rmtree(settings.paths.vault_dir)
+        if mode.json:
+            emit_json(
+                {
+                    "reset": True,
+                    "cache_dir": str(settings.paths.cache_dir),
+                    "vault_dir": str(settings.paths.vault_dir),
+                    "cache_removed": cache_removed,
+                    "vault_removed": vault_removed,
+                }
+            )
     except Exception as exc:
-        _fail(exc)
+        _fail(exc, mode=mode)
 
 
 if __name__ == "__main__":

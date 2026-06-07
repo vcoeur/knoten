@@ -1046,6 +1046,26 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def unresolved_wikilinks(self) -> list[dict[str, Any]]:
+        """Every dangling wiki-link (target_id IS NULL) with its source note.
+
+        One row per (source note, missing target title). The CLI groups
+        these by target so a caller can batch-create the missing stubs.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT w.target_title AS target_title,
+                   n.id           AS source_id,
+                   n.filename     AS source_filename,
+                   n.title        AS source_title
+            FROM wikilinks w
+            JOIN notes n ON n.id = w.source_id
+            WHERE w.target_id IS NULL
+            ORDER BY w.target_title COLLATE NOCASE, n.filename
+            """,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def backlinks_for_note(self, note_id: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """

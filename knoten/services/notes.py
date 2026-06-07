@@ -497,12 +497,14 @@ def edit_note_remote(
     unset_frontmatter: list[str],
     add_tags: list[str],
     remove_tags: list[str],
+    set_frontmatter_json: dict[str, Any] | None = None,
     force: bool = False,
 ) -> Note:
     row = resolve_target(store, target)
     _assert_permission(row, required_level="WRITE", operation="edit", force=force)
     note_id = row["id"]
     previous_path = row["path"]
+    json_sets = set_frontmatter_json or {}
 
     # Compute body if any tag change is requested — need current body from disk.
     body_to_send: str | None = None
@@ -517,9 +519,9 @@ def edit_note_remote(
         _assert_same_family_prefix(row["filename"], new_filename)
 
     patch_frontmatter: dict[str, Any] | None = None
-    if set_frontmatter or unset_frontmatter:
+    if set_frontmatter or unset_frontmatter or json_sets:
         patch_frontmatter = _apply_frontmatter_changes(
-            row["frontmatter_json"], set_frontmatter, unset_frontmatter
+            row["frontmatter_json"], set_frontmatter, unset_frontmatter, json_sets=json_sets
         )
 
     patch = NotePatch(
@@ -642,7 +644,10 @@ def _read_stripped_body(vault_dir: Path, relative_path: str) -> str:
 
 
 def _apply_frontmatter_changes(
-    current_json: str, sets: dict[str, str], unsets: list[str]
+    current_json: str,
+    sets: dict[str, str],
+    unsets: list[str],
+    json_sets: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     import json as _json
 
@@ -653,6 +658,10 @@ def _apply_frontmatter_changes(
     for key in unsets:
         current.pop(key, None)
     for key, value in sets.items():
+        current[key] = value
+    # Typed sets win over string sets for the same key, and preserve JSON
+    # types (ints, lists, null) rather than coercing to a string.
+    for key, value in (json_sets or {}).items():
         current[key] = value
     return current
 
@@ -680,3 +689,120 @@ def _family_prefix(filename: str) -> str:
     if space == -1:
         return filename
     return filename[: space + 1]
+
+
+# ---- dry-run previews ---------------------------------------------------
+
+
+def _unresolved_titles(store: Store, body: str) -> list[str]:
+    """Wikilink target titles in `body` that resolve to no existing note."""
+    from knoten.services.markdown_parser import parse_body
+
+    titles = parse_body(body).wikilink_titles
+    return [title for title in titles if store.find_by_filename(title) is None]
+
+
+def preview_create(
+    store: Store,
+    *,
+    filename: str,
+    body: str | None,
+    kind: str | None,
+    tags: list[str],
+    frontmatter: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve a would-be `create` without writing anything.
+
+    Reports the family/kind/source the filename parses to, whether the
+    prefix is recognised, whether the filename already exists, and which
+    `[[wikilinks]]` in the body do not yet resolve to a note.
+    """
+    from knoten.services.knoten_filename import (
+        FAMILY_TO_DIRECTORY,
+        has_valid_prefix,
+        parse_knoten_filename,
+    )
+
+    parsed = parse_knoten_filename(filename)
+    body_for_links = _compose_body(body or "", add_tags=tags, remove_tags=[])
+    return {
+        "dry_run": True,
+        "operation": "create",
+        "filename": filename,
+        "family": parsed.family,
+        "kind": kind or parsed.family,
+        "title": parsed.title,
+        "source": parsed.source,
+        "directory": FAMILY_TO_DIRECTORY.get(parsed.family),
+        "has_valid_prefix": has_valid_prefix(filename),
+        "filename_exists": store.find_by_filename(filename) is not None,
+        "frontmatter": frontmatter or {},
+        "tags": list(tags),
+        "unresolved_wikilinks": _unresolved_titles(store, body_for_links),
+    }
+
+
+def preview_edit(
+    store: Store,
+    vault_dir: Path,
+    *,
+    target: str,
+    new_filename: str | None,
+    new_title: str | None,
+    new_body: str | None,
+    set_frontmatter: dict[str, str],
+    set_frontmatter_json: dict[str, Any],
+    unset_frontmatter: list[str],
+    add_tags: list[str],
+    remove_tags: list[str],
+    force: bool = False,
+) -> dict[str, Any]:
+    """Validate a would-be `edit` / `rename` without writing.
+
+    Runs the same permission and immutable-prefix checks the real edit
+    runs, lists the fields that would change, and reports any unresolved
+    wikilinks in the resulting body. Raises on a no-op or a blocked write,
+    exactly as the real command would — so a dry-run is a safe pre-flight.
+    """
+    row = resolve_target(store, target)
+    _assert_permission(row, required_level="WRITE", operation="edit", force=force)
+    if new_filename is not None:
+        _assert_same_family_prefix(row["filename"], new_filename)
+
+    body_for_links: str | None = None
+    if new_body is not None or add_tags or remove_tags:
+        current_body = new_body
+        if current_body is None:
+            current_body = _read_stripped_body(vault_dir, row["path"])
+        body_for_links = _compose_body(current_body, add_tags=add_tags, remove_tags=remove_tags)
+
+    changes: dict[str, Any] = {}
+    if new_filename is not None:
+        changes["filename"] = new_filename
+    if new_title is not None:
+        changes["title"] = new_title
+    if new_body is not None:
+        changes["body"] = "<replaced>"
+    if add_tags:
+        changes["add_tags"] = list(add_tags)
+    if remove_tags:
+        changes["remove_tags"] = list(remove_tags)
+    merged_sets = {**set_frontmatter, **(set_frontmatter_json or {})}
+    if merged_sets:
+        changes["set_frontmatter"] = merged_sets
+    if unset_frontmatter:
+        changes["unset_frontmatter"] = list(unset_frontmatter)
+    if not changes:
+        raise UserError("Nothing to update — pass at least one change flag")
+
+    return {
+        "dry_run": True,
+        "operation": "edit",
+        "id": row["id"],
+        "filename": row["filename"],
+        "current_permission": row.get("permissions") or "ALL",
+        "changes": changes,
+        "unresolved_wikilinks": (
+            _unresolved_titles(store, body_for_links) if body_for_links is not None else []
+        ),
+    }

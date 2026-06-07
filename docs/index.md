@@ -27,7 +27,7 @@ description: Standalone CLI zettelkasten with a local Markdown vault and SQLite 
 ## Who it's for
 
 - A solo researcher or developer who wants **wiki-linked Markdown without a heavyweight app** — no Electron, no browser, no daemon.
-- Anyone building **Claude Code skills** that need a queryable knowledge base — every command takes `--json`, the envelopes are stable, and a generic example skill ships in the repo at [`SKILL.md`](https://github.com/vcoeur/knoten/blob/main/SKILL.md).
+- Anyone building **agent skills** that need a queryable knowledge base — every command takes `--json`, the envelopes are stable, `knoten schema --json` dumps the whole contract, and a generic skill ships with the CLI (`knoten skill install`, see [Commands](commands.md#agent-integration)).
 - Users who **already version their notes in git** and want the index to catch up to whatever they edit outside the CLI.
 
 ## Install
@@ -43,7 +43,7 @@ That is enough to start. The vault, the SQLite index, and a commented `.env` are
 
 The pages are written to be read top-to-bottom the first time:
 
-1. **[Quick start](quick-start.md)** — install the CLI, drop the example Claude Code skill into place, and run your first session: create a note, search it, follow a wiki-link, rename with cascade — all through natural-language requests to `/knoten`.
+1. **[Quick start](quick-start.md)** — install the CLI, install the bundled skill with `knoten skill install`, and run your first session: create a note, search it, follow a wiki-link, rename with cascade — all through natural-language requests to `/knoten`.
 2. **[Vault structure](vault-structure.md)** — how I organise my own vault. Note families with prefixes (`@` person, `$` organization, `%` entity, `&` topic, `!` permanent, `-` fleeting, `YYYY-MM-DD` day/journal, `Key=` reference, `Key.` literature), filename conventions, wiki-links, entity stubs, the journal-vs-permanent distinction, and how [`quelle`](https://quelle.vcoeur.com) feeds literature notes from DOIs and arXiv IDs.
 3. **Reference** — the long form: [Install](install.md) (cross-OS paths, remote mode, upgrade notes) and [Commands](commands.md) (every verb, every flag, every envelope).
 

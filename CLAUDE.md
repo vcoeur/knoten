@@ -115,6 +115,9 @@ make tool-install  # install `knoten` globally via `uv tool install`
 ## Key code locations
 
 - CLI entrypoint: `knoten/cli/main.py` — one Typer function per subcommand, all wiring identical (load → lock → Store → `_build_backend` → service → render).
+- Schema dump: `knoten/services/schema.py` — `knoten schema --json` introspects the live Typer/Click app for commands+flags and reads the family/permission/error tables from the modules that own them, so the contract never drifts. Pure data; no network.
+- Agent skill: bundled at `knoten/skill/SKILL.md` (package data, force-included in the wheel via `pyproject.toml`). `knoten/cli/skill.py` (`knoten skill install|status`) copies it into a skills dir. Keep `SKILL.md` convention-free — it is the public CLI contract, not Alice's vault conventions.
+- MCP server: `knoten/cli/mcp_server.py` — `knoten mcp serve` is an opt-in stdio facade. The `_do_*` helpers carry the logic (no `mcp` dependency, unit-testable); `serve` wires them onto FastMCP. `mcp` is an optional extra (`knoten[mcp]`).
 - Backend protocol + data types: `knoten/repositories/backend.py`.
 - Remote implementation: `knoten/repositories/remote_backend.py` — bearer-token httpx wrapper. All exceptions inherit from `knoten/repositories/errors.py`.
 - Local implementation: `knoten/repositories/local_backend.py` — filesystem + Store. See the `## Backends` section for the LocalBackend-specific gotchas (stat walk, trash, rename cascade).
