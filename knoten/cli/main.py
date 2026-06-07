@@ -76,9 +76,11 @@ from knoten.services.notes import (
     list_summaries_to_dicts,
     preview_create,
     preview_edit,
+    preview_reference,
     read_note_full,
     resolve_target,
     restore_note_remote,
+    source_to_reference_inputs,
     summarize_note,
     upload_file_remote,
 )
@@ -920,6 +922,37 @@ def cmd_unresolved(
         _fail(exc, mode=mode)
 
 
+@app.command("citekeys")
+def cmd_citekeys(
+    prefix: str | None = typer.Option(
+        None,
+        "--prefix",
+        help="Only CiteKeys starting with this string (case-sensitive prefix match).",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List the vault's in-use CiteKeys — the distinct, non-empty `source`
+    frontmatter values across all notes, sorted ascending. No network.
+
+    These are the CiteKeys already taken in the vault. The plain output is
+    one CiteKey per line so it pipes straight into a collision-aware minting
+    tool (`knoten citekeys | quelle resolve <x> --taken-file -`); `--prefix`
+    narrows it to a single author/site family.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        with Store(settings.paths.index_path) as store:
+            citekeys = store.distinct_citekeys(prefix=prefix)
+        if mode.json:
+            emit_json({"citekeys": citekeys, "count": len(citekeys), "prefix": prefix})
+        else:
+            for citekey in citekeys:
+                sys.stdout.write(f"{citekey}\n")
+    except Exception as exc:
+        _fail(exc, mode=mode)
+
+
 # ---- write-path ---------------------------------------------------------
 
 
@@ -1193,6 +1226,100 @@ def _load_frontmatter_file(path: Path | None) -> dict[str, object] | None:
     if not isinstance(parsed, dict):
         raise UserError(f"--frontmatter-file {path} must contain a JSON object at the top level")
     return parsed
+
+
+def _load_source_json(path: Path) -> dict[str, Any]:
+    """Read a quelle Source JSON object from a file (or '-' for stdin)."""
+    raw = sys.stdin.read() if str(path) == "-" else path.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise UserError(f"--from-source input is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise UserError("--from-source input must be a JSON object (a quelle Source)")
+    return parsed
+
+
+@app.command("reference")
+def cmd_reference(
+    from_source: Path = typer.Option(
+        ...,
+        "--from-source",
+        help="quelle Source JSON object — a file path, or '-' to read stdin.",
+    ),
+    body: str | None = typer.Option(None, "--body"),
+    body_file: Path | None = typer.Option(None, "--body-file"),
+    ai: bool = typer.Option(
+        False,
+        "--ai",
+        help="Wrap the body in `#ai begin` / `#ai end` markers (AI-authored content).",
+    ),
+    tag: list[str] = typer.Option([], "--tag"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Resolve and validate without creating; report the mapped kind, "
+        "frontmatter, and unresolved links.",
+    ),
+    fields: Fields = typer.Option(
+        Fields.minimal,
+        "--fields",
+        help="Response shape: `minimal` (id + metadata + tags) or `full` "
+        "(body + frontmatter + wikilinks + backlinks).",
+        case_sensitive=False,
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Create a CiteKey-anchored reference note from a quelle Source JSON.
+
+    Maps a quelle `Publication` dict (snake_case) to a knoten reference note:
+    the filename is `<CiteKey>= <Title>`, the quelle `kind` maps to a knoten
+    reference kind, and the frontmatter is rebuilt in knoten's hyphen-key
+    convention. The CiteKey is `x_vcoeur.citekey` when present, else the
+    top-level `citation_key`. Pass `--body`/`--body-file` for a summary blurb.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        source = _load_source_json(from_source)
+        body_text = _resolve_body(body, body_file)
+        if ai:
+            if body_text is None:
+                raise UserError("--ai requires --body or --body-file")
+            body_text = _wrap_ai(body_text)
+        inputs = source_to_reference_inputs(source, ai=ai)
+        # Helper-derived tags (e.g. `ai`) come first; caller `--tag`s extend
+        # them, de-duplicated while preserving order.
+        tags = list(dict.fromkeys([*inputs.tags, *tag]))
+        if dry_run:
+            with Store(settings.paths.index_path) as store:
+                preview = preview_reference(
+                    store,
+                    filename=inputs.filename,
+                    kind=inputs.kind,
+                    body=body_text,
+                    tags=tags,
+                    frontmatter=inputs.frontmatter,
+                )
+            render_dry_run(preview, mode=mode)
+            return
+        _require_token(settings, for_write="reference")
+        with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
+            with _build_backend(settings) as backend:
+                note = create_note_remote(
+                    backend=backend,
+                    store=store,
+                    vault_dir=settings.paths.vault_dir,
+                    filename=inputs.filename,
+                    body=body_text,
+                    kind=inputs.kind,
+                    tags=tags,
+                    frontmatter=inputs.frontmatter,
+                )
+            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
+        render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except Exception as exc:
+        _fail(exc, mode=mode)
 
 
 @app.command("edit")

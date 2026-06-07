@@ -75,12 +75,14 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten tags --json` / `knoten kinds --json` | Counts |
 | `knoten unresolved --json` | Dangling wikilink targets + their referencing notes |
 | `knoten path <target> --json` | Absolute file path on disk |
+| `knoten citekeys --json` | The vault's in-use CiteKeys (distinct non-empty `source` values, sorted). `--prefix STR`. Plain output is one-per-line, pipe-friendly. |
 
 ### Write path
 | Command | Purpose |
 |---|---|
 | `knoten create --filename "<prefix Title>" --body-file PATH --frontmatter-file PATH.json --json` | New note. `--body -`/`--body-file -` read stdin. `--kind`, `--tag` (repeatable), `--ai`. `--dry-run` previews family/kind/source + unresolved links without writing. |
 | `knoten create --batch FILE --json` | Bulk create from a JSON array of drafts (`-` for stdin) under one lock pass. See §9. |
+| `knoten reference --from-source FILE --json` | Create a CiteKey-anchored reference note from a quelle Source JSON object (`-` for stdin). Maps quelle `kind`→reference kind, builds hyphen-key frontmatter, filename `<CiteKey>= <Title>`. `--body`/`--body-file`, `--ai`, `--tag`, `--dry-run`, `--fields`. |
 | `knoten append <target> --content-file PATH --json` | Append (works at `APPEND` level). |
 | `knoten edit <target> --body-file PATH --json` | Replace body/filename/frontmatter/tags. `--add-tag --remove-tag --set-frontmatter k=v --unset-frontmatter k`. Family prefix immutable. `--dry-run` supported. |
 | `knoten edit <target> --set-frontmatter-json k=<json> --json` | Set a **typed** frontmatter value (int/list/bool/null round-trip). Use this for numbers/lists; `--set-frontmatter` only sends strings. See §8. |

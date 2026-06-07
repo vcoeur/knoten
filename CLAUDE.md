@@ -61,7 +61,7 @@ Selection: `knoten/cli/main.py:_build_backend` reads `settings.effective_mode` �
 
 The single most important rule for anyone (especially Claude) using this CLI:
 
-- **Reads never touch the network** in either mode. Reads resolve against the local mirror + SQLite index. The only commands that might touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`) — and even those go through the `Backend` protocol so they become filesystem ops in local mode.
+- **Reads never touch the network** in either mode. Reads resolve against the local mirror + SQLite index. The only commands that might touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `reference`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`) — and even those go through the `Backend` protocol so they become filesystem ops in local mode.
 - **In remote mode, writes always touch the network first.** Mutations call the REST API first; only after a 2xx do they re-fetch and mirror locally. The local mirror is never authoritative in remote mode.
 - **In local mode, writes go straight to disk.** The vault is authoritative; SQLite is derived. `_refresh_index_if_stale` catches up to external edits at the top of every read method.
 - **Sync never runs implicitly.** If the remote-mode mirror is stale, the user (or Claude) must run `knoten sync`. In local mode `knoten sync` is a shortcut for the stat-walk reindex.
@@ -116,6 +116,7 @@ make tool-install  # install `knoten` globally via `uv tool install`
 
 - CLI entrypoint: `knoten/cli/main.py` — one Typer function per subcommand, all wiring identical (load → lock → Store → `_build_backend` → service → render).
 - Schema dump: `knoten/services/schema.py` — `knoten schema --json` introspects the live Typer/Click app for commands+flags and reads the family/permission/error tables from the modules that own them, so the contract never drifts. Pure data; no network.
+- CiteKey ecosystem: `knoten citekeys` lists the vault's taken CiteKeys (distinct non-empty `source` values via `Store.distinct_citekeys`) so a sibling minting tool (quelle) can avoid collisions. `knoten reference --from-source` turns a quelle Source JSON into a CiteKey-anchored reference note — the pure Source→note mapping lives in `knoten/services/notes.py:source_to_reference_inputs` (with the `QUELLE_KIND_TO_REFERENCE_KIND` constant beside it), so it is unit-testable with no backend.
 - Agent skill: bundled at `knoten/skill/SKILL.md` (package data, force-included in the wheel via `pyproject.toml`). `knoten/cli/skill.py` (`knoten skill install|status`) copies it into a skills dir. Keep `SKILL.md` convention-free — it is the public CLI contract, not Alice's vault conventions.
 - MCP server: `knoten/cli/mcp_server.py` — `knoten mcp serve` is an opt-in stdio facade. The `_do_*` helpers carry the logic (no `mcp` dependency, unit-testable); `serve` wires them onto FastMCP. `mcp` is an optional extra (`knoten[mcp]`).
 - Backend protocol + data types: `knoten/repositories/backend.py`.

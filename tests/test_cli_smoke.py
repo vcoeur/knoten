@@ -48,6 +48,25 @@ def test_list_empty_store(monkeypatch, tmp_path) -> None:
     assert payload["notes"] == []
 
 
+def test_citekeys_empty_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["citekeys", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload == {"citekeys": [], "count": 0, "prefix": None}
+
+
+def test_reference_missing_from_source_is_error(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    # --from-source is required; omitting it is a usage error (exit code 2).
+    result = runner.invoke(app, ["reference", "--json"])
+    assert result.exit_code != 0
+
+
 def test_upload_smoke_missing_file_is_user_error(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
     monkeypatch.setenv("KNOTEN_API_URL", "https://notes.test")

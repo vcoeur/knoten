@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -691,6 +692,118 @@ def _family_prefix(filename: str) -> str:
     return filename[: space + 1]
 
 
+# ---- quelle Source → knoten reference -----------------------------------
+
+# Maps a quelle Publication `kind` to a knoten reference `kind`. quelle's
+# kind vocabulary is broader than knoten's reference kinds, so several quelle
+# kinds collapse onto one knoten kind; anything missing or unrecognised falls
+# back to `document`.
+QUELLE_KIND_TO_REFERENCE_KIND: dict[str, str] = {
+    "article": "article",
+    "preprint": "article",
+    "book": "book",
+    "book-chapter": "book",
+    "web": "web",
+    "media": "media",
+}
+
+
+@dataclass(frozen=True)
+class ReferenceInputs:
+    """knoten-side inputs derived from a quelle Source.
+
+    `filename` is `<CiteKey>= <Title>`; `kind` is the mapped reference kind;
+    `frontmatter` uses knoten's hyphen-key convention; `tags` carries `ai`
+    when the caller asked for AI-authored framing.
+    """
+
+    filename: str
+    kind: str
+    frontmatter: dict[str, Any]
+    tags: list[str]
+
+
+def _citekey_from_source(source: dict[str, Any]) -> str:
+    """Resolve the CiteKey: `x_vcoeur.citekey` wins over top-level `citation_key`."""
+    x_vcoeur = source.get("x_vcoeur")
+    if isinstance(x_vcoeur, dict):
+        citekey = x_vcoeur.get("citekey")
+        if isinstance(citekey, str) and citekey:
+            return citekey
+    citation_key = source.get("citation_key")
+    if isinstance(citation_key, str) and citation_key:
+        return citation_key
+    raise UserError("source has no citation_key / x_vcoeur.citekey")
+
+
+def _present(value: Any) -> bool:
+    """True when a Source value is worth carrying into frontmatter.
+
+    Omits None, empty strings, and empty collections; keeps 0 / False and
+    any non-empty scalar or collection.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) > 0
+    return True
+
+
+def source_to_reference_inputs(source: dict[str, Any], *, ai: bool) -> ReferenceInputs:
+    """Map a quelle Source dict to knoten reference-note inputs.
+
+    `source` is a quelle `Publication` object (snake_case keys), optionally
+    carrying an `x_vcoeur` block. Returns the `<CiteKey>= <Title>` filename,
+    the mapped reference `kind`, the hyphen-keyed frontmatter (any
+    missing/empty Source field is omitted), and the tag list (`ai` when
+    requested). Raises `UserError` when no CiteKey can be resolved.
+    """
+    citekey = _citekey_from_source(source)
+    kind = QUELLE_KIND_TO_REFERENCE_KIND.get(source.get("kind"), "document")
+    title = source.get("title") or ""
+    filename = f"{citekey}= {title}" if title else f"{citekey}="
+
+    # knoten's hyphen-key convention (not quelle's snake_case). family/kind/
+    # source are always present; everything else is set only when the Source
+    # carries a non-empty value.
+    frontmatter: dict[str, Any] = {
+        "family": "reference",
+        "kind": kind,
+        "source": citekey,
+    }
+    if _present(title):
+        frontmatter["title"] = title
+    authors = [
+        f"[[@ {author['name']}]]"
+        for author in (source.get("authors") or [])
+        if isinstance(author, dict) and _present(author.get("name"))
+    ]
+    if authors:
+        frontmatter["authors"] = authors
+    # (knoten frontmatter key, quelle Source key) for the flat scalar fields.
+    scalar_map = (
+        ("year", "year"),
+        ("publisher", "publisher"),
+        ("edition", "edition"),
+        ("isbn-13", "isbn_13"),
+        ("isbn-10", "isbn_10"),
+        ("page-count", "page_count"),
+        ("url", "source_url"),
+    )
+    for knoten_key, source_key in scalar_map:
+        value = source.get(source_key)
+        if _present(value):
+            frontmatter[knoten_key] = value
+    subjects = source.get("subjects")
+    if _present(subjects):
+        frontmatter["subjects"] = list(subjects)
+
+    tags = ["ai"] if ai else []
+    return ReferenceInputs(filename=filename, kind=kind, frontmatter=frontmatter, tags=tags)
+
+
 # ---- dry-run previews ---------------------------------------------------
 
 
@@ -740,6 +853,33 @@ def preview_create(
         "tags": list(tags),
         "unresolved_wikilinks": _unresolved_titles(store, body_for_links),
     }
+
+
+def preview_reference(
+    store: Store,
+    *,
+    filename: str,
+    kind: str,
+    body: str | None,
+    tags: list[str],
+    frontmatter: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve a would-be `reference --from-source` without writing anything.
+
+    Same shape as `preview_create`, but the operation label is `reference`
+    so the caller can tell the two dry-run paths apart. The mapped `kind` and
+    built frontmatter come from the quelle Source.
+    """
+    preview = preview_create(
+        store,
+        filename=filename,
+        body=body,
+        kind=kind,
+        tags=tags,
+        frontmatter=frontmatter,
+    )
+    preview["operation"] = "reference"
+    return preview
 
 
 def preview_edit(

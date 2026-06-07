@@ -1516,6 +1516,27 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def distinct_citekeys(self, prefix: str | None = None) -> list[str]:
+        """Return the distinct, non-empty `source` values, sorted ascending.
+
+        A reference note stores its CiteKey in the `source` column, so the
+        distinct non-empty sources are exactly the vault's in-use CiteKeys.
+        `prefix` keeps only CiteKeys that start with it (case-sensitive).
+
+        The prefix is applied in Python rather than with a SQL `LIKE` clause:
+        a `LIKE` would need the `%`/`_` wildcards in the prefix escaped, and
+        the source set is tiny, so a `startswith` filter is both cleaner and
+        free of escaping foot-guns.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT source FROM notes "
+            "WHERE source IS NOT NULL AND source != '' ORDER BY source"
+        ).fetchall()
+        citekeys = [row["source"] for row in rows]
+        if prefix:
+            citekeys = [citekey for citekey in citekeys if citekey.startswith(prefix)]
+        return citekeys
+
     # ---- sync metadata --------------------------------------------------
 
     def set_meta(self, key: str, value: str) -> None:

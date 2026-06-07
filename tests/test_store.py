@@ -583,3 +583,64 @@ def test_tag_and_kind_counts(store: Store) -> None:
 
     kind_counts = {row["kind"]: row["count"] for row in store.kind_counts()}
     assert kind_counts == {"permanent": 2}
+
+
+def _make_reference(*, note_id: str, citekey: str, title: str) -> Note:
+    """A reference note whose `source` column holds its CiteKey."""
+    filename = f"{citekey}= {title}"
+    return Note(
+        id=note_id,
+        filename=filename,
+        title=title,
+        family="reference",
+        kind="book",
+        source=citekey,
+        body="",
+        frontmatter={"family": "reference", "kind": "book", "source": citekey},
+        tags=(),
+        wikilinks=(),
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+
+
+def test_distinct_citekeys_sorted_and_deduplicated(store: Store) -> None:
+    # Two notes share a CiteKey (a reference + its file note, say) — distinct.
+    store.upsert_note(
+        _make_reference(note_id="r1", citekey="Scott2019", title="Radical Candor"),
+        path="literature/Scott2019= Radical Candor.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_reference(note_id="r2", citekey="Alice2026", title="One"),
+        path="literature/Alice2026= One.md",
+        body_sha256="2",
+    )
+    store.upsert_note(
+        _make_reference(note_id="r3", citekey="Alice2026a", title="Two"),
+        path="literature/Alice2026a= Two.md",
+        body_sha256="3",
+    )
+    # A note with no source (an empty-string source) is excluded.
+    store.upsert_note(
+        _make_note(note_id="n4", filename="! Plain", body=""),
+        path="note/! Plain.md",
+        body_sha256="4",
+    )
+    assert store.distinct_citekeys() == ["Alice2026", "Alice2026a", "Scott2019"]
+
+
+def test_distinct_citekeys_prefix_filter(store: Store) -> None:
+    for note_id, citekey in (("a", "Alice2026"), ("b", "Alice2026a"), ("c", "Scott2019")):
+        store.upsert_note(
+            _make_reference(note_id=note_id, citekey=citekey, title="t"),
+            path=f"literature/{citekey}= t.md",
+            body_sha256=note_id,
+        )
+    assert store.distinct_citekeys(prefix="Alice2026") == ["Alice2026", "Alice2026a"]
+    # Case-sensitive: a lowercased prefix matches nothing.
+    assert store.distinct_citekeys(prefix="alice2026") == []
+
+
+def test_distinct_citekeys_empty_vault(store: Store) -> None:
+    assert store.distinct_citekeys() == []
