@@ -92,6 +92,16 @@ knoten path "! Core insight"
 knoten path "! Core insight" --json
 ```
 
+### `knoten citekeys`
+
+The vault's in-use CiteKeys — the distinct, non-empty `source` frontmatter values across all notes, sorted ascending. A reference note stores its CiteKey in its `source` field, so this is the set of CiteKeys already taken. Plain output is one CiteKey per line (pipes cleanly into a collision-aware minting tool); JSON is `{citekeys, count, prefix}`. `--prefix STR` keeps only CiteKeys starting with `STR` (case-sensitive).
+
+```bash
+knoten citekeys
+knoten citekeys --prefix Alice2026 --json
+knoten citekeys | quelle resolve "<x>" --taken-file -   # avoid minting a collision
+```
+
 ## Write commands
 
 In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_URL` points at) and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
@@ -113,6 +123,18 @@ knoten create --batch drafts.json --json      # or '-' to read the array from st
 ```
 
 The result is `{operation, count, created, failed, results: [{index, ok, id|error}]}`. Add `--dry-run` to preview every draft without writing.
+
+### `knoten reference`
+
+Create a CiteKey-anchored reference note from a quelle Source JSON object (`--from-source FILE`, or `-` for stdin). Maps a quelle `Publication` dict (snake_case) to a knoten reference note: the filename is `<CiteKey>= <Title>`, the quelle `kind` maps to a knoten reference kind (`article`/`preprint`→`article`, `book`/`book-chapter`→`book`, `web`→`web`, `media`→`media`, anything else→`document`), and the frontmatter is rebuilt in knoten's hyphen-key convention (`family`, `kind`, `source`, `title`, `authors` as `[[@ Name]]` wikilinks, `year`, `publisher`, `edition`, `isbn-13`, `isbn-10`, `page-count`, `subjects`, `url` — each set only when the Source carries it). The CiteKey is `x_vcoeur.citekey` when present, else the top-level `citation_key`.
+
+```bash
+quelle fetch --book 9781250103505 --json | knoten reference --from-source - --json
+knoten reference --from-source source.json --body-file summary.md --ai --json
+knoten reference --from-source source.json --dry-run --json   # preview, no write
+```
+
+`--body`/`--body-file` add a summary blurb; `--ai` wraps it in `#ai begin`/`#ai end` markers (and the note picks up the `ai` tag). `--dry-run` previews the filename, mapped kind, frontmatter, and unresolved links without writing (and needs no token). `--fields minimal|full` selects the response shape.
 
 ### `knoten edit`
 
