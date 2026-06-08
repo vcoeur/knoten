@@ -42,6 +42,7 @@ def test_env_overrides_win(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert resolved.state_file == cache / "state.json"
     assert resolved.lock_file == cache / "sync.lock"
     assert resolved.tmp_dir == cache / "tmp"
+    assert resolved.has_overrides is True
 
 
 def test_env_overrides_expand_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -66,6 +67,7 @@ def test_dev_mode_uses_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     resolved = paths.resolve()
 
     assert resolved.is_dev is True
+    assert resolved.has_overrides is False
     assert resolved.config_dir == fake_repo
     assert resolved.data_dir == fake_repo
     assert resolved.cache_dir == fake_repo / ".dev-state" / "cache"
@@ -88,6 +90,7 @@ def test_installed_mode_uses_platformdirs(monkeypatch: pytest.MonkeyPatch, tmp_p
     resolved = paths.resolve()
 
     assert resolved.is_dev is False
+    assert resolved.has_overrides is False
     assert resolved.config_dir == fake_cfg
     assert resolved.data_dir == fake_data
     assert resolved.cache_dir == fake_cache
@@ -106,6 +109,7 @@ def test_env_override_beats_dev_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     assert resolved.data_dir == explicit
     assert resolved.config_dir == fake_repo  # unaffected — config override not set
+    assert resolved.has_overrides is True  # a single override flips the flag
 
 
 def test_ensure_dirs_creates_all_four(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

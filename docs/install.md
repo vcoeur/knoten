@@ -118,6 +118,6 @@ The first run of v0.2+ from an installed copy automatically moves:
 | `~/.knoten/kasten/` | `$KNOTEN_DATA_DIR/kasten/` |
 | `~/.knoten/.knoten-state/index.sqlite` | `$KNOTEN_CACHE_DIR/index.sqlite` |
 | `~/.knoten/.knoten-state/state.json` | `$KNOTEN_CACHE_DIR/state.json` |
-| `~/.config/knoten/.env` | `$KNOTEN_CONFIG_DIR/.env` (same file on Linux — no-op) |
+| `~/.config/knoten/.env` | `~/.config/knoten/.env` (unchanged — the default config location) |
 
-No data loss, no manual steps. `KNOTEN_HOME` still works as a one-release deprecation shim — knoten prints a warning and tells you to use `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` instead.
+No data loss, no manual steps. The `.env` is adopted only at the **default** config location: when `KNOTEN_CONFIG_DIR` points elsewhere, knoten leaves your live `~/.config/knoten/.env` untouched rather than moving it into the override (which would lose it if that directory is temporary). `KNOTEN_HOME` still works as a one-release deprecation shim — knoten prints a warning and tells you to use `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` instead.
