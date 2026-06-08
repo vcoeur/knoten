@@ -77,6 +77,21 @@ def test_helper_multiple_authors_render_as_wikilinks() -> None:
     assert inputs.frontmatter["authors"] == ["[[@ Ada Lovelace]]", "[[@ Alan Turing]]"]
 
 
+def test_helper_sanitizes_wikilink_special_chars_in_filename_title() -> None:
+    """`|`/`#`/`[`/`]` in a title break a `[[CiteKey= Title]]` wikilink (knoten
+    resolves links by full filename, and `|` is the alias separator). They are
+    stripped from the filename title; the original title stays in frontmatter."""
+    source = {
+        "title": "Working on projects | uv #docs [v2]",
+        "kind": "web",
+        "citation_key": "Astral2026-projects",
+    }
+    inputs = source_to_reference_inputs(source, ai=False)
+    assert inputs.filename == "Astral2026-projects= Working on projects uv docs v2"
+    assert "|" not in inputs.filename and "#" not in inputs.filename
+    assert inputs.frontmatter["title"] == "Working on projects | uv #docs [v2]"
+
+
 @pytest.mark.parametrize(
     ("quelle_kind", "expected"),
     [

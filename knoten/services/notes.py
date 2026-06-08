@@ -751,6 +751,23 @@ def _present(value: Any) -> bool:
     return True
 
 
+_WIKILINK_SPECIAL_RE = re.compile(r"[|#\[\]]")
+
+
+def _sanitize_filename_title(title: str) -> str:
+    """Strip wikilink-special chars from a title bound for a `CiteKey= Title` filename.
+
+    The vault cites a reference note as `[[CiteKey= Title]]`, and knoten resolves
+    wikilinks by the full filename. A title containing `|` (the wikilink alias
+    separator), `#` (heading anchor), or `[`/`]` makes that wikilink unresolvable —
+    common for web titles like "Working on projects | uv". Those characters are
+    replaced with spaces (collapsed) for the filename; the original title is kept
+    verbatim in the `title` frontmatter field.
+    """
+    cleaned = _WIKILINK_SPECIAL_RE.sub(" ", title)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def source_to_reference_inputs(source: dict[str, Any], *, ai: bool) -> ReferenceInputs:
     """Map a quelle Source dict to knoten reference-note inputs.
 
@@ -763,7 +780,8 @@ def source_to_reference_inputs(source: dict[str, Any], *, ai: bool) -> Reference
     citekey = _citekey_from_source(source)
     kind = QUELLE_KIND_TO_REFERENCE_KIND.get(source.get("kind"), "document")
     title = source.get("title") or ""
-    filename = f"{citekey}= {title}" if title else f"{citekey}="
+    filename_title = _sanitize_filename_title(title)
+    filename = f"{citekey}= {filename_title}" if filename_title else f"{citekey}="
 
     # knoten's hyphen-key convention (not quelle's snake_case). family/kind/
     # source are always present; everything else is set only when the Source
