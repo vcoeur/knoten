@@ -106,11 +106,17 @@ def migrate_legacy_layout(paths_obj: Paths) -> list[str]:
         except OSError as exc:
             _warn(f"could not migrate {legacy_state_file}: {exc}")
 
-    # 4. .env — only moves when source and target differ (on Linux they
-    # are often the same file under ~/.config/knoten/.env and there is
-    # nothing to do).
+    # 4. .env — adopt the legacy ~/.config/knoten/.env only into the DEFAULT
+    # config location. On Linux the default config dir IS ~/.config/knoten, so
+    # this is normally a no-op. It must NOT fire when a directory override is
+    # active (KNOTEN_CONFIG_DIR): that would `shutil.move` the user's live
+    # config into the override and lose it once a throwaway/temp config dir is
+    # deleted. The vault/index/state branches above stay enabled under overrides
+    # because their legacy sources live under ~/.knoten and a chosen data/cache
+    # dir is a documented migration target.
     if (
-        legacy_env.exists()
+        not paths_obj.has_overrides
+        and legacy_env.exists()
         and legacy_env.resolve() != paths_obj.env_file.resolve()
         and not paths_obj.env_file.exists()
     ):

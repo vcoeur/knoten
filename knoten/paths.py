@@ -43,6 +43,7 @@ class Paths:
     lock_file: Path
     tmp_dir: Path
     is_dev: bool
+    has_overrides: bool = False  # a KNOTEN_*_DIR env override is in effect
 
 
 def _looks_like_installed_location(path: Path) -> bool:
@@ -95,6 +96,10 @@ def resolve() -> Paths:
     data_dir = pick(ENV_DATA_DIR, dev_data, installed_data)
     cache_dir = pick(ENV_CACHE_DIR, dev_cache, installed_cache)
 
+    has_overrides = any(
+        os.environ.get(var) for var in (ENV_CONFIG_DIR, ENV_DATA_DIR, ENV_CACHE_DIR)
+    )
+
     return Paths(
         config_dir=config_dir,
         data_dir=data_dir,
@@ -106,6 +111,7 @@ def resolve() -> Paths:
         lock_file=cache_dir / "sync.lock",
         tmp_dir=cache_dir / "tmp",
         is_dev=repo is not None,
+        has_overrides=has_overrides,
     )
 
 

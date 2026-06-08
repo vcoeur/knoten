@@ -10,7 +10,7 @@ from knoten.migrate import migrate_legacy_layout
 from knoten.paths import Paths
 
 
-def _paths_under(root: Path, *, is_dev: bool = False) -> Paths:
+def _paths_under(root: Path, *, is_dev: bool = False, has_overrides: bool = False) -> Paths:
     return Paths(
         config_dir=root / "new_cfg",
         data_dir=root / "new_data",
@@ -22,6 +22,7 @@ def _paths_under(root: Path, *, is_dev: bool = False) -> Paths:
         lock_file=root / "new_cache" / "sync.lock",
         tmp_dir=root / "new_cache" / "tmp",
         is_dev=is_dev,
+        has_overrides=has_overrides,
     )
 
 
@@ -181,6 +182,43 @@ def test_dev_mode_skips_migration(fake_home: Path, tmp_path: Path) -> None:
     assert moved == []
     # Legacy still where it was.
     assert (fake_home / ".knoten" / "kasten" / "note" / "! First.md").exists()
+
+
+def test_env_not_clobbered_under_config_override(fake_home: Path, tmp_path: Path) -> None:
+    """The reported bug: a KNOTEN_CONFIG_DIR override (e.g. a throwaway temp
+    vault spun up by another process) must never move the user's real
+    ~/.config/knoten/.env into the override and lose it once that dir is
+    deleted. The `.env` adoption is for the default config location only.
+    """
+    _seed_legacy(fake_home, vault=False, index=False, state=False)  # only .env
+    paths = _paths_under(tmp_path / "new", has_overrides=True)
+
+    moved = migrate_legacy_layout(paths)
+
+    assert moved == []
+    # The user's real config survives, untouched.
+    real_env = fake_home / ".config" / "knoten" / ".env"
+    assert real_env.read_text() == "KNOTEN_API_URL=https://notes.example.com\n"
+    # Nothing was imported into the override target.
+    assert not paths.env_file.exists()
+
+
+def test_vault_still_migrates_under_override(fake_home: Path, tmp_path: Path) -> None:
+    """A directory override guards only the `.env` adoption — the vault/index/
+    state migration still runs, because a chosen data/cache dir is a documented
+    v0.1 migration target and those legacy sources live under ~/.knoten.
+    """
+    _seed_legacy(fake_home, index=False, state=False)  # legacy vault + .env
+    paths = _paths_under(tmp_path / "new", has_overrides=True)
+
+    moved = migrate_legacy_layout(paths)
+
+    # Vault migrated into the (overridden) data dir...
+    assert (paths.vault_dir / "note" / "! First.md").read_text() == "legacy body\n"
+    # ...but the live config was left untouched, not moved into the override.
+    assert (fake_home / ".config" / "knoten" / ".env").exists()
+    assert not paths.env_file.exists()
+    assert moved == [f"{fake_home / '.knoten' / 'kasten'} -> {paths.vault_dir}"]
 
 
 def test_knoten_home_env_points_at_custom_location(
