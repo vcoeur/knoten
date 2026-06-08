@@ -92,6 +92,22 @@ def test_helper_sanitizes_wikilink_special_chars_in_filename_title() -> None:
     assert inputs.frontmatter["title"] == "Working on projects | uv #docs [v2]"
 
 
+def test_helper_sanitizes_path_separators_in_filename_title() -> None:
+    """`/` and `\\` in a title would split the `CiteKey= Title` filename into
+    spurious sub-directories (and break filename-based storage on the remote
+    backend). They are stripped from the filename title; the original title
+    stays in frontmatter."""
+    source = {
+        "title": "GitHub - astral-sh/uv: a C:\\path mirror",
+        "kind": "web",
+        "citation_key": "AstralShUv2026",
+    }
+    inputs = source_to_reference_inputs(source, ai=False)
+    assert "/" not in inputs.filename and "\\" not in inputs.filename
+    assert inputs.filename == "AstralShUv2026= GitHub - astral-sh uv: a C: path mirror"
+    assert inputs.frontmatter["title"] == "GitHub - astral-sh/uv: a C:\\path mirror"
+
+
 @pytest.mark.parametrize(
     ("quelle_kind", "expected"),
     [
