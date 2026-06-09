@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from knoten.models import Note, WikiLink
 from knoten.repositories.store import Store
+from knoten.repositories.vault_files import strip_frontmatter
 from knoten.services.markdown_parser import parse_body
 from knoten.settings import Settings
 
@@ -78,6 +79,11 @@ def reindex_from_files(
     log(f"→ Rebuilding derived tables from {result.checked} on-disk file(s)")
 
     for row in rows:
+        # Restricted placeholders have a marker file, not a real body —
+        # re-ingesting one through `upsert_note` would clear the
+        # `restricted` flag and turn the marker into a "real" note.
+        if row.restricted:
+            continue
         absolute = settings.paths.vault_dir / row.path
         if not absolute.exists():
             result.skipped_missing_file += 1
@@ -91,7 +97,7 @@ def reindex_from_files(
             result.missing_file_ids.append(row.id)
             continue
 
-        body = _strip_frontmatter(text)
+        body = strip_frontmatter(text)
         parsed = parse_body(body)
 
         # Pull the rest of the metadata from the stored notes row.
@@ -133,7 +139,15 @@ def reindex_from_files(
         )
 
         body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        store.upsert_note(note, path=row.path, body_sha256=body_sha)
+        # Preserve the row's `synced` flag: reindex rebuilds derived tables,
+        # it must not mark pending local writes (`synced=0`) as pushed —
+        # that would arm the next sync's delete detection against them.
+        store.upsert_note(
+            note,
+            path=row.path,
+            body_sha256=body_sha,
+            synced=bool(full.get("synced", 1)),
+        )
         result.reindexed += 1
         if result.reindexed % 200 == 0:
             log(f"  reindexed {result.reindexed}/{result.checked}")
@@ -147,15 +161,6 @@ def reindex_from_files(
         f"consistent={result.cardinality_after['consistent']}"
     )
     return result
-
-
-def _strip_frontmatter(text: str) -> str:
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return text
-    return text[end + 5 :]
 
 
 def _load_frontmatter(raw: str) -> dict:

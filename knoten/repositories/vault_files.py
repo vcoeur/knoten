@@ -169,6 +169,37 @@ def _yaml_inline(value: Any) -> str:
     return text
 
 
+def strip_frontmatter(text: str) -> str:
+    """Remove a leading YAML frontmatter block, if any — the inverse of
+    `render_note_markdown`.
+
+    Consumes the single blank separator line that `render_note_markdown`
+    writes between the closing `---` and the body, so a stripped body
+    round-trips byte-identically through render → strip (no newline
+    accumulation across edit cycles). Tolerates CRLF line endings. Returns
+    the text unchanged when no complete frontmatter block is present.
+    """
+    if text.startswith("---\r\n"):
+        end = text.find("\r\n---\r\n", 4)
+        if end == -1:
+            return text
+        rest = text[end + 7 :]
+    elif text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end == -1:
+            return text
+        rest = text[end + 5 :]
+    else:
+        return text
+    # Consume exactly one separator blank line; any further leading
+    # newlines belong to the body itself.
+    if rest.startswith("\r\n"):
+        return rest[2:]
+    if rest.startswith("\n"):
+        return rest[1:]
+    return rest
+
+
 def _safe_destination(vault_dir: Path, relative_path: str) -> Path:
     """Return `vault_dir / relative_path`, refusing any path that escapes the vault.
 

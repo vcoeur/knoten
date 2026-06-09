@@ -190,19 +190,24 @@ knoten download figure.png
 
 ### `knoten sync`
 
-Pull new / changed notes from the remote into the local mirror. Always runs delete detection and reconciliation (re-fetch missing files, remove orphans).
+Pull new / changed notes from the remote into the local mirror. Always pushes local writes and pending deletes first, then runs delete detection and reconciliation (re-fetch missing files, remove orphans).
 
 ```bash
 knoten sync                        # incremental
 knoten sync --verify               # + full body-hash verification
 knoten sync --full                 # clear cursor, rebuild from scratch
+knoten sync --force-delete         # override the mass-delete circuit breaker
 ```
+
+A note with an unpushed local edit (`synced=0`) is never overwritten by the pull pass — it is kept, reported in the result's `conflicts` list, and uploaded by the push pass. Delete detection is skipped when the remote scan is inconsistent (server `total` disagrees with the scanned count), and refuses to remove more than 20% of the local synced notes (and more than 5) unless `--force-delete` is passed; both guards surface in the result's `warnings` list.
 
 In TTY mode, `sync` prints phase-by-phase progress to stderr. In `--json` mode, stderr is silent and only the final JSON result is emitted on stdout.
 
 ### `knoten verify`
 
 Runs SQLite integrity check, FTS5 / notes cardinality check, file existence, and orphan cleanup.
+
+In local mode only the non-destructive checks run — integrity, cardinality, and the stat-walk that catches up external edits. No orphan sweep, no re-fetch: the vault is the source of truth, not a mirror to repair. The JSON payload carries `"mode": "local"`.
 
 ```bash
 knoten verify

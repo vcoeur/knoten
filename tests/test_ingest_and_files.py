@@ -87,3 +87,79 @@ def test_journal_path_buckets_by_month(tmp_settings: Settings, store: Store) -> 
     )
     path = ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
     assert path == "journal/2024-11/2024-11-10 Weekly review.md"
+
+
+# ── strip_frontmatter round-trip (M1 regression) ─────────────────────────
+
+
+def test_strip_frontmatter_consumes_separator_blank_line() -> None:
+    """render → strip round-trips the body without a leading blank line.
+
+    The old per-module copies returned everything after the closing `---`
+    line including the separator blank line render adds, so every
+    read-modify-write cycle grew the body by one leading newline.
+    """
+    from knoten.repositories.vault_files import render_note_markdown, strip_frontmatter
+
+    note = _note("! Round trip", "permanent", "First line.\n\nSecond paragraph.")
+    rendered = render_note_markdown(note)
+    assert strip_frontmatter(rendered) == "First line.\n\nSecond paragraph.\n"
+    # Idempotent under repeated render/strip cycles — no newline accumulation.
+    body = strip_frontmatter(rendered)
+    for _ in range(3):
+        cycled = render_note_markdown(
+            Note(
+                id=note.id,
+                filename=note.filename,
+                title=note.title,
+                family=note.family,
+                kind=note.kind,
+                source=None,
+                body=body,
+                frontmatter=note.frontmatter,
+                tags=(),
+                wikilinks=(),
+                created_at=note.created_at,
+                updated_at=note.updated_at,
+            )
+        )
+        body = strip_frontmatter(cycled)
+    assert body == "First line.\n\nSecond paragraph.\n"
+
+
+def test_strip_frontmatter_preserves_body_leading_blank_line() -> None:
+    from knoten.repositories.vault_files import strip_frontmatter
+
+    text = "---\ntitle: x\n---\n\n\nBody starting after a blank line.\n"
+    assert strip_frontmatter(text) == "\nBody starting after a blank line.\n"
+
+
+def test_strip_frontmatter_tolerates_crlf() -> None:
+    from knoten.repositories.vault_files import strip_frontmatter
+
+    text = "---\r\ntitle: x\r\n---\r\n\r\nCRLF body.\r\n"
+    assert strip_frontmatter(text) == "CRLF body.\r\n"
+
+
+def test_strip_frontmatter_passthrough_without_block() -> None:
+    from knoten.repositories.vault_files import strip_frontmatter
+
+    assert strip_frontmatter("no frontmatter here\n") == "no frontmatter here\n"
+    assert strip_frontmatter("---\nunclosed block") == "---\nunclosed block"
+
+
+def test_ingest_hash_matches_reread_of_mirror_file(tmp_settings: Settings, store: Store) -> None:
+    """body_sha256 is recorded over the round-trip body, so a clean re-read
+    of the mirror file hashes to the stored value (verify --hashes converges).
+    """
+    import hashlib
+
+    from knoten.repositories.vault_files import strip_frontmatter
+
+    note = _note("! Hash check", "permanent", "Body without trailing newline")
+    relative_path = ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir)
+    on_disk = (tmp_settings.paths.vault_dir / relative_path).read_text(encoding="utf-8")
+    disk_sha = hashlib.sha256(strip_frontmatter(on_disk).encode("utf-8")).hexdigest()
+    row = store.get_row(note.id)
+    assert row is not None
+    assert disk_sha == row.body_sha256

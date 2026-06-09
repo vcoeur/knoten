@@ -137,3 +137,46 @@ def test_append_adds_to_existing_body(local_env) -> None:
     payload = json.loads(out)
     assert "line 1" in payload["body"]
     assert "line 2" in payload["body"]
+
+
+def test_verify_local_mode_is_non_destructive(local_env) -> None:
+    """`knoten verify` in local mode must not sweep `.trash/` / `.attachments/` (C1).
+
+    Before the fix, verify ran `reconcile_local` in either mode; in local
+    mode the orphan sweep unlinked every trashed note and attachment blob,
+    making subsequent `restore` fail permanently.
+    """
+    from pathlib import Path
+
+    code, out = _invoke(["create", "--filename", "- Keeper", "--body", "kept", "--json"])
+    assert code == 0, out
+    keeper_id = json.loads(out)["id"]
+    code, out = _invoke(["create", "--filename", "- Doomed", "--body", "gone", "--json"])
+    assert code == 0, out
+    doomed_id = json.loads(out)["id"]
+    code, out = _invoke(["delete", "--yes", "--json", "--", doomed_id])
+    assert code == 0, out
+
+    code, out = _invoke(["read", "--json", "--", keeper_id])
+    assert code == 0, out
+    vault_dir = Path(json.loads(out)["absolute_path"]).parent.parent
+    trash_file = vault_dir / ".trash" / "note" / "- Doomed.md"
+    assert trash_file.exists()
+    blob = vault_dir / ".attachments" / "fakeblob.pdf"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(b"%PDF-1.4 fake blob")
+
+    code, out = _invoke(["verify", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["mode"] == "local"
+    assert payload["integrity"] == "ok"
+    assert payload["cardinality"]["consistent"] is True
+    # No reconcile ran — the remote-mode repair keys are absent.
+    assert "orphans_removed" not in payload
+
+    assert trash_file.exists()
+    assert blob.exists()
+    # The trashed note is still restorable after verify.
+    code, out = _invoke(["restore", "--json", doomed_id])
+    assert code == 0, out

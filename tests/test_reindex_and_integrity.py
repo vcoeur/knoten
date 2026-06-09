@@ -121,3 +121,60 @@ def test_ingest_order_store_first_then_file(tmp_settings: Settings) -> None:
         # FTS5 row was written inside the transaction — a search hits it.
         hits, total = store.search("Body", vault_dir=tmp_settings.paths.vault_dir)
         assert total == 1
+
+
+def test_reindex_preserves_synced_flag_and_skips_restricted(tmp_settings: Settings) -> None:
+    """`knoten reindex` must not flip `synced` 0 → 1 or clear `restricted` (C4).
+
+    The old code called `upsert_note` with the default `synced=True` (and
+    `upsert_note` hard-clears `restricted`), so the documented offline
+    command armed the next remote sync to delete every pending local write.
+    """
+    from knoten.models import NoteSummary
+    from knoten.services.notes import ingest_placeholder
+
+    unsynced_id = "66666666-6666-6666-6666-666666666666"
+    restricted_id = "77777777-7777-7777-7777-777777777777"
+    with Store(tmp_settings.paths.index_path) as store:
+        local_note = Note(
+            id=unsynced_id,
+            filename="- Offline note",
+            title="Offline note",
+            family="fleeting",
+            kind="fleeting",
+            source=None,
+            body="written while offline",
+            frontmatter={"kind": "fleeting"},
+            tags=(),
+            wikilinks=(),
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+        )
+        ingest_note(local_note, store=store, vault_dir=tmp_settings.paths.vault_dir, synced=False)
+        ingest_placeholder(
+            NoteSummary(
+                id=restricted_id,
+                filename="! Restricted",
+                title="Restricted",
+                family="permanent",
+                kind="permanent",
+                source=None,
+                tags=(),
+                created_at="2024-01-01T00:00:00Z",
+                updated_at="2024-01-02T00:00:00Z",
+            ),
+            store=store,
+            vault_dir=tmp_settings.paths.vault_dir,
+        )
+
+        result = reindex_from_files(store=store, settings=tmp_settings)
+        assert result.reindexed == 1  # the placeholder is skipped entirely
+
+        unsynced_row = store.find_by_id(unsynced_id)
+        assert unsynced_row is not None
+        assert int(unsynced_row["synced"]) == 0
+
+        restricted_row = store.find_by_id(restricted_id)
+        assert restricted_row is not None
+        assert int(restricted_row["restricted"]) == 1
+        assert restricted_row["body_sha256"] == ""

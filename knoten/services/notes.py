@@ -30,6 +30,7 @@ from knoten.repositories.vault_files import (
     remove_note_file,
     render_note_markdown,
     render_placeholder_markdown,
+    strip_frontmatter,
     write_note_file,
 )
 
@@ -118,8 +119,11 @@ def ingest_note(
     pass `synced=False` so the next remote sync's push pass picks them up.
     """
     relative_path = path_for_note(note)
-    body_sha = hashlib.sha256(note.body.encode("utf-8")).hexdigest()
     content = render_note_markdown(note)
+    # Hash the body exactly as a re-read of the mirror file will produce it
+    # (render normalises trailing newlines), so `verify --hashes` converges
+    # to zero mismatches on a clean vault.
+    body_sha = hashlib.sha256(strip_frontmatter(content).encode("utf-8")).hexdigest()
 
     # 1. Commit the store + FTS5 + derived rows in one transaction.
     store.upsert_note(note, path=relative_path, body_sha256=body_sha, synced=synced)
@@ -201,7 +205,7 @@ def read_note_full(
     except OSError as exc:
         raise UserError(f"Mirror file missing for {row['id']}: {exc}") from exc
 
-    body_without_frontmatter = _strip_frontmatter(body)
+    body_without_frontmatter = strip_frontmatter(body)
     wikilinks = store.wikilinks_for_note(row["id"])
     backlinks = store.backlinks_for_note(row["id"]) if include_backlinks else None
     tags = store.tags_for_note(row["id"])
@@ -276,16 +280,6 @@ def summarize_note(store: Store, vault_dir: Path, target: str) -> dict[str, Any]
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
-
-
-def _strip_frontmatter(body: str) -> str:
-    """Remove a leading YAML frontmatter block, if any."""
-    if not body.startswith("---\n"):
-        return body
-    end = body.find("\n---\n", 4)
-    if end == -1:
-        return body
-    return body[end + 5 :]
 
 
 def list_summaries_to_dicts(
@@ -641,7 +635,7 @@ def _compose_body(body: str, *, add_tags: list[str], remove_tags: list[str]) -> 
 def _read_stripped_body(vault_dir: Path, relative_path: str) -> str:
     absolute = vault_dir / relative_path
     text = absolute.read_text(encoding="utf-8")
-    return _strip_frontmatter(text)
+    return strip_frontmatter(text)
 
 
 def _apply_frontmatter_changes(

@@ -93,7 +93,7 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten download <target> [-o PATH]` | Stream an attachment back out. |
 
 ### Sync / maintenance
-`knoten sync --json` (incremental; `--full`, `--verify`) · `knoten verify --json` · `knoten reindex --json` (rebuild derived tables, no network).
+`knoten sync --json` (incremental; `--full`, `--verify`, `--force-delete` to override the mass-delete guard) · `knoten verify --json` (local mode: integrity + index checks only, non-destructive) · `knoten reindex --json` (rebuild derived tables, no network).
 
 ## 8 — Typed frontmatter
 

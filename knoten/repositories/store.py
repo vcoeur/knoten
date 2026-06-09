@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -117,7 +117,12 @@ CREATE TABLE IF NOT EXISTS trashed_notes (
     permissions   TEXT NOT NULL DEFAULT 'ALL',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
-    deleted_at        TEXT NOT NULL
+    deleted_at        TEXT NOT NULL,
+    -- 1 = the note was remote-known (synced=1) when it was soft-deleted, so
+    -- the next remote sync's push pass must issue DELETE /api/notes/{id}
+    -- (otherwise the catch-up scan resurrects it). Cleared after the delete
+    -- is acknowledged; restore removes the whole row.
+    pending_remote_delete INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_trashed_filename ON trashed_notes(filename);
 
@@ -403,6 +408,20 @@ class Store:
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
             if "synced" not in columns:
                 self.conn.execute("ALTER TABLE notes ADD COLUMN synced INTEGER NOT NULL DEFAULT 1")
+        if from_version < 11:
+            # v10 -> v11: `pending_remote_delete` flag on `trashed_notes` so a
+            # local soft-delete of a remote-known note propagates to the
+            # remote on the next sync instead of silently resurrecting.
+            # Existing trashed rows default to 0 — their deletion predates the
+            # feature and the user has had the resurrection behaviour anyway.
+            columns = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
+            }
+            if "pending_remote_delete" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE trashed_notes "
+                    "ADD COLUMN pending_remote_delete INTEGER NOT NULL DEFAULT 0"
+                )
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -707,6 +726,11 @@ class Store:
         Copies the current metadata into the trash table, then deletes
         the `notes` row (cascade drops tags / wikilinks / FTS5). Returns
         True if a row was moved, False if the id was unknown.
+
+        A note that was `synced=1` at delete time is remote-known, so its
+        trash row is flagged `pending_remote_delete=1` — the next remote
+        sync's push pass issues the server-side delete before the pull
+        scan can resurrect the note.
         """
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
@@ -718,8 +742,8 @@ class Store:
                     id, filename, title, family, kind, source,
                     original_path, trash_path, frontmatter_json,
                     body_sha256, permissions,
-                    created_at, updated_at, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, deleted_at, pending_remote_delete
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
@@ -736,6 +760,7 @@ class Store:
                     row["created_at"],
                     row["updated_at"],
                     deleted_at,
+                    int(row["synced"]),
                 ),
             )
             conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
@@ -752,6 +777,21 @@ class Store:
         """Drop a row from `trashed_notes` after restore (or permanent delete)."""
         with self.transaction() as conn:
             conn.execute("DELETE FROM trashed_notes WHERE id = ?", (note_id,))
+
+    def pending_remote_delete_rows(self) -> list[dict[str, Any]]:
+        """Trashed notes whose deletion still has to be propagated to the remote."""
+        rows = self.conn.execute(
+            "SELECT * FROM trashed_notes WHERE pending_remote_delete = 1 ORDER BY deleted_at"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_pending_remote_delete(self, note_id: str) -> None:
+        """Mark a trashed note's remote deletion as propagated (or moot)."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE trashed_notes SET pending_remote_delete = 0 WHERE id = ?",
+                (note_id,),
+            )
 
     def record_attachment(
         self,
@@ -1013,6 +1053,11 @@ class Store:
 
     def count_notes(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM notes").fetchone()
+        return int(row["c"]) if row else 0
+
+    def count_synced_notes(self) -> int:
+        """Active notes with `synced=1` — the delete-detection denominator."""
+        row = self.conn.execute("SELECT COUNT(*) AS c FROM notes WHERE synced = 1").fetchone()
         return int(row["c"]) if row else 0
 
     # ---- lookups ---------------------------------------------------------

@@ -189,3 +189,27 @@ def test_trash_files_do_not_surface_in_list(tmp_settings: Settings) -> None:
         page = backend.list_note_summaries(limit=50, offset=0)
 
     assert all(summary.id != seed.id for summary in page.data)
+
+
+def test_edit_and_append_cycles_do_not_accumulate_newlines(tmp_settings: Settings) -> None:
+    """Body round-trips byte-identically through edit/append cycles (M1).
+
+    The old `_strip_frontmatter` kept the separator blank line, so every
+    metadata-only edit grew the body by one leading newline and appends
+    drifted further apart on every cycle.
+    """
+    note_id = "12121212-1212-1212-1212-121212121212"
+    _seed_permanent(tmp_settings, note_id, "! Stable body", "Line one.\n\nLine two.")
+
+    with LocalBackend(tmp_settings) as backend:
+        for _ in range(3):
+            backend.update_note(note_id, NotePatch(title="Stable body"))
+        body = backend.read_note(note_id).body
+    assert body == "Line one.\n\nLine two.\n"
+
+    with LocalBackend(tmp_settings) as backend:
+        backend.append_to_note(note_id, "Appended.")
+        for _ in range(2):
+            backend.update_note(note_id, NotePatch(title="Stable body"))
+        body = backend.read_note(note_id).body
+    assert body == "Line one.\n\nLine two.\n\nAppended.\n"

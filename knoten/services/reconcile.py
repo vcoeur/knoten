@@ -28,6 +28,7 @@ from pathlib import Path
 from knoten.repositories.backend import Backend
 from knoten.repositories.errors import NoteForbiddenError, NotFoundError
 from knoten.repositories.store import Store, StoreNoteRow
+from knoten.repositories.vault_files import strip_frontmatter
 from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
 from knoten.settings import Settings
 
@@ -104,7 +105,7 @@ def reconcile_local(
                 missing.append(row)
                 result.missing_ids.append(row.id)
                 continue
-            body = _strip_frontmatter(text)
+            body = strip_frontmatter(text)
             disk_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
             if disk_sha != row.body_sha256:
                 mismatched.append(row)
@@ -152,33 +153,23 @@ def _refetch(
 
     If the note is restricted (server returns 404 because the token has
     LIST but not READ), recreate the placeholder using the fields from the
-    store's existing row.
+    store's existing row. A row that is *already* a placeholder is rebuilt
+    as a placeholder without asking the backend — a LocalBackend read
+    would happily return the marker body as a "real" note and clear the
+    `restricted` flag.
+
+    The row's current `synced` value is preserved through the re-ingest:
+    a `synced=0` row is a pending local write, and flipping it to 1 here
+    would drop it from the push queue and arm the next sync's delete
+    detection against it.
     """
+    if row.restricted:
+        _reingest_placeholder_from_row(row, store=store, settings=settings)
+        return
     try:
         note = backend.read_note(row.id)
     except NoteForbiddenError:
-        from knoten.models import NoteSummary
-
-        current = store.find_by_id(row.id)
-        if current is None:
-            return
-        summary = NoteSummary(
-            id=current["id"],
-            filename=current["filename"],
-            title=current["title"],
-            family=current["family"],
-            kind=current["kind"],
-            source=current["source"],
-            tags=(),
-            created_at=current["created_at"],
-            updated_at=current["updated_at"],
-        )
-        ingest_placeholder(
-            summary,
-            store=store,
-            vault_dir=settings.paths.vault_dir,
-            previous_path=row.path,
-        )
+        _reingest_placeholder_from_row(row, store=store, settings=settings)
         return
     except NotFoundError:
         # The remote no longer has this note (deleted server-side, or this
@@ -187,20 +178,58 @@ def _refetch(
         # reconcile pass over a single phantom id.
         delete_ingested(store, settings.paths.vault_dir, row.id)
         return
+    current = store.find_by_id(note.id)
+    synced = bool(int(current.get("synced", 1))) if current is not None else True
     previous = store.get_row(note.id)
     ingest_note(
         note,
         store=store,
         vault_dir=settings.paths.vault_dir,
         previous_path=previous.path if previous else None,
+        synced=synced,
+    )
+
+
+def _reingest_placeholder_from_row(
+    row: StoreNoteRow,
+    *,
+    store: Store,
+    settings: Settings,
+) -> None:
+    """Rebuild a restricted note's placeholder file from its stored metadata."""
+    from knoten.models import NoteSummary
+
+    current = store.find_by_id(row.id)
+    if current is None:
+        return
+    summary = NoteSummary(
+        id=current["id"],
+        filename=current["filename"],
+        title=current["title"],
+        family=current["family"],
+        kind=current["kind"],
+        source=current["source"],
+        tags=(),
+        created_at=current["created_at"],
+        updated_at=current["updated_at"],
+    )
+    ingest_placeholder(
+        summary,
+        store=store,
+        vault_dir=settings.paths.vault_dir,
+        previous_path=row.path,
     )
 
 
 def _find_orphans(vault_dir: Path, known_paths: set[str]) -> list[Path]:
     """Walk vault/ and return paths the store has no row for.
 
-    Includes markdown files and common attachment extensions. Dotfiles are
-    skipped (e.g. `.DS_Store`, atomic-write `*.tmp`).
+    Includes markdown files and common attachment extensions. Any path with
+    a dot-prefixed component is skipped — dot-files (`.DS_Store`,
+    atomic-write `*.tmp`) and, crucially, dot-directories: `.trash/` holds
+    soft-deleted notes and `.attachments/` holds uploaded blobs, neither of
+    which has a row in `notes`, so without this guard the orphan sweep
+    would irreversibly delete them.
     """
     orphans: list[Path] = []
     if not vault_dir.exists():
@@ -208,14 +237,13 @@ def _find_orphans(vault_dir: Path, known_paths: set[str]) -> list[Path]:
     for path in vault_dir.rglob("*"):
         if not path.is_file():
             continue
-        name = path.name
-        if name.startswith("."):
+        relative = path.relative_to(vault_dir)
+        if any(part.startswith(".") for part in relative.parts):
             continue
         suffix = path.suffix.lower()
         if suffix != ".md" and suffix not in _BINARY_EXTENSIONS:
             continue
-        relative = str(path.relative_to(vault_dir))
-        if relative not in known_paths:
+        if str(relative) not in known_paths:
             orphans.append(path)
     return orphans
 
@@ -229,13 +257,3 @@ def _prune_empty_parents(start: Path, root: Path) -> None:
         except OSError:
             return
         current = current.parent
-
-
-def _strip_frontmatter(text: str) -> str:
-    """Remove a leading YAML frontmatter block, if any — same rule as ingest."""
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return text
-    return text[end + 5 :]

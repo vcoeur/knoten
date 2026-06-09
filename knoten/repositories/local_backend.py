@@ -34,6 +34,7 @@ from knoten.repositories.backend import (
 )
 from knoten.repositories.errors import NotFoundError, UserError
 from knoten.repositories.store import Store
+from knoten.repositories.vault_files import strip_frontmatter
 from knoten.services.knoten_filename import parse_knoten_filename
 from knoten.services.markdown_parser import parse_body
 from knoten.services.notes import _assert_same_family_prefix, ingest_note
@@ -134,7 +135,7 @@ class LocalBackend(Backend):
                 raw = file_path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            body = _strip_frontmatter(raw)
+            body = strip_frontmatter(raw)
             parsed = parse_body(body)
             body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
             self._store.apply_drifted_body(
@@ -173,7 +174,7 @@ class LocalBackend(Backend):
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
 
-        body = _strip_frontmatter(raw)
+        body = strip_frontmatter(raw)
 
         frontmatter_raw = row.get("frontmatter_json") or "{}"
         try:
@@ -262,7 +263,7 @@ class LocalBackend(Backend):
             current_raw = absolute.read_text(encoding="utf-8")
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
-        current_body = _strip_frontmatter(current_raw)
+        current_body = strip_frontmatter(current_raw)
 
         new_body = patch.body if patch.body is not None else current_body
         if patch.add_tags or patch.remove_tags:
@@ -384,7 +385,7 @@ class LocalBackend(Backend):
             _save_backup(target_abs)
 
             body_raw = target_abs.read_text(encoding="utf-8")
-            body_only = _strip_frontmatter(body_raw)
+            body_only = strip_frontmatter(body_raw)
             if patch.body is not None:
                 body_only = patch.body
             if patch.add_tags or patch.remove_tags:
@@ -432,7 +433,7 @@ class LocalBackend(Backend):
 
             affected_ids: list[str] = []
             for source_row, new_source_raw in source_updates:
-                source_body = _strip_frontmatter(new_source_raw)
+                source_body = strip_frontmatter(new_source_raw)
                 parsed_source_body = parse_body(source_body)
                 try:
                     source_fm = json.loads(source_row.get("frontmatter_json") or "{}")
@@ -478,7 +479,9 @@ class LocalBackend(Backend):
             current_raw = absolute.read_text(encoding="utf-8")
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
-        current_body = _strip_frontmatter(current_raw)
+        # Normalise the trailing newline before joining so repeated appends
+        # insert exactly one blank-line separator (no newline accumulation).
+        current_body = strip_frontmatter(current_raw).rstrip("\n")
         new_body = f"{current_body}\n\n{content}" if current_body else content
 
         self.update_note(note_id, NotePatch(body=new_body))
@@ -551,7 +554,7 @@ class LocalBackend(Backend):
             restore_abs.rename(trash_abs)
             raise NotFoundError(f"Cannot read restored file: {exc}") from exc
 
-        body = _strip_frontmatter(raw)
+        body = strip_frontmatter(raw)
         parsed_body = parse_body(body)
         try:
             fm = json.loads(trashed.get("frontmatter_json") or "{}")
@@ -645,16 +648,6 @@ class LocalBackend(Backend):
             content_type=row.get("content_type") or "",
             filename=row.get("original_name"),
         )
-
-
-def _strip_frontmatter(text: str) -> str:
-    """Remove a leading YAML frontmatter block, if any."""
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return text
-    return text[end + 5 :]
 
 
 def _utcnow_iso() -> str:

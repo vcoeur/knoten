@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC
 from enum import StrEnum
@@ -339,15 +340,27 @@ def cmd_sync(
         "--verify",
         help="Re-hash every local file and re-fetch any that have drifted from the recorded hash",
     ),
+    force_delete: bool = typer.Option(
+        False,
+        "--force-delete",
+        help=(
+            "Override the mass-delete circuit breaker (delete detection refuses to "
+            "remove more than 20% of local synced notes without this flag)"
+        ),
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON to stdout"),
 ) -> None:
     """Pull new/changed notes from the configured remote backend into the local mirror.
 
     Every sync (incremental or `--full`) always:
 
-      1. Fetches new/changed notes via pagination.
-      2. Runs delete detection — any note removed on the remote is purged locally.
-      3. Reconciles the local mirror — re-fetches any file that is missing
+      1. Pushes local writes and deletes (`synced=0` rows, pending trash deletions).
+      2. Fetches new/changed notes via pagination — never overwriting a
+         note with an unpushed local edit (surfaced as a conflict instead).
+      3. Runs delete detection — any note removed on the remote is purged locally,
+         unless the remote scan was inconsistent or the mass-delete circuit
+         breaker trips (see `--force-delete`).
+      4. Reconciles the local mirror — re-fetches any file that is missing
          on disk, removes orphan files that the store does not know about.
 
     With `--verify`, the reconciliation pass also re-hashes every file and
@@ -381,6 +394,7 @@ def cmd_sync(
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
+                        force_delete=force_delete,
                         progress=progress,
                     )
                 else:
@@ -389,6 +403,7 @@ def cmd_sync(
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
+                        force_delete=force_delete,
                         progress=progress,
                     )
             payload = asdict(result)
@@ -422,11 +437,19 @@ def cmd_verify(
 
     If the FTS5 cardinality check shows drift, run `knoten reindex` to
     rebuild the derived tables from the on-disk files without a network hit.
+
+    In local mode there is no remote to re-fetch from, so only the
+    non-destructive checks run: integrity, cardinality, and the stat-walk
+    that catches up external edits. No orphan sweep, no re-fetch — the
+    vault on disk is the source of truth, not a mirror to repair.
     """
     mode = OutputMode.detect(json_output)
     progress = make_progress_callback(mode)
     try:
         settings = _load()
+        if settings.effective_mode == "local":
+            _verify_local(settings, mode=mode, progress=progress)
+            return
         _require_token(settings)
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             progress("→ SQLite integrity check")
@@ -494,6 +517,62 @@ def cmd_verify(
                 console.print(f"  orphans removed: {', '.join(result.orphan_paths[:10])}")
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _verify_local(
+    settings: Settings,
+    *,
+    mode: OutputMode,
+    progress: Callable[[str], None],
+) -> None:
+    """Local-mode `knoten verify` — non-destructive checks only.
+
+    Runs the SQLite integrity check, the FTS5 cardinality check, and the
+    LocalBackend stat-walk (catches up external edits). Deliberately does
+    NOT run `reconcile_local`: its orphan sweep and re-fetch are designed
+    for a mirror with a remote authority — against an authoritative local
+    vault they would delete `.trash/`/`.attachments/` content and rewrite
+    user files.
+    """
+    with acquire_lock(settings.paths.lock_file):
+        progress("→ Local mode: running stat-walk reindex (no orphan sweep, no re-fetch)")
+        with _build_backend(settings) as backend:
+            backend.list_note_summaries(limit=1, offset=0)
+        with Store(settings.paths.index_path) as store:
+            progress("→ SQLite integrity check")
+            integrity = store.integrity_check()
+            progress(f"  {integrity}")
+            progress("→ FTS5 / notes cardinality")
+            cardinality = store.fts_cardinality_check()
+            progress(
+                f"  notes={cardinality['notes_count']} "
+                f"fts={cardinality['fts_count']} "
+                f"consistent={cardinality['consistent']}"
+            )
+    payload = {
+        "mode": "local",
+        "integrity": integrity,
+        "cardinality": cardinality,
+    }
+    if mode.json:
+        emit_json(payload)
+    else:
+        from rich.console import Console
+
+        console = Console()
+        integrity_colour = "green" if integrity == "ok" else "red"
+        consistent_colour = "green" if cardinality["consistent"] else "red"
+        console.print(
+            f"local mode · integrity=[{integrity_colour}]{integrity}[/{integrity_colour}]  "
+            f"fts=[{consistent_colour}]{cardinality['consistent']}[/{consistent_colour}] "
+            f"(notes={cardinality['notes_count']}, "
+            f"fts={cardinality['fts_count']})"
+        )
+        if not cardinality["consistent"]:
+            console.print(
+                "[yellow]FTS5 drift detected — run `knoten reindex` to rebuild "
+                "the derived tables from on-disk files.[/yellow]"
+            )
 
 
 @app.command("reindex")
