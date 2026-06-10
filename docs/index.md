@@ -19,7 +19,7 @@ description: Standalone CLI zettelkasten with a local Markdown vault and SQLite 
 ## What it does
 
 - **Offline-first.** The Markdown vault is the source of truth; SQLite is a derived index that catches up to external edits on every invocation. Edit `.md` files in Neovim, VS Code, or Obsidian and the next `knoten` call picks up the changes via an mtime-gated stat walk.
-- **Ranked full-text search.** Title > filename > body, with snippets, tag/family/kind filters, and an opt-in `--fuzzy` mode for typo-tolerant and substring queries (trigram FTS + rapidfuzz on titles).
+- **Ranked full-text search.** Title > filename > body, with snippets, tag/family/kind filters, and an opt-in `--fuzzy` mode for typo-tolerant and substring queries (trigram FTS + rapidfuzz on titles). Scope a single column with `--in`, surface embedding-free related notes with `knoten similar`, and a zero-hit ranked search tells you whether `--fuzzy` would have matched.
 - **Wiki-link graph.** `knoten graph <note> --depth 2 --direction both` returns the BFS neighbourhood of any note — nodes with distances, plus edges — for broadened search without guessing exact titles.
 - **Soft delete and rename cascade.** `knoten delete` moves files to `<vault>/.trash/` (reversible via `knoten restore`). `knoten rename` rewrites `[[old]]` wiki-links in every referencing note and rolls back on partial failure.
 - **Pluggable remote backend (optional).** Point `KNOTEN_API_URL` at a compatible HTTP backend and the vault becomes a multi-device mirror. Reads stay local; writes hit the remote first, then refresh the local copy. No public backend is bundled — local mode is fully featured without one.
@@ -27,7 +27,7 @@ description: Standalone CLI zettelkasten with a local Markdown vault and SQLite 
 ## Who it's for
 
 - A solo researcher or developer who wants **wiki-linked Markdown without a heavyweight app** — no Electron, no browser, no daemon.
-- Anyone building **agent skills** that need a queryable knowledge base — every command takes `--json` (except `init`, `config edit`, and `mcp serve`), the envelopes are stable, `knoten schema --json` dumps the whole contract, and a generic skill ships with the CLI (`knoten skill install`, see [Commands](commands.md#agent-integration)).
+- Anyone building **agent skills** that need a queryable knowledge base — every command takes `--json` (except `init`, `config edit`, and `mcp serve`), the envelopes are stable, `knoten schema --json` dumps the whole contract, the output is token-budget-aware (`--fields minimal|meta`, `--max-body-chars`, multi-target `read`, `--batch` create/edit), and a generic skill ships with the CLI (`knoten skill install`, see [Commands](commands.md#agent-integration)).
 - Users who **already version their notes in git** and want the index to catch up to whatever they edit outside the CLI.
 
 ## Install

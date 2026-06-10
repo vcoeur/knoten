@@ -139,6 +139,253 @@ def test_append_adds_to_existing_body(local_env) -> None:
     assert "line 2" in payload["body"]
 
 
+def test_similar_finds_related_note(local_env) -> None:
+    _invoke(
+        [
+            "create",
+            "--filename",
+            "- Encryption basics",
+            "--body",
+            "Symmetric encryption uses shared keys and ciphers for confidentiality.",
+            "--json",
+        ]
+    )
+    _invoke(
+        [
+            "create",
+            "--filename",
+            "- Cipher design",
+            "--body",
+            "Block ciphers and stream ciphers rely on keys for encryption.",
+            "--json",
+        ]
+    )
+    _invoke(["create", "--filename", "- Garden log", "--body", "Tomatoes need sunlight.", "--json"])
+
+    code, out = _invoke(["similar", "--json", "--", "- Encryption basics"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["target_filename"] == "- Encryption basics"
+    assert payload["derived_query"]
+    filenames = {hit["filename"] for hit in payload["hits"]}
+    assert "- Encryption basics" not in filenames  # self excluded
+    assert "- Cipher design" in filenames
+    assert payload["total"] == len(payload["hits"])
+
+
+def test_similar_respects_limit(local_env) -> None:
+    for index in range(4):
+        _invoke(
+            [
+                "create",
+                "--filename",
+                f"- Note {index}",
+                "--body",
+                "shared keyword routing networking protocol packets",
+                "--json",
+            ]
+        )
+    code, out = _invoke(["similar", "--limit", "2", "--json", "--", "- Note 0"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert len(payload["hits"]) <= 2
+
+
+def test_search_in_column_scope(local_env) -> None:
+    _invoke(["create", "--filename", "- Zephyr title", "--body", "nothing here", "--json"])
+    _invoke(["create", "--filename", "- Plain", "--body", "mentions zephyr in body", "--json"])
+
+    # Scope to title: only the note with zephyr in the title/filename matches.
+    code, out = _invoke(["search", "zephyr", "--in", "title", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["scope"] == ["title"]
+    assert {hit["filename"] for hit in payload["hits"]} == {"- Zephyr title"}
+
+    # Comma-separated form is accepted and de-duplicated.
+    code, out = _invoke(["search", "zephyr", "--in", "title,body", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["scope"] == ["title", "body"]
+    assert payload["total"] == 2
+
+
+def test_search_in_invalid_column_is_user_error(local_env) -> None:
+    code, out = _invoke(["search", "anything", "--in", "nope", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_search_in_with_fuzzy_is_user_error(local_env) -> None:
+    code, out = _invoke(["search", "anything", "--in", "title", "--fuzzy", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_search_zero_hit_fuzzy_hint(local_env) -> None:
+    _invoke(["create", "--filename", "- Encryption handbook", "--body", "ciphers", "--json"])
+    # A typo gets 0 ranked hits but the fuzzy probe finds the note.
+    code, out = _invoke(["search", "encrpytion", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["total"] == 0
+    assert payload["fuzzy_total"] >= 1
+    assert "--fuzzy" in payload["hint"]
+
+
+def test_list_updated_after_filter_and_echo(local_env) -> None:
+    _invoke(["create", "--filename", "- One", "--body", "a", "--json"])
+    # A future bound excludes everything; the filter is echoed in the payload.
+    code, out = _invoke(["list", "--updated-after", "2999-01-01", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["total"] == 0
+    assert payload["updated_after"] == "2999-01-01"
+
+    # A past bound keeps the note.
+    code, out = _invoke(["list", "--updated-after", "2000-01-01", "--json"])
+    assert json.loads(out)["total"] == 1
+
+
+def test_list_created_after_invalid_is_user_error(local_env) -> None:
+    code, out = _invoke(["list", "--created-after", "not-a-date", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_read_multi_target_returns_envelope(local_env) -> None:
+    code, out = _invoke(["create", "--filename", "- Alpha", "--body", "aaa", "--json"])
+    alpha_id = json.loads(out)["id"]
+    _invoke(["create", "--filename", "- Beta", "--body", "bbb", "--json"])
+
+    code, out = _invoke(["read", "--json", "--", alpha_id, "- Beta"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["targets"] == 2
+    assert {n["filename"] for n in payload["notes"]} == {"- Alpha", "- Beta"}
+    assert payload["failed"] == []
+
+
+def test_read_multi_target_partial_failure(local_env) -> None:
+    _invoke(["create", "--filename", "- Real", "--body", "x", "--json"])
+    code, out = _invoke(["read", "--json", "--", "- Real", "- Ghost"])
+    # One resolved → exit 0, the bad one is reported in `failed`.
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["targets"] == 2
+    assert len(payload["notes"]) == 1
+    assert len(payload["failed"]) == 1
+    assert payload["failed"][0]["target"] == "- Ghost"
+    assert payload["failed"][0]["error"] == "not_found"
+
+
+def test_read_multi_target_all_fail_is_error(local_env) -> None:
+    code, out = _invoke(["read", "--json", "--", "- Nope", "- AlsoNope"])
+    assert code == 1, out
+    payload = json.loads(out)
+    # Falls back to the usual single-error envelope (first failure's kind).
+    assert payload["error"] == "not_found"
+    assert "notes" not in payload
+
+
+def test_read_single_target_shape_unchanged(local_env) -> None:
+    code, out = _invoke(["create", "--filename", "- Solo", "--body", "solo body", "--json"])
+    note_id = json.loads(out)["id"]
+    code, out = _invoke(["read", "--json", "--", note_id])
+    assert code == 0, out
+    payload = json.loads(out)
+    # Single-target keeps the flat note shape (no envelope wrapper).
+    assert payload["filename"] == "- Solo"
+    assert "targets" not in payload
+    assert "notes" not in payload
+    assert "solo body" in payload["body"]
+
+
+def test_read_fields_meta_omits_body(local_env) -> None:
+    code, out = _invoke(["create", "--filename", "- Meta me", "--body", "secret body", "--json"])
+    note_id = json.loads(out)["id"]
+    code, out = _invoke(["read", "--fields", "meta", "--json", "--", note_id])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert "body" not in payload
+    assert "wikilinks" in payload
+    assert "backlinks" in payload
+
+
+def test_read_max_body_chars_truncates(local_env) -> None:
+    body = "x" * 100
+    code, out = _invoke(["create", "--filename", "- Long", "--body", body, "--json"])
+    note_id = json.loads(out)["id"]
+    full = json.loads(_invoke(["read", "--json", "--", note_id])[1])["body"]
+    code, out = _invoke(["read", "--max-body-chars", "10", "--json", "--", note_id])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["body"] == full[:10]
+    assert payload["body_truncated"] is True
+    assert payload["body_total_chars"] == len(full)
+
+
+def test_read_max_body_chars_no_cut_omits_fields(local_env) -> None:
+    code, out = _invoke(["create", "--filename", "- Short", "--body", "tiny", "--json"])
+    note_id = json.loads(out)["id"]
+    full = json.loads(_invoke(["read", "--json", "--", note_id])[1])["body"]
+    code, out = _invoke(["read", "--max-body-chars", "1000", "--json", "--", note_id])
+    payload = json.loads(out)
+    # No cut → byte-identical body, no additive truncation fields.
+    assert payload["body"] == full
+    assert "body_truncated" not in payload
+    assert "body_total_chars" not in payload
+
+
+def test_read_meta_and_max_body_chars_conflict(local_env) -> None:
+    code, out = _invoke(["read", "--fields", "meta", "--max-body-chars", "5", "--json", "--", "x"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_search_fields_minimal(local_env) -> None:
+    _invoke(["create", "--filename", "- Searchable", "--body", "uniquetoken here", "--json"])
+    code, out = _invoke(["search", "uniquetoken", "--fields", "minimal", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["hits"], payload
+    hit = payload["hits"][0]
+    assert set(hit.keys()) == {"id", "filename", "title", "family", "kind", "score", "snippet"}
+
+
+def test_list_fields_minimal(local_env) -> None:
+    _invoke(["create", "--filename", "- Listed", "--body", "x", "--json"])
+    code, out = _invoke(["list", "--fields", "minimal", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["notes"], payload
+    entry = payload["notes"][0]
+    assert set(entry.keys()) == {"id", "filename", "family", "kind", "updated_at"}
+
+
+def test_unresolved_target_scopes_to_one_note(local_env) -> None:
+    _invoke(["create", "--filename", "- Source A", "--body", "See [[Ghost A]].", "--json"])
+    _invoke(["create", "--filename", "- Source B", "--body", "See [[Ghost B]].", "--json"])
+
+    # Global view sees both dangling targets.
+    code, out = _invoke(["unresolved", "--json"])
+    assert {t["target"] for t in json.loads(out)["targets"]} == {"Ghost A", "Ghost B"}
+
+    # Scoped to Source A: only its own dangling link, with the echo field.
+    code, out = _invoke(["unresolved", "--target", "- Source A", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert {t["target"] for t in payload["targets"]} == {"Ghost A"}
+    assert payload["target"]["filename"] == "- Source A"
+    assert payload["total"] == 1
+
+
+def test_unresolved_target_unknown_note_is_not_found(local_env) -> None:
+    code, out = _invoke(["unresolved", "--target", "- Ghost note", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "not_found"
+
+
 def test_verify_local_mode_is_non_destructive(local_env) -> None:
     """`knoten verify` in local mode must not sweep `.trash/` / `.attachments/` (C1).
 

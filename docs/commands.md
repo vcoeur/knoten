@@ -27,9 +27,31 @@ Ranked full-text search on the local index, with snippets, filters, and JSON out
 knoten search "zettelkasten"
 knoten search "query" --fuzzy --tag research --json
 knoten search "trigram" --family permanent --limit 5
+knoten search "alice" --in title --json          # scope the match to a column
+knoten search "auth" --in title,filename --json  # repeatable / comma-separated
 ```
 
 Ranking: **title > filename > body**. Add `--fuzzy` for typo-tolerant + substring match (trigram FTS + rapidfuzz on titles).
+
+`--in <column>` restricts the match to one or more FTS5 columns — `title`, `body`, `filename` — repeatable or comma-separated. Invalid column names are a `user` error, and `--in` cannot be combined with `--fuzzy` (ranked search only). When set, the active scope is echoed back in the JSON payload as `scope`.
+
+When a title or filename matches but the body has no match, the body snippet falls back to the note's first non-empty body line (truncated, no `<<>>` markers) so highly-ranked hits still carry a preview.
+
+When a ranked search returns **0 hits**, knoten runs a cheap fuzzy probe under the same filters; if fuzzy would have found matches it adds `fuzzy_total` to the payload and a `hint` like `0 ranked hits; --fuzzy would find 3`. The mode is never switched automatically.
+
+`--fields minimal` trims each JSON hit to `{id, filename, title, family, kind, score, snippet}` (default `full` keeps the whole hit). The projection is JSON-only — the TTY table already shows a curated subset and ignores the flag.
+
+### `knoten similar`
+
+Related notes without embeddings. Resolves the target like `read` (UUID, exact filename, or unambiguous prefix), derives a query from the note's title + most frequent body terms, runs it through ranked search (matching any term), drops the note itself, and returns the top hits. Network- and lock-free.
+
+```bash
+knoten similar "! Core insight" --json
+knoten similar 202604151820-core-insight --limit 5 --json
+knoten similar "! Core insight" --family permanent --json
+```
+
+`--limit` defaults to 10 (max 50). `--family` / `--kind` / `--tag` narrow the candidate pool, same as `search`. JSON is `{target_id, target_filename, derived_query, total, hits}` — `hits` share the `search` hit shape.
 
 ### `knoten read`
 
@@ -38,7 +60,14 @@ Full note body, wiki-links, and backlinks, resolved from the local mirror.
 ```bash
 knoten read "- First thought"
 knoten read 202604151820-first-thought --json
+knoten read "- First thought" "- Second thought" --json   # multiple targets
+knoten read "! Core insight" --fields meta --json          # metadata only, no body
+knoten read "! Core insight" --max-body-chars 2000 --json  # cap the body
 ```
+
+**Multiple targets.** Pass two or more targets to read them in one offline, lock-free pass. A single target keeps the exact flat note payload (back-compatible). With two or more, the payload becomes `{targets, notes, failed}` — `notes` is the list of resolved note payloads (each the usual read shape), `failed` lists `{target, error, message}` for any that didn't resolve. Each target resolves independently (one bad target never aborts the rest); the command exits 0 when at least one note resolved, and exits 1 with the usual error envelope (first failure's kind) only when every target failed. `--no-backlinks` and `--fields` / `--max-body-chars` apply to all targets.
+
+**Token-budget controls.** `--fields meta` omits the `body` field entirely (frontmatter, wiki-links, and backlinks stay; composes with `--no-backlinks`). `--max-body-chars N` truncates `body` to N characters and adds `body_truncated: true` + `body_total_chars: <int>` when (and only when) a cut happened. `--max-body-chars` cannot be combined with `--fields meta` (a `user` error).
 
 ### `knoten list`
 
@@ -47,7 +76,13 @@ Metadata listing — filter by family, kind, or tag.
 ```bash
 knoten list --family permanent --limit 10
 knoten list --tag research --json
+knoten list --updated-after 2026-06-01 --json
+knoten list --created-after 2026-06-01T09:00:00Z --json
 ```
+
+`--updated-after` / `--created-after` keep only notes updated / created on or after the given moment. Each accepts a bare `YYYY-MM-DD` date or a full ISO-8601 timestamp (a bare date is inclusive of that whole day); an unparseable value is a `user` error. Active date filters are echoed back in the JSON payload (`updated_after` / `created_after`).
+
+`--fields minimal` trims each JSON entry to `{id, filename, family, kind, updated_at}` (default `full` keeps the whole entry). JSON-only, like `search --fields`.
 
 ### `knoten backlinks`
 
@@ -81,7 +116,10 @@ Dangling wiki-link targets — links pointing at notes that don't exist yet — 
 
 ```bash
 knoten unresolved --json
+knoten unresolved --target "! Core insight" --json   # only links FROM this note
 ```
+
+`--target <note>` (UUID, filename, or prefix — resolved like `read`) scopes the output to dangling links referenced **from** that one note. The JSON shape is unchanged, just filtered; the resolved note is echoed back as `target: {id, filename}`.
 
 ### `knoten path`
 
@@ -105,6 +143,8 @@ knoten citekeys | quelle resolve "<x>" --taken-file -   # avoid minting a collis
 ## Write commands
 
 In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_URL` points at) and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
+
+Every write response (`create`, `edit`, `append`, `restore`, `reference`, `upload`) accepts `--fields minimal|full` like the read commands. With `--fields full` the response carries the written note's `wikilinks: [{title, id, broken}]` — `broken: true` flags a target that does not resolve to an existing note. After a single write you can read dangling links straight off the response (`jq '.wikilinks[] | select(.broken)'`) instead of running a vault-wide [`unresolved`](#knoten-unresolved).
 
 ### `knoten create`
 
@@ -150,6 +190,14 @@ knoten edit "! New idea" --dry-run --json     # validate (permissions, prefix, c
 knoten edit "@ Jane Doe" --set-frontmatter-json birth-year=1990 --json
 knoten edit "Scott2019= …" --set-frontmatter-json 'authors=["[[@ Kim Scott]]"]' --json
 ```
+
+**Batch.** Edit many notes from a JSON array of patches under one lock pass — one permission prompt, no per-call shell-escaping. Works in both local and remote mode (remote does N API round-trips inside one process). Each item is `{target, filename?, title?, body?, add_tags?, remove_tags?, set_frontmatter?, unset_frontmatter?, ai?}`; `set_frontmatter` values are typed JSON (ints/lists/bool/null round-trip). A single bad patch doesn't abort the rest. `--batch` is mutually exclusive with a positional target and the per-note edit flags.
+
+```bash
+knoten edit --batch patches.json --json   # or '-' to read the array from stdin
+```
+
+The result is `{operation: "edit-batch", count, edited, failed, results: [{index, ok, id|error}]}`. Add `--dry-run` to validate/preview every patch (permissions, prefix, changes, unresolved links) without writing.
 
 ### `knoten append`
 

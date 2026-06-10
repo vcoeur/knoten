@@ -155,7 +155,7 @@ def _is_fts5_bareword(token: str) -> bool:
     return all((not ch.isascii()) or ch.isalnum() or ch == "_" for ch in token)
 
 
-def _sanitize_fts_query(query: str) -> str:
+def _sanitize_fts_query(query: str, *, join: str = " ") -> str:
     """Make a free-form user query safe to feed FTS5 MATCH.
 
     FTS5's MATCH parser raises ``fts5: syntax error`` on a wide set of
@@ -168,6 +168,10 @@ def _sanitize_fts_query(query: str) -> str:
     unchanged so plain word searches still hit the unicode61 tokenizer.
     A trailing ``*`` keeps its prefix-search meaning — the token body is
     quoted and the star re-appended outside the quotes (``"foo"*``).
+
+    `join` is the operator placed between tokens: the default single space
+    is FTS5's implicit AND; pass ``" OR "`` to match any token (used by
+    `similar`, where the derived terms are a "more like this" disjunction).
 
     Returns the empty string for an empty input — caller should short-circuit.
     """
@@ -184,7 +188,25 @@ def _sanitize_fts_query(query: str) -> str:
             safe_tokens.append(core + prefix_star)
         else:
             safe_tokens.append('"' + core.replace('"', '""') + '"' + prefix_star)
-    return " ".join(safe_tokens)
+    return join.join(safe_tokens)
+
+
+def _snippet_fallback(body: str, *, max_chars: int = 120) -> str:
+    """First non-empty body line, trimmed and truncated — a snippet stand-in.
+
+    FTS5's `snippet()` returns the head of the body column when the match
+    landed in another column (title / filename). For a note whose body is
+    empty or starts with blank lines that head is whitespace-only, so the
+    highest-ranked hits (bm25 weights title 10x, filename 5x) ship no
+    relevance signal. This recovers one: the first line with visible
+    content, capped at `max_chars`, with no `<<>>` highlight markers (there
+    is nothing to highlight — the term did not match the body).
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:max_chars]
+    return ""
 
 
 def _trigram_query(query: str) -> str:
@@ -1133,23 +1155,44 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def unresolved_wikilinks(self) -> list[dict[str, Any]]:
+    def fts_body(self, note_id: str) -> str:
+        """Return a note's indexed body text from `notes_fts`, or "" if absent.
+
+        The FTS5 `body` column holds exactly the frontmatter-stripped body
+        that was ingested, so this is a network- and disk-free way to recover
+        a note's body for the snippet fallback and `similar`'s term
+        derivation without re-reading and re-stripping the mirror file.
+        """
+        row = self.conn.execute(
+            "SELECT body FROM notes_fts WHERE note_id = ?", (note_id,)
+        ).fetchone()
+        return row["body"] if row and row["body"] is not None else ""
+
+    def unresolved_wikilinks(self, *, source_id: str | None = None) -> list[dict[str, Any]]:
         """Every dangling wiki-link (target_id IS NULL) with its source note.
 
         One row per (source note, missing target title). The CLI groups
         these by target so a caller can batch-create the missing stubs.
+        When `source_id` is given, only links originating from that note are
+        returned — the `unresolved --target` note-scoped view.
         """
+        clause = "WHERE w.target_id IS NULL"
+        params: tuple[Any, ...] = ()
+        if source_id is not None:
+            clause += " AND w.source_id = ?"
+            params = (source_id,)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT w.target_title AS target_title,
                    n.id           AS source_id,
                    n.filename     AS source_filename,
                    n.title        AS source_title
             FROM wikilinks w
             JOIN notes n ON n.id = w.source_id
-            WHERE w.target_id IS NULL
+            {clause}
             ORDER BY w.target_title COLLATE NOCASE, n.filename
             """,
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1283,6 +1326,8 @@ class Store:
         source: str | None = None,
         min_permission: str | None = None,
         max_permission: str | None = None,
+        updated_after: str | None = None,
+        created_after: str | None = None,
         sort: str = "updated",
         limit: int = 50,
         offset: int = 0,
@@ -1317,6 +1362,15 @@ class Store:
                 "NOT EXISTS (SELECT 1 FROM tags tx WHERE tx.note_id = n.id AND tx.tag = ?)"
             )
             params.append(exclude_tag)
+        # Timestamps are stored as sortable ISO-8601 strings, so a lexicographic
+        # `>=` against a validated ISO bound is an inclusive "on or after" filter
+        # — a bare `YYYY-MM-DD` bound matches every timestamp on that day onward.
+        if updated_after is not None:
+            where_clauses.append("n.updated_at >= ?")
+            params.append(updated_after)
+        if created_after is not None:
+            where_clauses.append("n.created_at >= ?")
+            params.append(created_after)
         _append_permission_filter(where_clauses, params, min_permission, max_permission)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
@@ -1369,12 +1423,28 @@ class Store:
         offset: int = 0,
         vault_dir: Path,
         explain: bool = False,
+        columns: list[str] | None = None,
+        match_any: bool = False,
     ) -> tuple[list[SearchHit], int]:
-        sanitized = _sanitize_fts_query(query)
+        """Ranked unicode61 FTS5 search.
+
+        `columns` scopes the match to a subset of FTS5 columns (title / body
+        / filename) via a column-filter MATCH (``{title filename}: (…)``),
+        reaching syntax the sanitizer would otherwise quote out of existence.
+        `match_any` joins the query terms with ``OR`` instead of the implicit
+        ``AND`` — a "more like this" disjunction used by `similar`.
+        """
+        sanitized = _sanitize_fts_query(query, join=" OR " if match_any else " ")
         if not sanitized:
             return [], 0
+        match_expr = sanitized
+        if columns:
+            # FTS5 column-filter syntax: `{col1 col2}: (<query>)` restricts the
+            # match to the named columns. The parenthesised group keeps the
+            # whole sanitized query (AND/OR of tokens) under the filter.
+            match_expr = "{" + " ".join(columns) + "}: (" + sanitized + ")"
         where_clauses: list[str] = ["notes_fts MATCH ?"]
-        params: list[Any] = [sanitized]
+        params: list[Any] = [match_expr]
         if family:
             where_clauses.append("n.family = ?")
             params.append(family)
@@ -1442,6 +1512,12 @@ class Store:
                     ("body", float(row["score_body"] or 0.0)),
                     ("filename", float(row["score_filename"] or 0.0)),
                 )
+            # A title/filename match leaves the body snippet empty or whitespace
+            # (FTS5 returns the body head, which is blank for body-less notes);
+            # fall back to the first real body line so the hit carries a signal.
+            snippet = row["snippet"] or ""
+            if not snippet.strip():
+                snippet = _snippet_fallback(self.fts_body(row["id"]))
             hits.append(
                 SearchHit(
                     id=row["id"],
@@ -1454,7 +1530,7 @@ class Store:
                     absolute_path=absolute,
                     tags=self.tags_for_note(row["id"]),
                     score=float(row["score"]) if row["score"] is not None else 0.0,
-                    snippet=row["snippet"] or "",
+                    snippet=snippet,
                     updated_at=row["updated_at"],
                     permissions=row["permissions"] or "ALL",
                     explain=explain_tuple,
@@ -1574,6 +1650,11 @@ class Store:
         for score, note_id, snippet in page:
             row = row_by_id[note_id]
             absolute = str((vault_dir / row["path"]).resolve())
+            # rapidfuzz-only hits (title/filename typos) carry no trigram
+            # snippet, and a trigram hit on title/filename leaves the body
+            # snippet blank — recover the first real body line either way.
+            if not snippet.strip():
+                snippet = _snippet_fallback(self.fts_body(note_id))
             hits.append(
                 SearchHit(
                     id=row["id"],
