@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from knoten.models import Note
+from knoten.models import Note, NoteSummary
 from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
@@ -31,7 +31,11 @@ from knoten.repositories.errors import (
     NetworkError,
     NoteForbiddenError,
     NotFoundError,
+    RemoteRejectionError,
     ValidationError,
+)
+from knoten.repositories.errors import (
+    PermissionError as LocalPermissionError,
 )
 from knoten.services.note_mapper import note_from_api, summary_from_api
 from knoten.settings import Settings
@@ -111,6 +115,16 @@ class RemoteBackend(Backend):
             limit=int(raw.get("limit") or limit),
             offset=int(raw.get("offset") or offset),
         )
+
+    def list_trashed_notes(self, *, limit: int | None = None) -> tuple[NoteSummary, ...]:
+        # GET /api/trash/notes returns a bare JSON array of note rows (each
+        # carrying `deletedAt`), not the standard `{data,total}` envelope.
+        raw = self._get_json("/api/trash/notes")
+        items = raw if isinstance(raw, list) else (raw.get("data") if isinstance(raw, dict) else [])
+        summaries = [summary_from_api(item) for item in (items or [])]
+        if limit is not None:
+            summaries = summaries[:limit]
+        return tuple(summaries)
 
     def read_note(self, note_id: str) -> Note:
         payload = self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
@@ -281,33 +295,75 @@ class RemoteBackend(Backend):
             response = self._client.request(method, path, params=params, json=json)
         except httpx.HTTPError as exc:
             raise NetworkError(f"{method} {path} failed: {exc}") from exc
-        if response.status_code in (401, 403):
-            raise AuthError(
-                f"{method} {path} returned {response.status_code} — check KNOTEN_API_TOKEN scope."
-            )
-        if response.status_code == 503:
-            raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")
-        if response.status_code == 404 and note_id is not None:
-            raise NoteForbiddenError(note_id)
-        if response.status_code == 404 and not_found_message is not None:
-            raise NotFoundError(not_found_message)
-        if response.status_code == 400:
-            # Structured VALIDATION_ERROR envelope from notes.vcoeur.com v2.9.1+.
-            # Shape: {"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}.
-            # Parse eagerly so callers get a typed ValidationError they can
-            # surface to the user, instead of the generic NetworkError wrapping
-            # truncated response text.
+        status = response.status_code
+        if status >= 400:
+            # Parse the structured error envelope once. The server emits
+            # `{"error": "<CODE>", "detail": {...}}` for the cases below; we map
+            # each to the typed exception that carries the right exit code and
+            # structured fields, falling back to a generic NetworkError.
             parsed = _safe_json(response)
-            if isinstance(parsed, dict) and parsed.get("error") == "VALIDATION_ERROR":
-                detail = parsed.get("detail") or {}
+            error_code = parsed.get("error") if isinstance(parsed, dict) else None
+            detail = parsed.get("detail") if isinstance(parsed, dict) else None
+
+            # 403 FORBIDDEN — a per-note permission denial. Map to the same
+            # PermissionError the local pre-check raises (exit 1,
+            # permission_denied), carrying noteId/level as structured extras.
+            if status == 403 and error_code == "FORBIDDEN":
+                forbidden = detail if isinstance(detail, dict) else {}
+                raise LocalPermissionError(
+                    note_id=str(forbidden.get("noteId") or note_id or ""),
+                    required_level=str(forbidden.get("level") or ""),
+                )
+            # 401/403 without a recognisable body — token missing/invalid/scope.
+            if status in (401, 403):
+                raise AuthError(
+                    f"{method} {path} returned {status} — check KNOTEN_API_TOKEN scope."
+                )
+            # 429 — rate limited (transient; retry later). Exit 2 (network).
+            if status == 429:
+                raise NetworkError(
+                    f"{method} {path} returned 429 — rate limited by the remote. "
+                    "Too many requests; wait and retry."
+                )
+            # 413 — payload too large. Exit 2 (network), consistent with the
+            # upload path's other size/transport failures; message carries the
+            # server's byte cap when present.
+            if status == 413:
+                max_bytes = detail.get("maxBytes") if isinstance(detail, dict) else None
+                limit = f" (max {max_bytes} bytes)" if max_bytes is not None else ""
+                raise NetworkError(
+                    f"{method} {path} returned 413 — payload too large{limit}. "
+                    "Reduce the upload size."
+                )
+            if status == 503:
+                raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")
+            if status == 404 and note_id is not None:
+                raise NoteForbiddenError(note_id)
+            if status == 404 and not_found_message is not None:
+                raise NotFoundError(not_found_message)
+            # 400 VALIDATION_ERROR — frontmatter type mismatch (v2.9.1+).
+            # Shape: {"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}.
+            if status == 400 and error_code == "VALIDATION_ERROR":
                 issues = detail.get("issues") if isinstance(detail, dict) else None
                 if not isinstance(issues, list):
                     issues = []
                 raise ValidationError(issues, method=method, path=path)
-        if response.status_code not in expected and response.status_code >= 400:
-            raise NetworkError(
-                f"{method} {path} returned {response.status_code}: {response.text[:200]}"
-            )
-        if response.status_code == 204 or not response.content:
+            # 400 INVALID_FILENAME — the server rejected the filename grammar.
+            if status == 400 and error_code == "INVALID_FILENAME":
+                raise RemoteRejectionError(
+                    f"{method} {path} rejected: INVALID_FILENAME — the filename "
+                    "does not satisfy the server's grammar.",
+                    error_code="INVALID_FILENAME",
+                )
+            # 409 DUPLICATE_FILENAME / DUPLICATE_REFERENCE — uniqueness conflict.
+            if status == 409 and error_code in ("DUPLICATE_FILENAME", "DUPLICATE_REFERENCE"):
+                raise RemoteRejectionError(
+                    f"{method} {path} rejected: {error_code} — "
+                    "a note with that filename/reference already exists.",
+                    error_code=str(error_code),
+                )
+            if status not in expected:
+                raise NetworkError(f"{method} {path} returned {status}: {response.text[:200]}")
+        if status == 204 or not response.content:
             return None
         return response.json()

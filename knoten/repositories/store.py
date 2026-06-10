@@ -564,9 +564,13 @@ class Store:
 
             conn.execute("DELETE FROM tags WHERE note_id = ?", (note.id,))
             if note.tags:
+                # Lowercase at the storage chokepoint so tags stay
+                # case-normalised regardless of source (parser, explicit
+                # --tag, server payload) — mirrors the server's lowercased
+                # tag column and keeps the `--tag` filter case-insensitive.
                 conn.executemany(
                     "INSERT OR IGNORE INTO tags(note_id, tag) VALUES(?, ?)",
-                    [(note.id, tag) for tag in note.tags],
+                    [(note.id, tag.lower()) for tag in note.tags],
                 )
 
             conn.execute("DELETE FROM wikilinks WHERE source_id = ?", (note.id,))
@@ -839,6 +843,20 @@ class Store:
         with self.transaction() as conn:
             conn.execute("DELETE FROM trashed_notes WHERE id = ?", (note_id,))
 
+    def list_trashed_notes(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """List soft-deleted notes, most-recently-deleted first.
+
+        Read-only view over the `trashed_notes` table for `knoten trash` in
+        local mode. `limit` caps the number of rows when set.
+        """
+        sql = "SELECT * FROM trashed_notes ORDER BY deleted_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
     def pending_remote_delete_rows(self) -> list[dict[str, Any]]:
         """Trashed notes whose deletion still has to be propagated to the remote."""
         rows = self.conn.execute(
@@ -976,9 +994,10 @@ class Store:
 
             conn.execute("DELETE FROM tags WHERE note_id = ?", (note_id,))
             if tags:
+                # Lowercase at the storage chokepoint (see upsert_note).
                 conn.executemany(
                     "INSERT OR IGNORE INTO tags(note_id, tag) VALUES(?, ?)",
-                    [(note_id, tag) for tag in tags],
+                    [(note_id, tag.lower()) for tag in tags],
                 )
 
             conn.execute("DELETE FROM wikilinks WHERE source_id = ?", (note_id,))
@@ -1350,10 +1369,11 @@ class Store:
             where_clauses.append("n.source = ?")
             params.append(source)
         if tag:
+            # Tags are stored lowercased, so lowercase the filter to match.
             where_clauses.append(
                 "EXISTS (SELECT 1 FROM tags t WHERE t.note_id = n.id AND t.tag = ?)"
             )
-            params.append(tag)
+            params.append(tag.lower())
         if exclude_tag:
             # SQL-side exclusion so pagination and `total` stay correct —
             # filtering a returned page in Python would let excluded notes
@@ -1361,7 +1381,7 @@ class Store:
             where_clauses.append(
                 "NOT EXISTS (SELECT 1 FROM tags tx WHERE tx.note_id = n.id AND tx.tag = ?)"
             )
-            params.append(exclude_tag)
+            params.append(exclude_tag.lower())
         # Timestamps are stored as sortable ISO-8601 strings, so a lexicographic
         # `>=` against a validated ISO bound is an inclusive "on or after" filter
         # — a bare `YYYY-MM-DD` bound matches every timestamp on that day onward.
@@ -1452,10 +1472,11 @@ class Store:
             where_clauses.append("n.kind = ?")
             params.append(kind)
         if tag:
+            # Tags are stored lowercased, so lowercase the filter to match.
             where_clauses.append(
                 "EXISTS (SELECT 1 FROM tags t WHERE t.note_id = n.id AND t.tag = ?)"
             )
-            params.append(tag)
+            params.append(tag.lower())
         _append_permission_filter(where_clauses, params, min_permission, max_permission)
 
         where_sql = " AND ".join(where_clauses)
@@ -1576,10 +1597,11 @@ class Store:
             where_clauses.append("n.kind = ?")
             params.append(kind)
         if tag:
+            # Tags are stored lowercased, so lowercase the filter to match.
             where_clauses.append(
                 "EXISTS (SELECT 1 FROM tags t WHERE t.note_id = n.id AND t.tag = ?)"
             )
-            params.append(tag)
+            params.append(tag.lower())
         _append_permission_filter(where_clauses, params, min_permission, max_permission)
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 

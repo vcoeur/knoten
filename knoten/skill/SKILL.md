@@ -80,6 +80,7 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten path <target> --json` | Absolute file path on disk |
 | `knoten citekeys --json` | The vault's in-use CiteKeys (distinct non-empty `source` values, sorted). `--prefix STR`. Plain output is one-per-line, pipe-friendly. |
 | `knoten inbox list --json` | Pending `#inbox` fleetings, oldest first (`--limit --offset`; notes tagged `inbox-promoted` are excluded and `total` is the global pending count). |
+| `knoten trash --json` | Soft-deleted notes, most-recently-deleted first (`--limit`, `--fields minimal\|full`). Payload `{data: [{id, filename, …, deleted_at}], total}`. Read-only; remote mode lists the server trash, local mode the local trash. Each `id` is the restore handle. |
 
 ### Write path
 | Command | Purpose |
@@ -91,8 +92,8 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten edit <target> --body-file PATH --json` | Replace body/filename/frontmatter/tags. `--add-tag --remove-tag --set-frontmatter k=v --unset-frontmatter k`. Family prefix immutable. `--dry-run` supported. Bulk: `--batch FILE\|-` (see §9). |
 | `knoten edit <target> --set-frontmatter-json k=<json> --json` | Set a **typed** frontmatter value (int/list/bool/null round-trip). Use this for numbers/lists; `--set-frontmatter` only sends strings. See §8. |
 | `knoten rename <target> "<new>" --json` | Thin wrapper over `edit --filename`. `--dry-run` supported. |
-| `knoten delete <target> --yes --json` | **Soft** delete. Confirm with the user first. |
-| `knoten restore <uuid> --json` | Restore from trash. |
+| `knoten delete <target> --yes --json` | **Soft** delete. Confirm with the user first. Response `{deleted_id}` — that id is the restore handle (`knoten restore <deleted_id>`) and the row shown by `knoten trash`. |
+| `knoten restore <uuid> --json` | Restore from trash (needs WRITE; `--force` bypasses the local pre-check). The `<uuid>` is the `deleted_id` from `delete` (or an `id` from `trash`). |
 | `knoten upload <path> --filename "<prefix Label>" --json` | Attachment + file-note. |
 | `knoten download <target> [-o PATH]` | Stream an attachment back out (target is the file-family **note**, not the blob). |
 | `knoten inbox add <file\|url\|text> --json` | Quick capture into a new fleeting `#inbox` note. Heuristic: readable file → upload + wikilink; `https?://` → URL (title fetched for the slug); else text. Force with `--as-file\|--as-url\|--as-text`; `--note` adds context; `--tag` repeatable. |

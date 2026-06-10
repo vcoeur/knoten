@@ -65,14 +65,10 @@ def test_rename_handles_alias_wikilink_form(tmp_settings: Settings) -> None:
         assert "[[! Target|" not in refreshed_source.body
 
 
-def test_rename_heading_wikilink_is_not_cascaded(tmp_settings: Settings) -> None:
-    """Heading-form wikilinks (`[[target#heading]]`) are not tracked by the
-    local markdown parser, so the cascade cannot find them by querying the
-    wikilinks table. Documented limitation — the source body retains the
-    old filename until the user edits it themselves. If this starts biting,
-    fix by teaching `markdown_parser._WIKILINK_RE` to capture the heading
-    suffix and storing it under a canonicalised `target_title` that matches
-    the plain form.
+def test_rename_heading_wikilink_is_cascaded(tmp_settings: Settings) -> None:
+    """Heading-form wikilinks (`[[target#heading]]`) are now parsed to their
+    slug and tracked in the wikilinks table, so the cascade rewrites the slug
+    while preserving the `#heading` suffix verbatim — matching the server.
     """
     with LocalBackend(tmp_settings) as backend:
         target_id = _create(backend, "! Target", "")
@@ -84,8 +80,64 @@ def test_rename_heading_wikilink_is_not_cascaded(tmp_settings: Settings) -> None
 
         backend.update_note(target_id, NotePatch(filename="! Target Renamed"))
         refreshed_source = backend.read_note(source_id)
-        # Stale — limitation documented above.
-        assert "[[! Target#heading]]" in refreshed_source.body
+        assert "[[! Target Renamed#heading]]" in refreshed_source.body
+        assert "[[! Target#heading]]" not in refreshed_source.body
+
+
+def test_rename_rewrites_case_variant_wikilink(tmp_settings: Settings) -> None:
+    """A source that wrote a case variant of the filename is still rewritten —
+    the wikilinks lookup and the body regex are both case-insensitive.
+    """
+    with LocalBackend(tmp_settings) as backend:
+        target_id = _create(backend, "! Target", "")
+        source_id = _create(
+            backend,
+            "- Source",
+            "See [[! target]] for details.",
+        )
+
+        backend.update_note(target_id, NotePatch(filename="! Target Renamed"))
+        refreshed_source = backend.read_note(source_id)
+        assert "[[! Target Renamed]]" in refreshed_source.body
+        assert "[[! target]]" not in refreshed_source.body
+
+
+def test_rename_rewrites_whitespace_padded_wikilink(tmp_settings: Settings) -> None:
+    """Whitespace around the slug (`[[  ! Target  ]]`) is tolerated and
+    normalised away; the rewrite anchors on the trimmed slug.
+    """
+    with LocalBackend(tmp_settings) as backend:
+        target_id = _create(backend, "! Target", "")
+        source_id = _create(
+            backend,
+            "- Source",
+            "See [[  ! Target  ]] and [[ ! Target #heading]] for details.",
+        )
+
+        backend.update_note(target_id, NotePatch(filename="! Target Renamed"))
+        refreshed_source = backend.read_note(source_id)
+        assert "[[! Target Renamed]]" in refreshed_source.body
+        assert "[[! Target Renamed#heading]]" in refreshed_source.body
+        assert "! Target  ]]" not in refreshed_source.body
+
+
+def test_rename_does_not_rewrite_other_slug_with_old_in_heading(tmp_settings: Settings) -> None:
+    """`[[other#old]]` resolves to slug `other`, not the renamed `old`, so it
+    must be left untouched — only the slug position is matched, not the anchor.
+    """
+    with LocalBackend(tmp_settings) as backend:
+        target_id = _create(backend, "! Target", "")
+        _create(backend, "! Other", "")
+        source_id = _create(
+            backend,
+            "- Source",
+            "See [[! Other#! Target]] for details.",
+        )
+
+        backend.update_note(target_id, NotePatch(filename="! Target Renamed"))
+        refreshed_source = backend.read_note(source_id)
+        assert "[[! Other#! Target]]" in refreshed_source.body
+        assert "Renamed" not in refreshed_source.body
 
 
 def test_rename_to_colliding_filename_raises(tmp_settings: Settings) -> None:

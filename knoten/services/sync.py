@@ -48,6 +48,7 @@ def iter_all_summaries(
     *,
     page_size: int = 200,
     stop_when_older_than: str | None = None,
+    page_totals: list[int] | None = None,
 ) -> Iterator[NoteSummary]:
     """Yield every active note summary, newest-first.
 
@@ -59,10 +60,17 @@ def iter_all_summaries(
     page's newest item has `updated_at <= stop_when_older_than` — the
     caller is using this for incremental sync and no longer cares about
     older items.
+
+    If `page_totals` is provided, the `total` reported by each fetched page is
+    appended to it (in walk order). Lets the caller compare the scanned-ID
+    count against the *same walk's* own total — a same-scan consistency check
+    that a stale total captured in an earlier pass cannot provide.
     """
     offset = 0
     while True:
         page = backend.list_note_summaries(limit=page_size, offset=offset)
+        if page_totals is not None:
+            page_totals.append(int(page.total or 0))
         if not page.data:
             return
         yield from page.data
@@ -71,6 +79,23 @@ def iter_all_summaries(
         if len(page.data) < page_size:
             return
         offset += page_size
+
+
+def _same_scan_consistent(scanned_ids: int, page_totals: list[int]) -> bool:
+    """Return True when a reconcile walk's scanned-ID count matches its own total.
+
+    Same-scan consistency requires (a) the walk reported at least one page
+    total, (b) that total never shifted across pages (a mid-walk shift signals
+    a concurrent create + pagination reorder), and (c) the number of distinct
+    ids yielded equals that stable total. Any violation means the scan cannot
+    be trusted to drive deletions for this run.
+    """
+    if not page_totals:
+        return False
+    distinct_totals = set(page_totals)
+    if len(distinct_totals) != 1:
+        return False
+    return scanned_ids == page_totals[-1]
 
 
 @dataclass
@@ -410,7 +435,9 @@ def incremental_sync(
     catch_up_restricted = 0
     already_local = 0
     catch_up_started = False
-    for item in iter_all_summaries(backend, page_size=200):
+    # Per-page totals from THIS walk — the basis for the same-scan tripwire.
+    reconcile_page_totals: list[int] = []
+    for item in iter_all_summaries(backend, page_size=200, page_totals=reconcile_page_totals):
         item_id = item.id
         remote_ids_seen.add(item_id)
         if item_id in local_ids_after_main:
@@ -449,26 +476,46 @@ def incremental_sync(
         f"restricted placeholders={catch_up_restricted}"
     )
     delete_phase_blocked = False
-    if remote_total is not None and scanned_remote_ids != remote_total:
-        # Tripwire for a regression in the server's list endpoint. After the
-        # 2026-04-12 fix (incident `2026-04-12-notes-list-permission-leaks`)
-        # this branch should never trigger in a steady state. If it does,
-        # the most likely causes are a stable-sort regression in
-        # `notes.vcoeur.com`'s `listNotes.orderBy` or a new filter applied
-        # to the data query but not the count query — either way the scanned
-        # ID set cannot be trusted, so the delete phase is skipped for this
-        # run: a live note missed by an unstable scan must never translate
-        # into a local deletion.
+    # PRIMARY tripwire — same-scan consistency. Compare the reconcile walk's
+    # scanned-ID count against the walk's OWN per-page total. If a concurrent
+    # create lands mid-walk (the total bumps between pages) or the walk simply
+    # missed a row the server still counts, the numbers disagree and the scan
+    # cannot be trusted — skip delete detection. This closes the gap where the
+    # old cross-scan check (an EARLIER pass's total vs THIS walk's count) could
+    # coincidentally agree even though the walk dropped a live row, deleting a
+    # mirror row that still exists on the remote.
+    reconcile_totals_seen = set(reconcile_page_totals)
+    reconcile_walk_total = reconcile_page_totals[-1] if reconcile_page_totals else None
+    same_scan_consistent = _same_scan_consistent(scanned_remote_ids, reconcile_page_totals)
+    if reconcile_walk_total is not None and not same_scan_consistent:
+        detail = (
+            f"total shifted mid-walk {sorted(reconcile_totals_seen)}"
+            if len(reconcile_totals_seen) > 1
+            else f"walk total {reconcile_walk_total}"
+        )
         log(
-            f"  ⚠ server `total` ({remote_total}) disagrees with scanned count "
-            f"({scanned_remote_ids}) — pagination walk saw a different row set "
-            f"than the count query. Skipping delete detection this run."
+            f"  ⚠ reconcile walk scanned {scanned_remote_ids} id(s) but its own "
+            f"{detail} — same-scan inconsistency. Skipping delete detection this run."
         )
         warnings.append(
-            f"server total ({remote_total}) disagrees with scanned count "
-            f"({scanned_remote_ids}) — delete detection skipped this run"
+            f"reconcile walk scanned {scanned_remote_ids} id(s) but its own "
+            f"{detail} — delete detection skipped this run"
         )
         delete_phase_blocked = True
+
+    # SECONDARY signal (warn only) — cross-scan. The cursor-pull pass's `total`
+    # vs this walk's scanned count. A benign concurrent create between the two
+    # passes makes these differ without the walk itself being inconsistent, so
+    # this is a diagnostic, not a reason to skip deletes on its own.
+    if remote_total is not None and scanned_remote_ids != remote_total:
+        warnings.append(
+            f"cursor-pull total ({remote_total}) differs from reconcile scan "
+            f"({scanned_remote_ids}) — informational; the same-scan check governs deletes"
+        )
+        log(
+            f"  ⚠ cursor-pull total ({remote_total}) differs from reconcile scan "
+            f"({scanned_remote_ids}) — informational only"
+        )
 
     # Push pass — drain locally-authored writes (synced=0) before reconciling.
     # Must run *before* delete detection: a synced=0 note that is "local but

@@ -676,6 +676,25 @@ def test_tag_and_kind_counts(store: Store) -> None:
     assert kind_counts == {"permanent": 2}
 
 
+def test_tags_lowercased_at_store_and_filter_is_case_insensitive(store: Store) -> None:
+    """Tags are case-folded at the storage chokepoint, and the `--tag` filter
+    lowercases its argument so a mixed-case query still matches."""
+    store.upsert_note(
+        _make_note(note_id="a", filename="! Cased", body="", tags=("Foo", "BAR")),
+        path="note/! Cased.md",
+        body_sha256="a",
+    )
+    # Stored lowercase regardless of input case.
+    assert set(store.tags_for_note("a")) == {"foo", "bar"}
+    # Mixed-case filter still finds it (list lowercases the query).
+    rows, total = store.list_notes(tag="FOO")
+    assert total == 1
+    assert rows[0].id == "a"
+    # Search filter is case-insensitive too.
+    hits, hit_total = store.search("Cased", tag="Bar", vault_dir=Path("/tmp"))
+    assert hit_total == 1
+
+
 def _make_reference(*, note_id: str, citekey: str, title: str) -> Note:
     """A reference note whose `source` column holds its CiteKey."""
     filename = f"{citekey}= {title}"

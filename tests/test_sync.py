@@ -664,3 +664,53 @@ def test_sync_skips_hostile_server_filenames(tmp_settings: Settings, httpx_mock:
         assert any("path separator" in warning for warning in result.warnings)
         assert store.find_by_id(hostile_id) is None
         assert store.count_notes() == 0
+
+
+def test_same_scan_consistent_helper() -> None:
+    """The same-scan decision: agree, single-page disagree, mid-walk shift."""
+    from knoten.services.sync import _same_scan_consistent
+
+    # Agree — stable total equal to the scanned count.
+    assert _same_scan_consistent(3, [3, 3]) is True
+    assert _same_scan_consistent(0, [0]) is True
+    # Single-page disagree — the walk's own total ≠ scanned count.
+    assert _same_scan_consistent(1, [2]) is False
+    # Mid-walk total change — a concurrent create bumped the total between pages.
+    assert _same_scan_consistent(200, [200, 201]) is False
+    # No pages reported — cannot judge, treat as inconsistent (no deletes).
+    assert _same_scan_consistent(0, []) is False
+
+
+def test_sync_runs_delete_phase_when_same_scan_agrees(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """When the reconcile walk's own total matches its scanned count, the
+    delete phase runs and a note truly absent from the remote is purged."""
+    kept_id = "33333333-4444-5555-6666-777777777777"
+    gone_id = "44444444-5555-6666-7777-888888888888"
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
+        '{"schema_version": 1, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, kept_id, "! Kept")
+        _seed_synced(store, tmp_settings, gone_id, "! Gone on remote")
+
+    # Walk yields one row and its OWN total agrees (1 == 1) — consistent scan.
+    item = _summary_item(kept_id, "! Kept")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.deleted == 1
+        assert store.find_by_id(gone_id) is None
+        assert store.find_by_id(kept_id) is not None
+        assert not any("delete detection skipped" in warning for warning in result.warnings)
