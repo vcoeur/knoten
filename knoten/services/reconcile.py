@@ -29,7 +29,12 @@ from knoten.repositories.backend import Backend
 from knoten.repositories.errors import NoteForbiddenError, NotFoundError
 from knoten.repositories.store import Store, StoreNoteRow
 from knoten.repositories.vault_files import strip_frontmatter
-from knoten.services.notes import delete_ingested, ingest_note, ingest_placeholder
+from knoten.services.notes import (
+    delete_ingested,
+    ingest_note,
+    ingest_placeholder,
+    summary_from_row,
+)
 from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
@@ -197,24 +202,11 @@ def _reingest_placeholder_from_row(
     settings: Settings,
 ) -> None:
     """Rebuild a restricted note's placeholder file from its stored metadata."""
-    from knoten.models import NoteSummary
-
     current = store.find_by_id(row.id)
     if current is None:
         return
-    summary = NoteSummary(
-        id=current["id"],
-        filename=current["filename"],
-        title=current["title"],
-        family=current["family"],
-        kind=current["kind"],
-        source=current["source"],
-        tags=(),
-        created_at=current["created_at"],
-        updated_at=current["updated_at"],
-    )
     ingest_placeholder(
-        summary,
+        summary_from_row(current),
         store=store,
         vault_dir=settings.paths.vault_dir,
         previous_path=row.path,

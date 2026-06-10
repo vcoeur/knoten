@@ -219,6 +219,8 @@ knoten rename "! New idea" "! Core insight" --json
 knoten rename "! New idea" "! Core insight" --dry-run --json
 ```
 
+In remote mode the server's cascade rewrites every referencing note regardless of the API token's per-note permissions, so a referencing note the token cannot READ is mirrored as a metadata-only placeholder (same as a restricted note during sync) instead of failing the rename. The JSON output carries `restricted_affected`, the count of such notes (0 on the common path).
+
 ### `knoten delete` / `knoten restore`
 
 `delete` moves the file to `<vault>/.trash/` — reversible. `rm foo.md` in a shell is a permanent delete (no trash copy). Declining the interactive confirmation prompt exits 0 (a successful no-op, not an error). `restore` accepts only a note UUID — trash lookups are by id, not filename.

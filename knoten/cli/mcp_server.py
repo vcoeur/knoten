@@ -171,7 +171,7 @@ def _do_edit(
     _require_token(settings, for_write="edit")
     with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
         with _build_backend(settings) as backend:
-            note = edit_note_remote(
+            result = edit_note_remote(
                 backend=backend,
                 store=store,
                 vault_dir=settings.paths.vault_dir,
@@ -185,7 +185,9 @@ def _do_edit(
                 add_tags=list(add_tags or []),
                 remove_tags=list(remove_tags or []),
             )
-        return read_note_full(store, settings.paths.vault_dir, note.id, include_backlinks=False)
+        return read_note_full(
+            store, settings.paths.vault_dir, result.note.id, include_backlinks=False
+        )
 
 
 def _build_backend(settings: Any) -> Any:
