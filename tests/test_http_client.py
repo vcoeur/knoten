@@ -70,6 +70,22 @@ def test_network_failure_raises_network_error(
         backend.read_note("abc")
 
 
+def test_delete_note_404_raises_not_found(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    """Deleting an id unknown to the remote is NotFoundError (exit 1), not a
+    generic NetworkError (exit 2) — matching read_note and LocalBackend, and
+    letting the sync push pass treat a real-server 404 as already-deleted."""
+    from knoten.repositories.errors import NotFoundError
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/missing-id",
+        method="DELETE",
+        status_code=404,
+        json={"error": "NOT_FOUND"},
+    )
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(NotFoundError):
+        backend.delete_note("missing-id")
+
+
 def test_create_note_400_validation_error_raises_validation_error(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:

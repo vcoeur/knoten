@@ -148,6 +148,57 @@ def test_strip_frontmatter_passthrough_without_block() -> None:
     assert strip_frontmatter("---\nunclosed block") == "---\nunclosed block"
 
 
+def test_render_rejects_control_characters_in_frontmatter_values() -> None:
+    """A frontmatter value with a newline must be refused, not emitted raw.
+
+    A raw newline breaks the single-line YAML scalar, and a crafted value
+    containing `\\n---\\n` would shift the fence `strip_frontmatter` cuts at,
+    leaking frontmatter into the body.
+    """
+    import pytest
+
+    from knoten.repositories.errors import UserError
+    from knoten.repositories.vault_files import render_note_markdown
+
+    for hostile in ("multi\nline", "carriage\rreturn", "fence\n---\nbreak", "\x00nul"):
+        note = _note("! Hostile fm", "permanent", "body")
+        bad = Note(
+            id=note.id,
+            filename=note.filename,
+            title=note.title,
+            family=note.family,
+            kind=note.kind,
+            source=None,
+            body=note.body,
+            frontmatter={"crafted": hostile},
+            tags=(),
+            wikilinks=(),
+            created_at=note.created_at,
+            updated_at=note.updated_at,
+        )
+        with pytest.raises(UserError, match="control character"):
+            render_note_markdown(bad)
+
+    # List items are checked too.
+    listed = _note("! Hostile list", "permanent", "body")
+    bad_list = Note(
+        id=listed.id,
+        filename=listed.filename,
+        title=listed.title,
+        family=listed.family,
+        kind=listed.kind,
+        source=None,
+        body=listed.body,
+        frontmatter={"items": ["fine", "not\nfine"]},
+        tags=(),
+        wikilinks=(),
+        created_at=listed.created_at,
+        updated_at=listed.updated_at,
+    )
+    with pytest.raises(UserError, match="control character"):
+        render_note_markdown(bad_list)
+
+
 def test_ingest_hash_matches_reread_of_mirror_file(tmp_settings: Settings, store: Store) -> None:
     """body_sha256 is recorded over the round-trip body, so a clean re-read
     of the mirror file hashes to the stored value (verify --hashes converges).

@@ -127,7 +127,7 @@ Claude:
 ✓ Renamed; 1 referencing note rewritten.
 ```
 
-Every note that had `[[! Offline-first is calmer]]` now has `[[! Calm comes from locality]]`. Rollback on partial failure is automatic — if the rewrite fails mid-way, the original bytes of every touched file are restored before the error is raised.
+Every note that had `[[! Offline-first is calmer]]` now has `[[! Calm comes from locality]]`. Rollback on partial failure is automatic — if the rewrite fails mid-way, the original bytes of every touched file and the index rows of every touched note are restored before the error is raised.
 
 ## 4. Verify and take stock
 

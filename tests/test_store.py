@@ -442,6 +442,97 @@ def test_search_handles_url_in_query(store: Store, tmp_path: Path) -> None:
     assert isinstance(hits, list)
 
 
+def test_search_handles_everyday_punctuation(store: Store, tmp_path: Path) -> None:
+    """Ordinary punctuation must never surface an fts5 syntax error (M9).
+
+    The old sanitizer blacklisted only `=<>*():"^+-`, so apostrophes, dots,
+    question marks, commas, etc. reached the MATCH parser raw and raised.
+    The whitelist quotes any token that is not a pure FTS5 bareword.
+    """
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Don't panic",
+            body="The answer to foo.bar is fine. What? Commoner thinking.",
+        ),
+        path="note/! Don't panic.md",
+        body_sha256="x",
+    )
+    for query in ("don't", "foo.bar", "what?", "CiteKey.", "a,b", "semi;colon", "don't*"):
+        hits, _total = store.search(query, vault_dir=tmp_path)
+        assert isinstance(hits, list), f"query {query!r} should not raise"
+    # Quoted-phrase matching still finds real content.
+    hits, total = store.search("don't", vault_dir=tmp_path)
+    assert total == 1
+    assert hits[0].id == "n1"
+    # A trailing `*` keeps its prefix-search meaning for bareword tokens.
+    hits, total = store.search("commo*", vault_dir=tmp_path)
+    assert total == 1
+
+
+def test_find_by_filename_prefix_escapes_like_wildcards(store: Store) -> None:
+    """`%` / `_` in a prefix match literally, not as LIKE wildcards."""
+    store.upsert_note(
+        _make_note(note_id="n1", filename="! Plain name", body=""),
+        path="note/! Plain name.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(note_id="n2", filename="! 100% literal", body=""),
+        path="note/! 100% literal.md",
+        body_sha256="2",
+    )
+    # A bare `%` prefix must not match every note.
+    assert store.find_by_filename_prefix("%") == []
+    assert store.find_by_filename_prefix("_") == []
+    # But it still matches itself literally.
+    matches = store.find_by_filename_prefix("! 100%")
+    assert [m["id"] for m in matches] == ["n2"]
+
+
+def test_delete_note_only_if_path_spares_repointed_row(store: Store) -> None:
+    """Conditional hard-delete skips a row whose path changed since the snapshot (M8)."""
+    note = _make_note(note_id="n1", filename="! Racer", body="x")
+    store.upsert_note(note, path="note/! Racer.md", body_sha256="abc")
+
+    # Snapshot saw a path that a concurrent writer has since re-pointed.
+    store.delete_note("n1", only_if_path="note/! Old path.md")
+    assert store.find_by_id("n1") is not None
+
+    # Matching path → the delete goes through.
+    store.delete_note("n1", only_if_path="note/! Racer.md")
+    assert store.find_by_id("n1") is None
+
+
+def test_wikilinks_target_title_index_exists(store: Store) -> None:
+    """v12 adds an index serving the target_title-only hot paths."""
+    row = store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_wikilinks_target_title'"
+    ).fetchone()
+    assert row is not None
+    assert store.schema_version == SCHEMA_VERSION
+
+
+def test_open_failure_closes_connection_and_names_cache_dir(tmp_path: Path) -> None:
+    """`Store.open` must not leak the sqlite connection when the schema-newer
+    guard fires, and its remediation text must point at the v0.2 cache-dir
+    layout (`knoten config path`), not the retired `.knoten-state/`."""
+    import pytest
+
+    from knoten.repositories.errors import StoreError
+
+    db_path = tmp_path / "future.sqlite"
+    with Store(db_path) as seed:
+        seed.set_meta("schema_version", str(SCHEMA_VERSION + 1))
+
+    store = Store(db_path)
+    with pytest.raises(StoreError) as excinfo:
+        store.open()
+    assert store._conn is None, "connection must be closed after a failed open"
+    assert "knoten config path" in str(excinfo.value)
+    assert ".knoten-state" not in str(excinfo.value)
+
+
 def test_search_empty_query_returns_nothing(store: Store, tmp_path: Path) -> None:
     """Empty string and whitespace-only queries are short-circuited safely."""
     assert store.search("", vault_dir=tmp_path) == ([], 0)

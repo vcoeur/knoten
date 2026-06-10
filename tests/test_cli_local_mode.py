@@ -160,7 +160,8 @@ def test_verify_local_mode_is_non_destructive(local_env) -> None:
     code, out = _invoke(["read", "--json", "--", keeper_id])
     assert code == 0, out
     vault_dir = Path(json.loads(out)["absolute_path"]).parent.parent
-    trash_file = vault_dir / ".trash" / "note" / "- Doomed.md"
+    # Trash names embed the note id (C2 fix), so glob for the single copy.
+    trash_file = vault_dir / ".trash" / "note" / f"- Doomed.{doomed_id}.md"
     assert trash_file.exists()
     blob = vault_dir / ".attachments" / "fakeblob.pdf"
     blob.parent.mkdir(parents=True, exist_ok=True)

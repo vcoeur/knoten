@@ -10,6 +10,7 @@ dataclasses at the boundary.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +158,14 @@ class RemoteBackend(Backend):
         )
 
     def delete_note(self, note_id: str) -> None:
-        self._request("DELETE", f"/api/notes/{note_id}")
+        # 404 maps to NotFoundError (exit 1), matching read_note and
+        # LocalBackend.delete_note — and letting the sync push pass treat
+        # "already gone on remote" as success instead of a network failure.
+        self._request(
+            "DELETE",
+            f"/api/notes/{note_id}",
+            not_found_message=f"No note with id {note_id} on remote",
+        )
 
     def restore_note(self, note_id: str) -> None:
         self._post_json(
@@ -211,6 +219,9 @@ class RemoteBackend(Backend):
         written = 0
         content_type = ""
         disposition_filename: str | None = None
+        # Stream into a sibling tmp file and os.replace on success, so a
+        # mid-stream failure never leaves a truncated file at the destination.
+        tmp = destination.with_name(destination.name + ".tmp")
         try:
             with self._client.stream("GET", f"/api/attachments/{storage_key}") as response:
                 if response.status_code in (401, 403):
@@ -228,12 +239,15 @@ class RemoteBackend(Backend):
                 disposition_filename = _parse_disposition_filename(
                     response.headers.get("content-disposition", "")
                 )
-                with destination.open("wb") as handle:
+                with tmp.open("wb") as handle:
                     for chunk in response.iter_bytes():
                         handle.write(chunk)
                         written += len(chunk)
+            os.replace(tmp, destination)
         except httpx.HTTPError as exc:
             raise NetworkError(f"Cannot reach {self._settings.api_url}: {exc}") from exc
+        finally:
+            tmp.unlink(missing_ok=True)
         return AttachmentDownloadResult(
             path=destination,
             bytes_written=written,
@@ -261,6 +275,7 @@ class RemoteBackend(Backend):
         json: dict[str, Any] | None = None,
         expected: tuple[int, ...] = (200, 201, 204),
         note_id: str | None = None,
+        not_found_message: str | None = None,
     ) -> Any:
         try:
             response = self._client.request(method, path, params=params, json=json)
@@ -274,6 +289,8 @@ class RemoteBackend(Backend):
             raise NetworkError(f"{method} {path} returned 503 — vault locked on the remote.")
         if response.status_code == 404 and note_id is not None:
             raise NoteForbiddenError(note_id)
+        if response.status_code == 404 and not_found_message is not None:
+            raise NotFoundError(not_found_message)
         if response.status_code == 400:
             # Structured VALIDATION_ERROR envelope from notes.vcoeur.com v2.9.1+.
             # Shape: {"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}.

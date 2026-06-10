@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS wikilinks (
     PRIMARY KEY (source_id, target_title)
 );
 CREATE INDEX IF NOT EXISTS idx_wikilinks_target ON wikilinks(target_id) WHERE target_id IS NOT NULL;
+-- Serves the two hot target_title-only predicates: the broken-link
+-- resolution sweep in `upsert_note` and the rename cascade's source scan.
+-- The composite PK (source_id, target_title) cannot serve either.
+CREATE INDEX IF NOT EXISTS idx_wikilinks_target_title ON wikilinks(target_title);
 
 CREATE TABLE IF NOT EXISTS frontmatter_fields (
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -140,12 +144,15 @@ CREATE TABLE IF NOT EXISTS attachments (
 """
 
 
-# FTS5 special characters that cause `fts5: syntax error near "X"` when they
-# appear unquoted in a MATCH expression. We can't know whether the user wants
-# them as operators or as literal text, so the safe default is to phrase-quote
-# every whitespace-separated token that contains one. Explicitly omits `^`
-# because FTS5 uses `^` as a column filter and we never want to phrase that.
-_FTS5_RESERVED = set('=<>*():"^+-')
+def _is_fts5_bareword(token: str) -> bool:
+    """True when FTS5's MATCH parser accepts `token` as a plain bareword.
+
+    FTS5 barewords allow only ASCII alphanumerics, `_`, and codepoints
+    >= 128 (non-ASCII). Anything else — `. , ' ? ! = < > ( ) : " ^ + -` and
+    the rest of ASCII punctuation — is parser syntax and raises
+    ``fts5: syntax error`` when unquoted.
+    """
+    return all((not ch.isascii()) or ch.isalnum() or ch == "_" for ch in token)
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -154,11 +161,13 @@ def _sanitize_fts_query(query: str) -> str:
     FTS5's MATCH parser raises ``fts5: syntax error`` on a wide set of
     punctuation that ordinary search inputs contain — citation keys
     (``Bollier2025=``), URLs (``https://…``), filename prefixes
-    (``CiteKey.``), comparison-style queries, etc. The CLI shouldn't leak
-    parser errors to the user, so we wrap every whitespace-separated token
-    that contains a reserved character in double quotes (and double up any
-    embedded quotes). Tokens that are pure alphanumerics pass through
+    (``CiteKey.``), apostrophes (``don't``), etc. The CLI shouldn't leak
+    parser errors to the user, so we whitelist: every whitespace-separated
+    token that is not a pure FTS5 bareword is wrapped in double quotes
+    (with embedded quotes doubled up). Bareword tokens pass through
     unchanged so plain word searches still hit the unicode61 tokenizer.
+    A trailing ``*`` keeps its prefix-search meaning — the token body is
+    quoted and the star re-appended outside the quotes (``"foo"*``).
 
     Returns the empty string for an empty input — caller should short-circuit.
     """
@@ -167,10 +176,14 @@ def _sanitize_fts_query(query: str) -> str:
         return ""
     safe_tokens: list[str] = []
     for token in stripped.split():
-        if any(ch in _FTS5_RESERVED for ch in token):
-            safe_tokens.append('"' + token.replace('"', '""') + '"')
+        prefix_star = "*" if token.endswith("*") else ""
+        core = token.rstrip("*") if prefix_star else token
+        if not core:
+            continue
+        if _is_fts5_bareword(core):
+            safe_tokens.append(core + prefix_star)
         else:
-            safe_tokens.append(token)
+            safe_tokens.append('"' + core.replace('"', '""') + '"' + prefix_star)
     return " ".join(safe_tokens)
 
 
@@ -262,11 +275,18 @@ class Store:
             self._conn = sqlite3.connect(str(self._db_path))
         except sqlite3.Error as exc:
             raise StoreError(f"Cannot open {self._db_path}: {exc}") from exc
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._ensure_schema()
+        # Close the connection on any setup failure (e.g. the schema-newer
+        # guard) — otherwise `open()` propagates without `__exit__` ever
+        # running and the connection leaks.
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._ensure_schema()
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._conn is not None:
@@ -304,7 +324,9 @@ class Store:
             elif current > SCHEMA_VERSION:
                 raise StoreError(
                     f"Index schema_version={current} is newer than this knoten "
-                    f"(expects {SCHEMA_VERSION}). Upgrade the tool or delete .knoten-state/."
+                    f"(expects {SCHEMA_VERSION}). Upgrade the tool, or delete the "
+                    "index database (index.sqlite in the cache directory — "
+                    "`knoten config path` shows it) and re-run `knoten sync`."
                 )
             elif current < SCHEMA_VERSION:
                 self._migrate_from(current)
@@ -422,6 +444,11 @@ class Store:
                     "ALTER TABLE trashed_notes "
                     "ADD COLUMN pending_remote_delete INTEGER NOT NULL DEFAULT 0"
                 )
+        if from_version < 12:
+            # v11 -> v12: index on wikilinks(target_title). The CREATE INDEX
+            # IF NOT EXISTS in _SCHEMA already fired via executescript, so
+            # this step only needs to bump the version.
+            pass
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -631,8 +658,20 @@ class Store:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM notes WHERE restricted = 1").fetchone()
         return int(row["c"]) if row else 0
 
-    def delete_note(self, note_id: str) -> None:
+    def delete_note(self, note_id: str, *, only_if_path: str | None = None) -> None:
+        """Hard-delete a note row and its FTS entries.
+
+        `only_if_path` makes the delete conditional: the row is only removed
+        if its current `path` still equals the given value, re-checked inside
+        the transaction. The LocalBackend stat walk uses this so a row whose
+        path changed between the walk's snapshot and the delete (e.g. a
+        concurrent rename) survives instead of being dropped.
+        """
         with self.transaction() as conn:
+            if only_if_path is not None:
+                row = conn.execute("SELECT path FROM notes WHERE id = ?", (note_id,)).fetchone()
+                if row is None or row["path"] != only_if_path:
+                    return
             conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
             conn.execute("DELETE FROM notes_fts_trigram WHERE note_id = ?", (note_id,))
             conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
@@ -1071,9 +1110,12 @@ class Store:
         return dict(row) if row else None
 
     def find_by_filename_prefix(self, prefix: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        # Escape LIKE wildcards so a prefix containing `%` or `_` matches
+        # those characters literally instead of matching everything.
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = self.conn.execute(
-            "SELECT * FROM notes WHERE filename LIKE ? LIMIT ?",
-            (f"{prefix}%", limit),
+            "SELECT * FROM notes WHERE filename LIKE ? ESCAPE '\\' LIMIT ?",
+            (f"{escaped}%", limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

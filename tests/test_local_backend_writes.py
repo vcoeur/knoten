@@ -136,8 +136,10 @@ def test_delete_note_moves_file_to_trash(tmp_settings: Settings) -> None:
         backend.delete_note(seed.id)
 
     assert not mirror.exists()
-    trash_file = tmp_settings.paths.vault_dir / ".trash" / "note" / "! Doomed.md"
-    assert trash_file.exists()
+    # Trash names embed the note id so same-filename deletions never collide.
+    trash_files = list((tmp_settings.paths.vault_dir / ".trash" / "note").glob("*.md"))
+    assert len(trash_files) == 1
+    assert trash_files[0].name == f"! Doomed.{seed.id}.md"
 
     with LocalBackend(tmp_settings) as backend, pytest.raises(NotFoundError):
         backend.read_note(seed.id)
@@ -159,7 +161,47 @@ def test_delete_then_restore_round_trip(tmp_settings: Settings) -> None:
     assert "keepsake" in refreshed.body
     mirror = tmp_settings.paths.vault_dir / "note" / "! Recoverable.md"
     assert mirror.exists()
-    assert not (tmp_settings.paths.vault_dir / ".trash" / "note" / "! Recoverable.md").exists()
+    assert not list((tmp_settings.paths.vault_dir / ".trash").rglob("*.md"))
+
+
+def test_delete_same_filename_twice_preserves_both_bodies(tmp_settings: Settings) -> None:
+    """Two soft-deleted notes that shared a filename keep distinct trash copies (C2).
+
+    The old trash path derived solely from the vault path, so the second
+    delete unlinked the first note's trash file — its only surviving body —
+    and both `trashed_notes` rows pointed at one file.
+    """
+    with LocalBackend(tmp_settings) as backend:
+        first_id = backend.create_note(
+            NoteDraft(filename="! Precious", body="IRREPLACEABLE FIRST BODY")
+        )
+        backend.delete_note(first_id)
+        second_id = backend.create_note(NoteDraft(filename="! Precious", body="second body"))
+        backend.delete_note(second_id)
+
+        trash_files = list((tmp_settings.paths.vault_dir / ".trash").rglob("*.md"))
+        assert len(trash_files) == 2
+
+        backend.restore_note(first_id)
+        assert "IRREPLACEABLE FIRST BODY" in backend.read_note(first_id).body
+
+        # Free the filename so the second body can come back too.
+        backend.update_note(first_id, NotePatch(filename="! Precious kept"))
+        backend.restore_note(second_id)
+        assert "second body" in backend.read_note(second_id).body
+
+
+def test_create_note_refuses_unindexed_file_at_destination(tmp_settings: Settings) -> None:
+    """`create` must not clobber an on-disk file the store does not know (M7)."""
+    destination = tmp_settings.paths.vault_dir / "note" / "! Handdropped.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("PRECIOUS HAND-DROPPED BYTES", encoding="utf-8")
+
+    with LocalBackend(tmp_settings) as backend:
+        with pytest.raises(UserError, match="not in the index"):
+            backend.create_note(NoteDraft(filename="! Handdropped", body="new body"))
+
+    assert destination.read_text(encoding="utf-8") == "PRECIOUS HAND-DROPPED BYTES"
 
 
 def test_restore_raises_when_filename_collides(tmp_settings: Settings) -> None:

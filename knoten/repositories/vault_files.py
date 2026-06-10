@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from knoten.models import Note, NoteSummary
+from knoten.repositories.errors import UserError
 
 # Mirrors the remote backend's export layout. The `docs/api.md` file on
 # upstream backends has sometimes shown underscore-prefixed names, but the
@@ -134,11 +135,28 @@ def _sanitise_frontmatter(note: Note) -> dict[str, Any]:
     return out
 
 
+def _reject_control_chars(key: str, value: Any) -> None:
+    """Refuse frontmatter values containing control characters.
+
+    A newline (or other C0 control) in a value would be emitted raw into the
+    single-line YAML scalar, breaking the file — and a crafted value
+    containing `\\n---\\n` would shift the frontmatter fence that
+    `strip_frontmatter` cuts at, leaking frontmatter into the body.
+    """
+    text = str(value)
+    if any(ch in "\n\r" or (ord(ch) < 0x20 and ch != "\t") for ch in text):
+        raise UserError(
+            f"Frontmatter value for {key!r} contains a control character "
+            "(newline?) — frontmatter values must be single-line."
+        )
+
+
 def _yaml_line(key: str, value: Any) -> str:
     """Emit a single YAML key: value line.
 
     Kept intentionally simple — the export format uses only scalars and flat
-    lists, and we match that. Anything more exotic is JSON-encoded.
+    lists, and we match that. Anything more exotic is JSON-encoded. Values
+    containing control characters are rejected with a UserError.
     """
     if value is None:
         return f"{key}: "
@@ -149,8 +167,11 @@ def _yaml_line(key: str, value: Any) -> str:
     if isinstance(value, list):
         if not value:
             return f"{key}: []"
+        for item in value:
+            _reject_control_chars(key, item)
         rendered_items = ", ".join(_yaml_inline(item) for item in value)
         return f"{key}: [{rendered_items}]"
+    _reject_control_chars(key, value)
     return f"{key}: {_yaml_inline(value)}"
 
 

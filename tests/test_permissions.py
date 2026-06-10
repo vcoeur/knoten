@@ -227,7 +227,7 @@ def test_permission_filter_rejects_unknown_level(store: Store) -> None:
 
 
 def test_schema_version_is_current() -> None:
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def _seed_v1_database(path: Path) -> None:

@@ -1,7 +1,11 @@
 """fcntl-based advisory lock used by sync and write commands.
 
 Held for the duration of any operation that mutates the local store. Read
-commands do not take the lock — SQLite WAL mode handles read concurrency.
+commands do not take the lock, but note they are not strictly read-only in
+local mode: the LocalBackend stat walk they trigger writes drifted bodies
+and hard-deletes rows for missing files. SQLite WAL plus the walk's
+conditional delete (`DELETE … only_if_path`) keep that safe without
+serialising reads behind the lock.
 """
 
 from __future__ import annotations

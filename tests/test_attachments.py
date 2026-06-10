@@ -145,6 +145,36 @@ def test_download_attachment_streams_to_disk(
     assert result.filename == "scan.pdf"
 
 
+def test_download_attachment_midstream_failure_leaves_no_partial_file(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    """A connection drop mid-stream must not leave a truncated file at the
+    destination — the download streams to a sibling tmp file and only
+    `os.replace`s it into place after the stream completes."""
+    import httpx
+    from pytest_httpx import IteratorStream
+
+    from knoten.repositories.errors import NetworkError
+
+    def _broken_stream():
+        yield b"PARTIAL-"
+        raise httpx.ReadError("connection dropped mid-stream")
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        stream=IteratorStream(_broken_stream()),
+        headers={"content-type": "application/pdf"},
+    )
+
+    dest = tmp_path / "out.pdf"
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(NetworkError):
+        backend.download_attachment(STORAGE_KEY, dest)
+
+    assert not dest.exists(), "no partial file may remain at the destination"
+    assert not (tmp_path / "out.pdf.tmp").exists(), "tmp file must be cleaned up"
+
+
 def test_download_attachment_404_raises_not_found(
     tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
 ) -> None:
