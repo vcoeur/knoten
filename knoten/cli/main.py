@@ -1789,7 +1789,7 @@ def _run_edit_batch(
             for index, item in enumerate(items):
                 try:
                     kwargs = _patch_from_edit_batch_item(index, item)
-                    note = edit_note_remote(
+                    result = edit_note_remote(
                         backend=backend,
                         store=store,
                         vault_dir=settings.paths.vault_dir,
@@ -1805,7 +1805,13 @@ def _run_edit_batch(
                         force=force,
                     )
                     results.append(
-                        {"index": index, "ok": True, "id": note.id, "filename": note.filename}
+                        {
+                            "index": index,
+                            "ok": True,
+                            "id": result.note.id,
+                            "filename": result.note.filename,
+                            "restricted_affected": len(result.restricted_affected),
+                        }
                     )
                 except Exception as exc:
                     code, kind = _classify_error(exc)
@@ -2063,7 +2069,7 @@ def cmd_edit(
         _require_token(settings, for_write="edit")
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
-                note = edit_note_remote(
+                result = edit_note_remote(
                     backend=backend,
                     store=store,
                     vault_dir=settings.paths.vault_dir,
@@ -2078,7 +2084,10 @@ def cmd_edit(
                     remove_tags=list(remove_tag),
                     force=force,
                 )
-            payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
+            payload = _write_response(store, settings.paths.vault_dir, result.note.id, fields)
+            # Additive field: how many rename-cascade targets the token could
+            # not READ and were mirrored as placeholders. 0 on the common path.
+            payload["restricted_affected"] = len(result.restricted_affected)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except typer.Exit:
         raise

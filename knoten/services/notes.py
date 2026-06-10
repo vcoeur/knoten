@@ -17,6 +17,7 @@ from knoten.models import Note, NoteSummary, SearchHit, permission_at_least
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
 from knoten.repositories.errors import (
     AmbiguousTargetError,
+    NoteForbiddenError,
     NotFoundError,
     UserError,
 )
@@ -691,6 +692,41 @@ def create_note_remote(
     return fresh
 
 
+@dataclass(frozen=True)
+class EditNoteResult:
+    """Outcome of `edit_note_remote`.
+
+    `note` is the refreshed primary note. `restricted_affected` holds the ids
+    of rename-cascade targets the server rewrote but this token cannot READ
+    (per-note 404 → `NoteForbiddenError`); each is mirrored as a metadata-only
+    placeholder instead of a full note. Empty tuple on the common path.
+    """
+
+    note: Note
+    restricted_affected: tuple[str, ...] = ()
+
+
+def summary_from_row(row: dict[str, Any]) -> NoteSummary:
+    """Reconstruct a `NoteSummary` from a stored `notes` row (a `find_by_id` dict).
+
+    Lets a placeholder ingest reuse a note's already-mirrored metadata instead
+    of refetching a summary the server would refuse — the rename-cascade guard
+    here and reconcile's restricted-placeholder rebuild share this mapping.
+    """
+    return NoteSummary(
+        id=row["id"],
+        filename=row["filename"],
+        title=row["title"],
+        family=row["family"],
+        kind=row["kind"],
+        source=row["source"],
+        tags=(),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        permissions=row.get("permissions") or "ALL",
+    )
+
+
 def edit_note_remote(
     *,
     backend: Backend,
@@ -706,7 +742,7 @@ def edit_note_remote(
     remove_tags: list[str],
     set_frontmatter_json: dict[str, Any] | None = None,
     force: bool = False,
-) -> Note:
+) -> EditNoteResult:
     row = resolve_target(store, target)
     _assert_permission(row, required_level="WRITE", operation="edit", force=force)
     note_id = row["id"]
@@ -753,13 +789,35 @@ def edit_note_remote(
     # Rename cascade: when the server rewrites [[old]] → [[new]] in other
     # notes' bodies, it returns them in `affected_notes`. Re-fetch each and
     # re-ingest so the local mirror converges without a full sync.
+    restricted_affected: list[str] = []
     for affected_id in update_result.affected_notes:
         if affected_id == note_id:
             continue
-        affected_note = backend.read_note(affected_id)
+        try:
+            affected_note = backend.read_note(affected_id)
+        except NoteForbiddenError:
+            # The server's cascade rewrites every linking note regardless of
+            # this token's per-note permissions, so `affected_notes` can name
+            # ids the token cannot READ (permission NONE/LIST) — the server
+            # returns a per-note 404. The rename already succeeded server-side,
+            # so degrade to a metadata-only placeholder (the same branch the
+            # sync pull pass uses) and keep going instead of failing the whole
+            # operation. The placeholder needs the note's metadata, which we
+            # only have when the note is already mirrored locally; otherwise we
+            # cannot write a file, so just record the id and move on.
+            existing = store.find_by_id(affected_id)
+            if existing is not None:
+                ingest_placeholder(
+                    summary_from_row(existing),
+                    store=store,
+                    vault_dir=vault_dir,
+                    previous_path=existing["path"],
+                )
+            restricted_affected.append(affected_id)
+            continue
         ingest_note(affected_note, store=store, vault_dir=vault_dir, synced=synced)
 
-    return fresh
+    return EditNoteResult(note=fresh, restricted_affected=tuple(restricted_affected))
 
 
 def delete_note_remote(

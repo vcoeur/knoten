@@ -384,6 +384,118 @@ def test_rename_refreshes_affected_notes(cli_env, httpx_mock: HTTPXMock) -> None
     assert "[[! Seed]]" not in refreshed_body
 
 
+def test_rename_with_forbidden_affected_note_succeeds_and_placeholders_it(
+    cli_env, httpx_mock: HTTPXMock
+) -> None:
+    """A rename whose `affectedNotes` names an id the token cannot READ must
+    still succeed: the readable affected note is mirrored, the forbidden one
+    is downgraded to a placeholder (not a hard failure), the loop continues,
+    and the operation reports the restricted count.
+
+    Regression: the server's cascade rewrites every linking note regardless
+    of this token's per-note permissions, so a per-note 404 on the refresh
+    must not turn a successful rename into an exit-1 failure.
+    """
+    _seed_permanent(cli_env)
+    readable_id = "33333333-3333-3333-3333-333333333333"
+    forbidden_id = "55555555-5555-5555-5555-555555555555"
+
+    def _link_note(note_id: str, filename: str, title: str) -> Note:
+        return Note(
+            id=note_id,
+            filename=filename,
+            title=title,
+            family="fleeting",
+            kind="fleeting",
+            source=None,
+            body="See [[! Seed]] for context.",
+            frontmatter={},
+            tags=(),
+            wikilinks=(),
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+            permissions="ALL",
+        )
+
+    # Both affected notes start as full mirror rows (a prior sync ingested
+    # them); the rename later cascades into both.
+    with Store(cli_env.paths.index_path) as store:
+        readable_path = ingest_note(
+            _link_note(readable_id, "- Readable", "Readable"),
+            store=store,
+            vault_dir=cli_env.paths.vault_dir,
+        )
+        forbidden_path = ingest_note(
+            _link_note(forbidden_id, "- Forbidden", "Forbidden"),
+            store=store,
+            vault_dir=cli_env.paths.vault_dir,
+        )
+
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{NOTE_ID}",
+        method="PUT",
+        json={
+            "id": NOTE_ID,
+            "affectedNotes": [
+                {"id": readable_id, "filename": "- Readable"},
+                {"id": forbidden_id, "filename": "- Forbidden"},
+            ],
+        },
+    )
+    # Refresh the renamed note.
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{NOTE_ID}",
+        method="GET",
+        json=_full_note_payload(filename="! Seed renamed", title="Seed renamed"),
+    )
+    # The readable affected note refreshes with its rewritten body.
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{readable_id}",
+        method="GET",
+        json={
+            "id": readable_id,
+            "filename": "- Readable",
+            "title": "Readable",
+            "family": "fleeting",
+            "kind": "fleeting",
+            "source": None,
+            "body": "See [[! Seed renamed]] for context.",
+            "frontmatter": {},
+            "tags": [],
+            "linkMap": {},
+            "permissions": "ALL",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-03T00:00:00Z",
+        },
+    )
+    # The forbidden affected note returns a per-note 404 → NoteForbiddenError.
+    httpx_mock.add_response(
+        url=f"{API_URL}/api/notes/{forbidden_id}",
+        method="GET",
+        status_code=404,
+        json={"error": "NOT_FOUND"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["rename", NOTE_ID, "! Seed renamed", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)
+    assert payload["restricted_affected"] == 1
+
+    # Readable affected note: mirrored with the rewritten wikilink.
+    readable_body = (cli_env.paths.vault_dir / readable_path).read_text()
+    assert "[[! Seed renamed]]" in readable_body
+
+    # Forbidden affected note: downgraded to a placeholder row + file.
+    with Store(cli_env.paths.index_path) as store:
+        row = store.find_by_id(forbidden_id)
+    assert row is not None
+    assert row["restricted"] == 1
+    placeholder_body = (cli_env.paths.vault_dir / forbidden_path).read_text()
+    assert "Body not fetchable" in placeholder_body
+
+
 # ---- upload -------------------------------------------------------------
 
 
