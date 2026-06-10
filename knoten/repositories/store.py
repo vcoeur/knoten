@@ -1279,6 +1279,7 @@ class Store:
         family: str | None = None,
         kind: str | None = None,
         tag: str | None = None,
+        exclude_tag: str | None = None,
         source: str | None = None,
         min_permission: str | None = None,
         max_permission: str | None = None,
@@ -1308,6 +1309,14 @@ class Store:
                 "EXISTS (SELECT 1 FROM tags t WHERE t.note_id = n.id AND t.tag = ?)"
             )
             params.append(tag)
+        if exclude_tag:
+            # SQL-side exclusion so pagination and `total` stay correct —
+            # filtering a returned page in Python would let excluded notes
+            # consume page slots and make `total` page-local.
+            where_clauses.append(
+                "NOT EXISTS (SELECT 1 FROM tags tx WHERE tx.note_id = n.id AND tx.tag = ?)"
+            )
+            params.append(exclude_tag)
         _append_permission_filter(where_clauses, params, min_permission, max_permission)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""

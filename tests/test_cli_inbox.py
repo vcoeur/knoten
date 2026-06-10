@@ -137,7 +137,69 @@ def test_inbox_list_shows_inbox_and_excludes_promoted(local_env) -> None:
     titles = {n["filename"] for n in payload["notes"]}
     assert any("still-in-inbox" in t for t in titles)
     assert not any("to-be-promoted" in t for t in titles)
-    assert payload["total"] == len(payload["notes"])
+    assert payload["total"] == 1
+
+
+def _set_created_at(note_id: str, created_at: str) -> None:
+    """Force a deterministic created_at directly in the live sqlite mirror."""
+    import sqlite3
+
+    from knoten.paths import resolve
+
+    paths = resolve()
+    with sqlite3.connect(paths.index_path) as conn:
+        conn.execute("UPDATE notes SET created_at = ? WHERE id = ?", (created_at, note_id))
+
+
+def test_inbox_list_promoted_notes_do_not_consume_page_slots(local_env) -> None:
+    """Promoted exclusion happens in SQL — pagination and `total` stay global.
+
+    One pending capture plus three promoted ones (promoted keeps the `inbox`
+    tag, as the real promotion flow does). With `--limit 2`, post-pagination
+    filtering would fill the page with promoted notes and report a page-local
+    total; the pending note must still appear and `total` must be 1.
+    """
+    code, out = _invoke(["inbox", "add", "--json", "--", "oldest pending capture"])
+    assert code == 0, out
+    pending_id = json.loads(out)["fleeting"]["id"]
+    _set_created_at(pending_id, "2020-01-01T00:00:00Z")
+
+    for index in range(3):
+        code, out = _invoke(["inbox", "add", "--json", "--", f"promoted capture {index}"])
+        assert code == 0, out
+        promoted_id = json.loads(out)["fleeting"]["id"]
+        code, out = _invoke(["edit", "--add-tag", "inbox-promoted", "--json", "--", promoted_id])
+        assert code == 0, out
+        _set_created_at(promoted_id, f"2021-01-0{index + 1}T00:00:00Z")
+
+    code, out = _invoke(["inbox", "list", "--limit", "2", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["total"] == 1
+    assert [n["id"] for n in payload["notes"]] == [pending_id]
+
+
+def test_inbox_add_url_fetches_title_before_lock(local_env, monkeypatch) -> None:
+    """The URL title fetch must run before the vault lock is acquired.
+
+    The stub tries to take the advisory lock itself — if `inbox add` were
+    already holding it (the old behaviour), this raises LockTimeoutError and
+    the command fails.
+    """
+    from knoten.cli import inbox
+    from knoten.paths import resolve
+    from knoten.repositories.lock import acquire_lock
+
+    def _fetch_probe(url: str, **_: object) -> str:
+        with acquire_lock(resolve().lock_file, timeout=0.5):
+            pass
+        return "Probe Title"
+
+    monkeypatch.setattr(inbox, "_fetch_url_title", _fetch_probe)
+    code, out = _invoke(["inbox", "add", "--json", "--", "https://example.com/probe"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["title"] == "Probe Title"
 
 
 def test_inbox_add_text_rejects_empty(local_env) -> None:

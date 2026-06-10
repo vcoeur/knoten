@@ -51,7 +51,7 @@ _SKIP_TOP_LEVEL = frozenset({".trash", ".attachments"})
 class LocalBackend(Backend):
     """`Backend` backed by a markdown vault + local SQLite index."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, store: Store | None = None) -> None:
         if not settings.paths.vault_dir.exists():
             raise UserError(
                 f"Vault directory does not exist: {settings.paths.vault_dir} — "
@@ -60,8 +60,16 @@ class LocalBackend(Backend):
             )
         self._settings = settings
         self._vault_dir = settings.paths.vault_dir
-        self._store = Store(settings.paths.index_path)
-        self._store.open()
+        # An injected store lets a caller that already holds an open Store
+        # (e.g. a CLI read command) run the stat walk on the same SQLite
+        # connection instead of opening a second, concurrently-writing one.
+        if store is not None:
+            self._store = store
+            self._owns_store = False
+        else:
+            self._store = Store(settings.paths.index_path)
+            self._store.open()
+            self._owns_store = True
         self._reindex_done: bool = False
 
     def __enter__(self) -> LocalBackend:
@@ -71,7 +79,12 @@ class LocalBackend(Backend):
         self.close()
 
     def close(self) -> None:
-        self._store.close()
+        if self._owns_store:
+            self._store.close()
+
+    def refresh_index(self) -> None:
+        """Run the mtime-gated stat walk now (public entry for read commands)."""
+        self._refresh_index_if_stale()
 
     def _refresh_index_if_stale(self) -> None:
         """Stat-walk the vault and refresh drifted rows in the store.

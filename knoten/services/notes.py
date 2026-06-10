@@ -424,7 +424,14 @@ def download_file_remote(
             "the link to the uploaded blob is missing"
         )
 
-    chosen = destination if destination is not None else Path.cwd() / row["filename"]
+    # -o/--output is the user's explicit choice and is honoured as-is; the
+    # DEFAULT destination is derived from the server-controlled filename and
+    # must be confined (a hostile remote could otherwise name a note
+    # "/home/user/.bashrc" and overwrite arbitrary files on download).
+    if destination is not None:
+        chosen = destination
+    else:
+        chosen = _default_download_destination(row["filename"])
     download = backend.download_attachment(storage_key, chosen)
     return {
         "path": download.path,
@@ -434,6 +441,30 @@ def download_file_remote(
         "filename": row["filename"],
         "storage_key": storage_key,
     }
+
+
+def _default_download_destination(server_filename: str) -> Path:
+    """Derive a cwd-confined default download path from a note's filename.
+
+    The note `filename` field is server-controlled, so only its basename is
+    used. Rejects basenames that are empty, contain NUL or path separators,
+    or are `.`/`..`, and requires the resolved destination to stay under the
+    current working directory.
+    """
+    name = Path(server_filename).name
+    if not name or "\x00" in name or "/" in name or "\\" in name or name in {".", ".."}:
+        raise UserError(
+            f"Refusing to derive a download destination from note filename "
+            f"{server_filename!r} — pass -o/--output to choose one explicitly"
+        )
+    cwd = Path.cwd().resolve()
+    chosen = (cwd / name).resolve()
+    if not chosen.is_relative_to(cwd):
+        raise UserError(
+            f"Default download destination for note filename {server_filename!r} "
+            f"escapes the current directory — pass -o/--output to choose one explicitly"
+        )
+    return chosen
 
 
 def _is_local_backend(backend: Backend) -> bool:

@@ -170,7 +170,7 @@ knoten rename "! New idea" "! Core insight" --dry-run --json
 
 ### `knoten delete` / `knoten restore`
 
-`delete` moves the file to `<vault>/.trash/` — reversible. `rm foo.md` in a shell is a permanent delete (no trash copy).
+`delete` moves the file to `<vault>/.trash/` — reversible. `rm foo.md` in a shell is a permanent delete (no trash copy). Declining the interactive confirmation prompt exits 0 (a successful no-op, not an error).
 
 ```bash
 knoten delete "- Scratch" --json
@@ -185,6 +185,8 @@ Attachment operations. Attachments live under `<vault>/.attachments/`.
 knoten upload ./figure.png --for "! Core insight"
 knoten download figure.png
 ```
+
+Without `-o/--output`, `download` writes to the current directory using only the **basename** of the note's filename — the filename is server-controlled, so the default destination is confined to the cwd (unusable basenames are rejected with a `user` error). Pass `-o <path>` to choose any destination explicitly.
 
 ## Sync commands
 

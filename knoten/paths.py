@@ -43,7 +43,12 @@ class Paths:
     lock_file: Path
     tmp_dir: Path
     is_dev: bool
-    has_overrides: bool = False  # a KNOTEN_*_DIR env override is in effect
+    has_overrides: bool = False  # any KNOTEN_*_DIR env override is in effect
+    # Per-directory override flags — migration steps gate on the specific
+    # directory they touch, not on the blanket `has_overrides`.
+    config_dir_overridden: bool = False
+    data_dir_overridden: bool = False
+    cache_dir_overridden: bool = False
 
 
 def _looks_like_installed_location(path: Path) -> bool:
@@ -96,9 +101,10 @@ def resolve() -> Paths:
     data_dir = pick(ENV_DATA_DIR, dev_data, installed_data)
     cache_dir = pick(ENV_CACHE_DIR, dev_cache, installed_cache)
 
-    has_overrides = any(
-        os.environ.get(var) for var in (ENV_CONFIG_DIR, ENV_DATA_DIR, ENV_CACHE_DIR)
-    )
+    config_dir_overridden = bool(os.environ.get(ENV_CONFIG_DIR))
+    data_dir_overridden = bool(os.environ.get(ENV_DATA_DIR))
+    cache_dir_overridden = bool(os.environ.get(ENV_CACHE_DIR))
+    has_overrides = config_dir_overridden or data_dir_overridden or cache_dir_overridden
 
     return Paths(
         config_dir=config_dir,
@@ -112,12 +118,19 @@ def resolve() -> Paths:
         tmp_dir=cache_dir / "tmp",
         is_dev=repo is not None,
         has_overrides=has_overrides,
+        config_dir_overridden=config_dir_overridden,
+        data_dir_overridden=data_dir_overridden,
+        cache_dir_overridden=cache_dir_overridden,
     )
 
 
 def ensure_dirs(paths: Paths) -> None:
-    """Create config, vault, and cache directories if missing. Idempotent."""
-    paths.config_dir.mkdir(parents=True, exist_ok=True)
+    """Create config, vault, and cache directories if missing. Idempotent.
+
+    The config dir holds `.env` (which may carry the API token), so a fresh
+    one is created `0700`; an existing dir keeps its permissions.
+    """
+    paths.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths.vault_dir.mkdir(parents=True, exist_ok=True)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     paths.tmp_dir.mkdir(parents=True, exist_ok=True)

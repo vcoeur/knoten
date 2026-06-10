@@ -30,7 +30,15 @@ ERROR_KINDS: tuple[dict[str, Any], ...] = (
         "meaning": "Missing/unreadable config (e.g. KNOTEN_API_TOKEN unset)",
     },
     {"error": "auth", "code": 2, "meaning": "Token invalid or lacks the required scope"},
-    {"error": "network", "code": 2, "meaning": "Remote unreachable or returned 5xx"},
+    {
+        "error": "network",
+        "code": 2,
+        "meaning": (
+            "Remote unreachable or returned 5xx. Caveat: exit code 2 is also "
+            "what Click uses for a malformed command line (usage error) — those "
+            "print usage text to stderr with no JSON envelope on stdout."
+        ),
+    },
     {"error": "store", "code": 3, "meaning": "Local SQLite / filesystem failure"},
     {"error": "lock_timeout", "code": 5, "meaning": "Another knoten process holds the sync lock"},
     {

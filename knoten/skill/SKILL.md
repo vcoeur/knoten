@@ -41,6 +41,8 @@ On failure, `--json` commands print an envelope to **stdout** (not stderr) and e
 
 Branch on `error`, never on the message. Kinds: `config`, `auth`, `network`, `store`, `lock_timeout`, `permission_denied`, `ambiguous_target`, `not_found`, `user`, `validation`, `knoten`, `unknown`. Some carry extras — `ambiguous_target` → `candidates: [{id, filename}]`; `permission_denied` → `note_id, current_level, required_level, operation`; `validation` → `issues: [{key, expected, actual}]`.
 
+Caveat: a malformed command line (Click usage error) also exits 2 — the same code as `network`/`auth` — but prints usage text to stderr with **no JSON envelope** on stdout. On exit 2, check stdout parses as JSON before treating it as a network failure.
+
 ## 4 — Discover the contract: `knoten schema`
 
 Before writing into an unfamiliar vault, dump the machine-readable contract once:

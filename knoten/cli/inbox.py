@@ -211,6 +211,9 @@ def cmd_add(
         from knoten.repositories.store import Store
         from knoten.services.notes import create_note_remote, upload_file_remote
 
+        # Network fetch happens before the vault lock — a slow page must not
+        # block every concurrent mutation for up to the fetch timeout.
+        url_title = _fetch_url_title(argument) if kind == "url" else None
         all_tags = [INBOX_TAG, *tag]
         with (
             acquire_lock(settings.paths.lock_file),
@@ -231,6 +234,7 @@ def cmd_add(
             elif kind == "url":
                 payload = _add_url(
                     argument,
+                    title=url_title,
                     note=note,
                     tags=all_tags,
                     backend=backend,
@@ -319,6 +323,7 @@ def _add_file(
 def _add_url(
     argument: str,
     *,
+    title: str | None,
     note: str | None,
     tags: list[str],
     backend: Any,
@@ -326,7 +331,6 @@ def _add_url(
     settings: Any,
     create_note_remote: Any,
 ) -> dict[str, Any]:
-    title = _fetch_url_title(argument)
     slug = _slugify(title or "", fallback="link")
     fleeting_filename = compose_inbox_fleeting_filename(slug)
     primary = f"[{title}]({argument})" if title else argument
@@ -439,6 +443,8 @@ def cmd_append(
             upload_file_remote,
         )
 
+        # Network fetch happens before the vault lock (see cmd_add).
+        url_title = _fetch_url_title(argument) if kind == "url" else None
         with (
             acquire_lock(settings.paths.lock_file),
             Store(settings.paths.index_path) as store,
@@ -448,6 +454,7 @@ def cmd_append(
             payload = _do_append(
                 argument,
                 kind=kind,
+                url_title=url_title,
                 note=note,
                 target_row=target_row,
                 backend=backend,
@@ -470,6 +477,7 @@ def _do_append(
     argument: str,
     *,
     kind: str,
+    url_title: str | None,
     note: str | None,
     target_row: dict[str, Any],
     backend: Any,
@@ -497,8 +505,7 @@ def _do_append(
         )
         primary = f"[[{file_filename}]]"
     elif kind == "url":
-        title = _fetch_url_title(argument)
-        primary = f"[{title}]({argument})" if title else argument
+        primary = f"[{url_title}]({argument})" if url_title else argument
         file_note = None
         upload_meta = None
     else:
@@ -549,20 +556,22 @@ def cmd_list(
         from knoten.services.notes import list_summaries_to_dicts
 
         with Store(settings.paths.index_path) as store:
-            summaries, _total = store.list_notes(
+            # Promoted notes are excluded in SQL so they never consume page
+            # slots and `total` is the global pending count, not page-local.
+            summaries, total = store.list_notes(
                 tag=INBOX_TAG,
+                exclude_tag=PROMOTED_TAG,
                 sort="created",
                 limit=limit,
                 offset=offset,
             )
-            kept = [s for s in summaries if PROMOTED_TAG not in s.tags]
             notes = list_summaries_to_dicts(
-                kept,
+                summaries,
                 vault_dir=settings.paths.vault_dir,
                 store=store,
             )
         payload = {
-            "total": len(kept),
+            "total": total,
             "limit": limit,
             "offset": offset,
             "notes": notes,
