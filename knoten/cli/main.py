@@ -7,7 +7,8 @@ render the result via `knoten.cli.output`.
 Exit codes (mapped from exception types in `app.repositories.errors`):
     0 success
     1 user error
-    2 network error
+    2 network error, or malformed command line (Click usage error — emitted
+      by Click itself, before any command runs, with no JSON envelope)
     3 local store error
     4 config error
     5 lock timeout
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC
 from enum import StrEnum
@@ -198,6 +200,8 @@ def cmd_schema(
                 + ", ".join(f"{e['error']}({e['code']})" for e in payload["errors"])
             )
             console.print("[dim]pass --json for the full contract[/dim]")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -256,6 +260,20 @@ def _build_backend(settings: Settings) -> Backend:
     return RemoteBackend(settings)
 
 
+def _local_stat_walk(settings: Settings, store: Store) -> None:
+    """Run the LocalBackend stat walk before a local-mode read query.
+
+    Read commands query the Store directly (no backend), so they must
+    trigger the walk themselves to honour the documented contract that
+    every invocation picks up external edits. Reuses the command's own
+    open Store — a second connection would write concurrently with it.
+    No-op in remote mode (the mirror only changes via sync/mutations).
+    """
+    if settings.effective_mode != "local":
+        return
+    LocalBackend(settings, store=store).refresh_index()
+
+
 def _classify_error(exc: Exception) -> tuple[int, str]:
     """Map an exception to (exit_code, error_kind).
 
@@ -310,9 +328,8 @@ def _fail(exc: Exception, *, mode: OutputMode | None = None) -> None:
 
     When `mode.json` is true, emits a structured error envelope to stdout
     so Claude can parse it with jq. Otherwise writes a plain-text line to
-    stderr, preserving the existing UX for humans on a TTY. Commands that
-    have no `--json` flag (`path`, `reset`) pass `mode=None` and always
-    go through the stderr path.
+    stderr, preserving the existing UX for humans on a TTY. `mode=None`
+    always goes through the stderr path.
     """
     code, kind = _classify_error(exc)
     if mode is not None and mode.json:
@@ -339,15 +356,27 @@ def cmd_sync(
         "--verify",
         help="Re-hash every local file and re-fetch any that have drifted from the recorded hash",
     ),
+    force_delete: bool = typer.Option(
+        False,
+        "--force-delete",
+        help=(
+            "Override the mass-delete circuit breaker (delete detection refuses to "
+            "remove more than 20% of local synced notes without this flag)"
+        ),
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON to stdout"),
 ) -> None:
     """Pull new/changed notes from the configured remote backend into the local mirror.
 
     Every sync (incremental or `--full`) always:
 
-      1. Fetches new/changed notes via pagination.
-      2. Runs delete detection — any note removed on the remote is purged locally.
-      3. Reconciles the local mirror — re-fetches any file that is missing
+      1. Pushes local writes and deletes (`synced=0` rows, pending trash deletions).
+      2. Fetches new/changed notes via pagination — never overwriting a
+         note with an unpushed local edit (surfaced as a conflict instead).
+      3. Runs delete detection — any note removed on the remote is purged locally,
+         unless the remote scan was inconsistent or the mass-delete circuit
+         breaker trips (see `--force-delete`).
+      4. Reconciles the local mirror — re-fetches any file that is missing
          on disk, removes orphan files that the store does not know about.
 
     With `--verify`, the reconciliation pass also re-hashes every file and
@@ -361,9 +390,11 @@ def cmd_sync(
         if settings.effective_mode == "local":
             # Local mode has no server to sync from. `knoten sync` becomes
             # a stat-walk reindex: the backend walks the vault on its
-            # first read-path call and catches up external edits.
+            # first read-path call and catches up external edits. The walk
+            # writes to the store, so it runs under the advisory lock like
+            # every other mutating path.
             progress("→ Local mode: running reindex walk (no network)")
-            with _build_backend(settings) as backend:
+            with acquire_lock(settings.paths.lock_file), _build_backend(settings) as backend:
                 page = backend.list_note_summaries(limit=1, offset=0)
             payload = {
                 "mode": "local",
@@ -381,6 +412,7 @@ def cmd_sync(
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
+                        force_delete=force_delete,
                         progress=progress,
                     )
                 else:
@@ -389,10 +421,13 @@ def cmd_sync(
                         store=store,
                         settings=settings,
                         verify_hashes=verify,
+                        force_delete=force_delete,
                         progress=progress,
                     )
             payload = asdict(result)
             render_sync_result(payload, mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -422,11 +457,19 @@ def cmd_verify(
 
     If the FTS5 cardinality check shows drift, run `knoten reindex` to
     rebuild the derived tables from the on-disk files without a network hit.
+
+    In local mode there is no remote to re-fetch from, so only the
+    non-destructive checks run: integrity, cardinality, and the stat-walk
+    that catches up external edits. No orphan sweep, no re-fetch — the
+    vault on disk is the source of truth, not a mirror to repair.
     """
     mode = OutputMode.detect(json_output)
     progress = make_progress_callback(mode)
     try:
         settings = _load()
+        if settings.effective_mode == "local":
+            _verify_local(settings, mode=mode, progress=progress)
+            return
         _require_token(settings)
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             progress("→ SQLite integrity check")
@@ -492,8 +535,66 @@ def cmd_verify(
                 console.print(f"  re-fetched missing: {', '.join(result.missing_ids[:10])}")
             if result.orphan_paths:
                 console.print(f"  orphans removed: {', '.join(result.orphan_paths[:10])}")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+def _verify_local(
+    settings: Settings,
+    *,
+    mode: OutputMode,
+    progress: Callable[[str], None],
+) -> None:
+    """Local-mode `knoten verify` — non-destructive checks only.
+
+    Runs the SQLite integrity check, the FTS5 cardinality check, and the
+    LocalBackend stat-walk (catches up external edits). Deliberately does
+    NOT run `reconcile_local`: its orphan sweep and re-fetch are designed
+    for a mirror with a remote authority — against an authoritative local
+    vault they would delete `.trash/`/`.attachments/` content and rewrite
+    user files.
+    """
+    with acquire_lock(settings.paths.lock_file):
+        progress("→ Local mode: running stat-walk reindex (no orphan sweep, no re-fetch)")
+        with _build_backend(settings) as backend:
+            backend.list_note_summaries(limit=1, offset=0)
+        with Store(settings.paths.index_path) as store:
+            progress("→ SQLite integrity check")
+            integrity = store.integrity_check()
+            progress(f"  {integrity}")
+            progress("→ FTS5 / notes cardinality")
+            cardinality = store.fts_cardinality_check()
+            progress(
+                f"  notes={cardinality['notes_count']} "
+                f"fts={cardinality['fts_count']} "
+                f"consistent={cardinality['consistent']}"
+            )
+    payload = {
+        "mode": "local",
+        "integrity": integrity,
+        "cardinality": cardinality,
+    }
+    if mode.json:
+        emit_json(payload)
+    else:
+        from rich.console import Console
+
+        console = Console()
+        integrity_colour = "green" if integrity == "ok" else "red"
+        consistent_colour = "green" if cardinality["consistent"] else "red"
+        console.print(
+            f"local mode · integrity=[{integrity_colour}]{integrity}[/{integrity_colour}]  "
+            f"fts=[{consistent_colour}]{cardinality['consistent']}[/{consistent_colour}] "
+            f"(notes={cardinality['notes_count']}, "
+            f"fts={cardinality['fts_count']})"
+        )
+        if not cardinality["consistent"]:
+            console.print(
+                "[yellow]FTS5 drift detected — run `knoten reindex` to rebuild "
+                "the derived tables from on-disk files.[/yellow]"
+            )
 
 
 @app.command("reindex")
@@ -551,6 +652,8 @@ def cmd_reindex(
                     f"[yellow]skipped (missing file):[/yellow] "
                     f"{', '.join(result.missing_file_ids[:10])} — run `knoten verify`"
                 )
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -599,6 +702,7 @@ def cmd_search(
             )
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             if fuzzy:
                 hits, total = store.search_fuzzy(
                     query,
@@ -640,6 +744,8 @@ def cmd_search(
         render_search_hits(payload, mode=mode)
         if hint and not mode.json:
             sys.stderr.write(f"hint: {hint}\n")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -681,6 +787,7 @@ def cmd_read(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             payload = read_note_full(
                 store,
                 settings.paths.vault_dir,
@@ -688,6 +795,8 @@ def cmd_read(
                 include_backlinks=not no_backlinks,
             )
         render_note(payload, mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -712,6 +821,8 @@ def cmd_path(
             emit_json({"id": row["id"], "filename": row["filename"], "path": absolute})
         else:
             sys.stdout.write(absolute + "\n")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -742,6 +853,7 @@ def cmd_list(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             summaries, total = store.list_notes(
                 family=family,
                 kind=kind,
@@ -762,6 +874,8 @@ def cmd_list(
         render_summary_list(payload, mode=mode)
         if hint and not mode.json:
             sys.stderr.write(f"hint: {hint}\n")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -778,6 +892,7 @@ def cmd_backlinks(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             row = resolve_target(store, target)
             backlinks = store.backlinks_for_note(row["id"])
             for bl in backlinks:
@@ -794,6 +909,8 @@ def cmd_backlinks(
             },
             mode=mode,
         )
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -807,8 +924,11 @@ def cmd_tags(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             rows = store.tag_counts()
         render_counts({"tags": rows}, "tags", mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -835,8 +955,13 @@ def cmd_graph(
     """
     mode = OutputMode.detect(json_output)
     try:
+        # Validate here — Store.graph_neighbourhood raises a bare ValueError,
+        # which the classifier would surface as error "unknown".
+        if direction not in ("out", "in", "both"):
+            raise UserError(f"--direction must be one of: out, in, both (got {direction!r})")
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             start = resolve_target(store, target)
             nodes, edges, broken = store.graph_neighbourhood(
                 start["id"], depth=depth, direction=direction
@@ -868,6 +993,8 @@ def cmd_graph(
                 )
             if broken:
                 console.print(f"[yellow]broken:[/yellow] {', '.join(broken)}")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -882,8 +1009,11 @@ def cmd_kinds(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             rows = store.kind_counts(family=family)
         render_counts({"kinds": rows}, "kinds", mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -901,6 +1031,7 @@ def cmd_unresolved(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             rows = store.unresolved_wikilinks()
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
@@ -918,6 +1049,8 @@ def cmd_unresolved(
         if limit:
             targets = targets[:limit]
         render_unresolved({"total": len(grouped), "targets": targets}, mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -943,12 +1076,15 @@ def cmd_citekeys(
     try:
         settings = _load()
         with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
             citekeys = store.distinct_citekeys(prefix=prefix)
         if mode.json:
             emit_json({"citekeys": citekeys, "count": len(citekeys), "prefix": prefix})
         else:
             for citekey in citekeys:
                 sys.stdout.write(f"{citekey}\n")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1043,13 +1179,13 @@ def cmd_create(
             return
         if filename is None:
             raise UserError("pass --filename <name> (or --batch <file> for bulk create)")
-        _require_token(settings, for_write="create")
         body_text = _resolve_body(body, body_file)
         if ai:
             if body_text is None:
                 raise UserError("--ai requires --body or --body-file")
             body_text = _wrap_ai(body_text)
         frontmatter = _load_frontmatter_file(frontmatter_file)
+        # Dry-run is local-only — no token needed (matches cmd_reference).
         if dry_run:
             with Store(settings.paths.index_path) as store:
                 preview = preview_create(
@@ -1062,6 +1198,7 @@ def cmd_create(
                 )
             render_dry_run(preview, mode=mode)
             return
+        _require_token(settings, for_write="create")
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = create_note_remote(
@@ -1076,6 +1213,8 @@ def cmd_create(
                 )
             payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1133,7 +1272,6 @@ def _run_create_batch(
     A failed item carries `error`/`code`/`message`; the rest still run.
     """
     items = _read_batch_items(batch_path)
-    _require_token(settings, for_write="create")
     results: list[dict[str, Any]] = []
 
     if dry_run:
@@ -1171,6 +1309,7 @@ def _run_create_batch(
         )
         return
 
+    _require_token(settings, for_write="create")
     with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
         with _build_backend(settings) as backend:
             for index, item in enumerate(items):
@@ -1318,6 +1457,8 @@ def cmd_reference(
                 )
             payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1367,7 +1508,6 @@ def cmd_edit(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
-        _require_token(settings, for_write="edit")
         body_text = _resolve_body(body, body_file)
         if ai:
             if body_text is None:
@@ -1408,6 +1548,7 @@ def cmd_edit(
                 )
             render_dry_run(preview, mode=mode)
             return
+        _require_token(settings, for_write="edit")
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note = edit_note_remote(
@@ -1427,6 +1568,8 @@ def cmd_edit(
                 )
             payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1501,6 +1644,8 @@ def cmd_append(
                 )
             payload = _write_response(store, settings.paths.vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1526,8 +1671,10 @@ def cmd_delete(
         if not mode.json and not yes:
             confirmed = typer.confirm(f"Really delete '{target}'?", default=False)
             if not confirmed:
+                # Plain return — `raise typer.Exit(0)` would be caught by the
+                # generic handler below and re-classified as an error (exit 1).
                 log("aborted", mode=mode)
-                raise typer.Exit(0)
+                return
         with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
             with _build_backend(settings) as backend:
                 note_id = delete_note_remote(
@@ -1541,6 +1688,8 @@ def cmd_delete(
             emit_json({"deleted_id": note_id})
         else:
             log(f"deleted {note_id}", mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1570,6 +1719,8 @@ def cmd_restore(
                 )
             payload = _write_response(store, vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1703,6 +1854,8 @@ def cmd_upload(
                 f"uploaded {upload.get('storageKey')} ({upload.get('sizeBytes')} bytes)",
                 mode=mode,
             )
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1714,7 +1867,8 @@ def cmd_download(
         None,
         "--output",
         "-o",
-        help="Destination path. Defaults to ./<note filename> in the current directory.",
+        help="Destination path. Defaults to the note filename's basename in the "
+        "current directory (the default never escapes the cwd).",
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -1751,6 +1905,8 @@ def cmd_download(
                 f"downloaded {result['bytes_written']} bytes → {payload['path']}",
                 mode=mode,
             )
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1791,6 +1947,8 @@ def cmd_status(
             else 0,
         }
         render_status(payload, mode=mode)
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 
@@ -1844,6 +2002,8 @@ def cmd_reset(
                     "vault_removed": vault_removed,
                 }
             )
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, mode=mode)
 

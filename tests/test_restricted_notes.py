@@ -50,7 +50,7 @@ def _note_payload(note_id: str, filename: str) -> dict:
     }
 
 
-def test_http_client_raises_note_forbidden_on_404(
+def test_remote_backend_raises_note_forbidden_on_404(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:
     note_id = "11111111-1111-1111-1111-111111111111"

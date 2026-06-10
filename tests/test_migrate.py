@@ -10,7 +10,14 @@ from knoten.migrate import migrate_legacy_layout
 from knoten.paths import Paths
 
 
-def _paths_under(root: Path, *, is_dev: bool = False, has_overrides: bool = False) -> Paths:
+def _paths_under(
+    root: Path,
+    *,
+    is_dev: bool = False,
+    config_dir_overridden: bool = False,
+    data_dir_overridden: bool = False,
+    cache_dir_overridden: bool = False,
+) -> Paths:
     return Paths(
         config_dir=root / "new_cfg",
         data_dir=root / "new_data",
@@ -22,7 +29,10 @@ def _paths_under(root: Path, *, is_dev: bool = False, has_overrides: bool = Fals
         lock_file=root / "new_cache" / "sync.lock",
         tmp_dir=root / "new_cache" / "tmp",
         is_dev=is_dev,
-        has_overrides=has_overrides,
+        has_overrides=config_dir_overridden or data_dir_overridden or cache_dir_overridden,
+        config_dir_overridden=config_dir_overridden,
+        data_dir_overridden=data_dir_overridden,
+        cache_dir_overridden=cache_dir_overridden,
     )
 
 
@@ -191,7 +201,7 @@ def test_env_not_clobbered_under_config_override(fake_home: Path, tmp_path: Path
     deleted. The `.env` adoption is for the default config location only.
     """
     _seed_legacy(fake_home, vault=False, index=False, state=False)  # only .env
-    paths = _paths_under(tmp_path / "new", has_overrides=True)
+    paths = _paths_under(tmp_path / "new", config_dir_overridden=True)
 
     moved = migrate_legacy_layout(paths)
 
@@ -209,7 +219,7 @@ def test_vault_still_migrates_under_override(fake_home: Path, tmp_path: Path) ->
     v0.1 migration target and those legacy sources live under ~/.knoten.
     """
     _seed_legacy(fake_home, index=False, state=False)  # legacy vault + .env
-    paths = _paths_under(tmp_path / "new", has_overrides=True)
+    paths = _paths_under(tmp_path / "new", config_dir_overridden=True, data_dir_overridden=True)
 
     moved = migrate_legacy_layout(paths)
 
@@ -258,3 +268,53 @@ def test_no_crash_when_move_fails(
     assert moved == []
     # Legacy still there.
     assert (fake_home / ".knoten" / "kasten" / "note" / "! First.md").exists()
+
+
+def test_env_adopted_when_only_data_dir_overridden(fake_home: Path, tmp_path: Path) -> None:
+    """A data/cache override (the macOS/Windows norm) must not suppress the
+    `.env` adoption — only a config-dir override does.
+    """
+    _seed_legacy(fake_home, vault=False, index=False, state=False)  # only .env
+    paths = _paths_under(tmp_path / "new", data_dir_overridden=True, cache_dir_overridden=True)
+
+    moved = migrate_legacy_layout(paths)
+
+    assert len(moved) == 1
+    assert "KNOTEN_API_URL=https://notes.example.com" in paths.env_file.read_text()
+
+
+def test_knoten_home_warning_fires_when_legacy_dir_already_gone(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A lingering KNOTEN_HOME warns even when nothing moves this run —
+    the old behaviour warned only on the first-move run, then went silent.
+    """
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path / "long-gone"))
+    paths = _paths_under(tmp_path / "new")
+
+    moved = migrate_legacy_layout(paths)
+
+    assert moved == []
+    assert "KNOTEN_HOME is set but obsolete" in capsys.readouterr().err
+
+
+def test_no_knoten_home_warning_while_legacy_dir_still_present(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """KNOTEN_HOME pointing at a still-existing dir with nothing to move is
+    quiet — migration may be pending (e.g. occupied targets), not stale.
+    """
+    custom_root = tmp_path / "custom_root"
+    custom_vault = custom_root / "kasten"
+    custom_vault.mkdir(parents=True)
+    (custom_vault / "! Keep.md").write_text("body\n", encoding="utf-8")
+    monkeypatch.setenv("KNOTEN_HOME", str(custom_root))
+    paths = _paths_under(tmp_path / "new")
+    # Occupy the target vault so nothing moves this run.
+    paths.vault_dir.mkdir(parents=True)
+    (paths.vault_dir / "existing.md").write_text("existing\n", encoding="utf-8")
+
+    moved = migrate_legacy_layout(paths)
+
+    assert moved == []
+    assert "KNOTEN_HOME" not in capsys.readouterr().err

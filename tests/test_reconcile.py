@@ -257,3 +257,134 @@ def test_reconcile_drops_phantom_row_when_remote_returns_404(
         assert result.missing_refetched == 1
         # The phantom row is gone — no crash, no orphan.
         assert store.find_by_id(note_id) is None
+
+
+def test_reconcile_skips_dot_directories(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    """Orphan cleanup must never descend into dot-directories (C1 regression).
+
+    `.trash/` holds soft-deleted notes and `.attachments/` holds uploaded
+    blobs; neither has a row in `notes`, so the old dot-FILE-only check
+    classified everything under them as orphans and unlinked them.
+    """
+    note_id = "77777777-7777-7777-7777-777777777777"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_note(store, tmp_settings, note_id)
+
+        vault = tmp_settings.paths.vault_dir
+        trashed = vault / ".trash" / "note" / "! Doomed.md"
+        trashed.parent.mkdir(parents=True, exist_ok=True)
+        trashed.write_text("---\ntitle: Doomed\n---\n\nTrashed body.\n", encoding="utf-8")
+        blob = vault / ".attachments" / "deadbeef.pdf"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(b"%PDF-1.4 fake")
+        other_dot_dir = vault / ".obsidian" / "stray.md"
+        other_dot_dir.parent.mkdir(parents=True, exist_ok=True)
+        other_dot_dir.write_text("editor config note\n", encoding="utf-8")
+
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
+
+        assert result.orphans_removed == 0
+        assert trashed.exists()
+        assert blob.exists()
+        assert other_dot_dir.exists()
+
+
+def test_clean_vault_verify_hashes_has_zero_mismatches(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A freshly ingested, untouched vault reports zero hash mismatches (M1).
+
+    Before the strip_frontmatter fix, the recorded hash and the re-read
+    hash disagreed on every note (the strip kept the separator blank line),
+    so `verify --hashes` re-fetched 100% of a clean vault on every run.
+    """
+    note_id = "88888888-8888-8888-8888-888888888888"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_note(store, tmp_settings, note_id, body="Pristine body.")
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(
+                backend=backend, store=store, settings=tmp_settings, verify_hashes=True
+            )
+        assert result.mismatched_refetched == 0
+        assert result.mismatched_ids == []
+        assert result.missing_refetched == 0
+        # No network calls happened: pytest-httpx would fail on an
+        # unregistered request, so reaching this line proves convergence.
+
+
+def test_refetch_preserves_unsynced_flag(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    """A missing-file re-fetch must not flip `synced` 0 → 1 (M2 regression).
+
+    A `synced=0` row is a pending local push; re-ingesting it with the
+    default `synced=True` silently drops it from the push queue and arms
+    the next sync's delete detection against it.
+    """
+    note_id = "99999999-9999-9999-9999-999999999999"
+    with Store(tmp_settings.paths.index_path) as store:
+        note = Note(
+            id=note_id,
+            filename="! Seeded",
+            title="Seeded",
+            family="permanent",
+            kind="permanent",
+            source=None,
+            body="locally edited body",
+            frontmatter={"kind": "permanent"},
+            tags=(),
+            wikilinks=(),
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+        )
+        ingest_note(note, store=store, vault_dir=tmp_settings.paths.vault_dir, synced=False)
+        (tmp_settings.paths.vault_dir / "note" / "! Seeded.md").unlink()
+
+        httpx_mock.add_response(
+            url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+            json=_note_read_payload(note_id),
+        )
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
+
+        assert result.missing_refetched == 1
+        row = store.find_by_id(note_id)
+        assert row is not None
+        assert int(row["synced"]) == 0
+
+
+def test_refetch_rebuilds_restricted_placeholder_without_unflagging(
+    tmp_settings: Settings,
+) -> None:
+    """A restricted placeholder whose file went missing is rebuilt as a
+    placeholder — never flipped into a "real" note (M2 regression).
+
+    With a LocalBackend, `read_note` would happily return the marker body,
+    and the old `_refetch` ingested it as a real note, clearing `restricted`.
+    """
+    from knoten.models import NoteSummary
+    from knoten.repositories.local_backend import LocalBackend
+    from knoten.services.notes import ingest_placeholder
+
+    note_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    summary = NoteSummary(
+        id=note_id,
+        filename="! Restricted",
+        title="Restricted",
+        family="permanent",
+        kind="permanent",
+        source=None,
+        tags=(),
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        relative = ingest_placeholder(summary, store=store, vault_dir=tmp_settings.paths.vault_dir)
+        (tmp_settings.paths.vault_dir / relative).unlink()
+
+    with Store(tmp_settings.paths.index_path) as store, LocalBackend(tmp_settings) as backend:
+        result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
+        assert result.missing_refetched == 1
+        row = store.find_by_id(note_id)
+        assert row is not None
+        assert int(row["restricted"]) == 1
+        assert (tmp_settings.paths.vault_dir / relative).exists()

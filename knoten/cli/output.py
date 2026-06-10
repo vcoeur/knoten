@@ -359,6 +359,14 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if mode.json:
         emit_json(payload)
         return
+    if payload.get("mode") == "local":
+        # Local-mode sync is just a stat-walk reindex — the remote-shaped
+        # tables below would print meaningless zero counts.
+        _console.print(
+            f"[green]sync local complete[/green] · {payload.get('total', 0)} note(s) — "
+            f"{payload.get('message', '')}"
+        )
+        return
     mode_label = payload.get("mode", "incremental")
     fetched = payload.get("fetched", 0)
     deleted = payload.get("deleted", 0)

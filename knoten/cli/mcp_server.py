@@ -122,6 +122,7 @@ def _do_create(
     from knoten.repositories.lock import acquire_lock
 
     settings = load_settings()
+    _require_token(settings, for_write="create")
     with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
         with _build_backend(settings) as backend:
             note = create_note_remote(
@@ -142,6 +143,7 @@ def _do_append(target: str, content: str) -> dict[str, Any]:
     from knoten.repositories.lock import acquire_lock
 
     settings = load_settings()
+    _require_token(settings, for_write="append")
     with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
         with _build_backend(settings) as backend:
             note = append_note_remote(
@@ -166,6 +168,7 @@ def _do_edit(
     from knoten.repositories.lock import acquire_lock
 
     settings = load_settings()
+    _require_token(settings, for_write="edit")
     with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
         with _build_backend(settings) as backend:
             note = edit_note_remote(
@@ -190,6 +193,13 @@ def _build_backend(settings: Any) -> Any:
     from knoten.cli.main import _build_backend as build
 
     return build(settings)
+
+
+def _require_token(settings: Any, *, for_write: str) -> None:
+    """Same fail-fast token gate the CLI mutations run (lazy import, same cycle dodge)."""
+    from knoten.cli.main import _require_token as gate
+
+    gate(settings, for_write=for_write)
 
 
 # ---- serve --------------------------------------------------------------

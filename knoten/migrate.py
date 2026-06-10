@@ -108,14 +108,16 @@ def migrate_legacy_layout(paths_obj: Paths) -> list[str]:
 
     # 4. .env — adopt the legacy ~/.config/knoten/.env only into the DEFAULT
     # config location. On Linux the default config dir IS ~/.config/knoten, so
-    # this is normally a no-op. It must NOT fire when a directory override is
-    # active (KNOTEN_CONFIG_DIR): that would `shutil.move` the user's live
+    # this is normally a no-op. It must NOT fire when the CONFIG directory is
+    # overridden (KNOTEN_CONFIG_DIR): that would `shutil.move` the user's live
     # config into the override and lose it once a throwaway/temp config dir is
-    # deleted. The vault/index/state branches above stay enabled under overrides
-    # because their legacy sources live under ~/.knoten and a chosen data/cache
-    # dir is a documented migration target.
+    # deleted. Only the config-dir override matters here — a data/cache
+    # override (common on macOS/Windows) must not suppress the adoption. The
+    # vault/index/state branches above stay enabled under overrides because
+    # their legacy sources live under ~/.knoten and a chosen data/cache dir is
+    # a documented migration target.
     if (
-        not paths_obj.has_overrides
+        not paths_obj.config_dir_overridden
         and legacy_env.exists()
         and legacy_env.resolve() != paths_obj.env_file.resolve()
         and not paths_obj.env_file.exists()
@@ -131,7 +133,11 @@ def migrate_legacy_layout(paths_obj: Paths) -> list[str]:
     _rmdir_if_empty(legacy_state_dir)
     _rmdir_if_empty(legacy_root)
 
-    if moved and os.environ.get("KNOTEN_HOME"):
+    # Warn about a lingering KNOTEN_HOME whenever we just migrated from it,
+    # or whenever the legacy dir is already gone (migration happened on an
+    # earlier run) — not only on the first-move run, or the warning is
+    # silent forever after.
+    if os.environ.get("KNOTEN_HOME") and (moved or not legacy_root.exists()):
         _warn(
             "KNOTEN_HOME is set but obsolete as of v0.2 — knoten ignores it. "
             "Use KNOTEN_CONFIG_DIR / KNOTEN_DATA_DIR / KNOTEN_CACHE_DIR to "

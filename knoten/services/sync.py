@@ -16,18 +16,19 @@ wants an offline archive; that is out of scope for v1.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from knoten.models import NoteSummary
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
-from knoten.repositories.errors import KnotenError, NoteForbiddenError
+from knoten.repositories.errors import KnotenError, NoteForbiddenError, NotFoundError
 from knoten.repositories.store import Store
 from knoten.repositories.sync_state import load_state, save_state
+from knoten.repositories.vault_files import strip_frontmatter
 from knoten.services.notes import (
-    _strip_frontmatter,
     delete_ingested,
     ingest_note,
     ingest_placeholder,
@@ -104,6 +105,19 @@ class SyncResult:
     pushed_edits: int = 0
     push_failed: int = 0
     push_preserved_local_only: int = 0
+    # Local soft-deletes of remote-known notes propagated to the remote.
+    pushed_deletes: int = 0
+    # Pull-pass conflicts — each entry is `{"id", "filename", "reason"}`.
+    # `local_unsynced_edit`: the pull would have overwritten a `synced=0`
+    # row, so the local version was kept. `filename_collision`: a remote
+    # note's filename collides with a different local row.
+    conflicts: list[dict] = field(default_factory=list)
+    # Human-readable warnings (delete-phase skips, invalid filenames, …) —
+    # surfaced in the JSON payload, not just the progress stream.
+    warnings: list[str] = field(default_factory=list)
+    # Remote notes skipped because their server-provided filename failed
+    # validation at the ingest boundary.
+    skipped_invalid: int = 0
 
 
 def _utcnow_iso() -> str:
@@ -116,11 +130,7 @@ class PushOutcome:
     edits: int = 0
     failed: int = 0
     preserved_local_only: int = 0
-    pushed_ids: set[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.pushed_ids is None:
-            self.pushed_ids = set()
+    pushed_ids: set[str] = field(default_factory=set)
 
 
 def push_local_writes(
@@ -167,7 +177,7 @@ def push_local_writes(
             outcome.failed += 1
             outcome.preserved_local_only += 1
             continue
-        body = _strip_frontmatter(raw)
+        body = strip_frontmatter(raw)
         try:
             frontmatter = json.loads(row.get("frontmatter_json") or "{}")
             if not isinstance(frontmatter, dict):
@@ -217,6 +227,49 @@ def push_local_writes(
     return outcome
 
 
+def _push_pending_deletes(
+    *,
+    backend: Backend,
+    store: Store,
+    warnings: list[str],
+    progress: ProgressCallback | None = None,
+) -> tuple[int, set[str]]:
+    """Propagate local soft-deletes of remote-known notes to the remote.
+
+    Returns `(deletes_issued, still_pending_ids)`. Runs before the pull
+    scan so a deleted note is gone from the remote before the catch-up
+    pass could re-ingest ("resurrect") it. `NotFoundError` means the note
+    is already gone on the remote — the marker is cleared without counting
+    a delete. Any other failure keeps the marker so the next sync retries,
+    and the id stays excluded from this run's ingest passes.
+    """
+    log = progress or _noop
+    issued = 0
+    still_pending: set[str] = set()
+    pending = store.pending_remote_delete_rows()
+    if pending:
+        log(f"→ Propagating {len(pending)} local delete(s) to remote")
+    for row in pending:
+        note_id = row["id"]
+        filename = row["filename"]
+        try:
+            backend.delete_note(note_id)
+        except NotFoundError:
+            store.clear_pending_remote_delete(note_id)
+            log(f"  ✓ '{filename}' already deleted on remote")
+        except Exception as exc:  # noqa: BLE001 — sync should be resilient
+            still_pending.add(note_id)
+            warnings.append(
+                f"could not propagate delete of '{filename}' ({exc}) — will retry next sync"
+            )
+            log(f"  ✗ '{filename}': remote delete failed ({exc}) — will retry next sync")
+        else:
+            store.clear_pending_remote_delete(note_id)
+            issued += 1
+            log(f"  ✗ deleted '{filename}' on remote")
+    return issued, still_pending
+
+
 def incremental_sync(
     *,
     backend: Backend,
@@ -224,12 +277,17 @@ def incremental_sync(
     settings: Settings,
     cursor_override: str | None = None,
     verify_hashes: bool = False,
+    force_delete: bool = False,
     progress: ProgressCallback | None = None,
 ) -> SyncResult:
     """Run an incremental sync. Returns a SyncResult with counts.
 
     When `cursor_override` is an empty string, every note is refetched —
     used by `full_sync` below.
+
+    `force_delete=True` overrides the mass-delete circuit breaker — the
+    guard that refuses to delete more than 20% of the local synced rows
+    (and more than 5 notes) in one run.
 
     Post-pagination, this function *always* runs delete detection (cheap:
     one paginated scan of IDs) and a reconciliation pass (checks that every
@@ -261,9 +319,22 @@ def incremental_sync(
 
     fetched = 0
     restricted_placeholders = 0
+    skipped_invalid = 0
+    conflicts: list[dict] = []
+    warnings: list[str] = []
     max_seen = cursor
     remote_total: int | None = None
     local_ids_before = store.all_ids()
+
+    # Push pass (deletes) — before any pull/scan, so a note soft-deleted
+    # locally is gone from the remote before the catch-up pass below could
+    # re-ingest ("resurrect") it.
+    pushed_deletes, pending_delete_ids = _push_pending_deletes(
+        backend=backend,
+        store=store,
+        warnings=warnings,
+        progress=log,
+    )
 
     offset = 0
     page_size = 100
@@ -276,7 +347,7 @@ def incremental_sync(
         if not items:
             break
 
-        new_on_page = sum(1 for item in items if item.updated_at > cursor)
+        new_on_page = sum(1 for item in items if item.updated_at >= cursor)
         log(
             f"  page {page_num}: {len(items)} items, {new_on_page} newer than cursor"
             + (f" (remote total {remote_total})" if remote_total is not None else "")
@@ -286,18 +357,27 @@ def incremental_sync(
         for item in items:
             item_id = item.id
             updated = item.updated_at
-            if updated > cursor:
+            # `>=` rather than `>`: timestamps are second-precision, so an
+            # edit landing in the same second as the recorded cursor would
+            # otherwise be skipped forever. Re-ingesting the boundary item
+            # is idempotent — one redundant fetch per sync is the cost.
+            if updated >= cursor:
+                if item_id in pending_delete_ids:
+                    continue  # delete push failed — do not resurrect it here
                 filename = item.filename or item_id
                 log(f"    ↓ fetching '{filename}'")
-                fetched_count, restricted_count = _fetch_or_placeholder(
+                fetched_count, restricted_count, invalid_count = _fetch_or_placeholder(
                     item,
                     backend=backend,
                     store=store,
                     settings=settings,
                     log=log,
+                    conflicts=conflicts,
+                    warnings=warnings,
                 )
                 fetched += fetched_count
                 restricted_placeholders += restricted_count
+                skipped_invalid += invalid_count
                 if updated > max_seen:
                     max_seen = updated
             else:
@@ -336,22 +416,27 @@ def incremental_sync(
         if item_id in local_ids_after_main:
             already_local += 1
             continue
+        if item_id in pending_delete_ids:
+            continue  # locally trashed, delete push failed — do not resurrect
         if not catch_up_started:
             log("  catching up on never-seen-locally notes")
             catch_up_started = True
         filename = item.filename or item_id
         log(f"    ↓ fetching '{filename}' (never seen locally)")
-        fetched_count, restricted_count = _fetch_or_placeholder(
+        fetched_count, restricted_count, invalid_count = _fetch_or_placeholder(
             item,
             backend=backend,
             store=store,
             settings=settings,
             log=log,
+            conflicts=conflicts,
+            warnings=warnings,
         )
         fetched += fetched_count
         catch_up_count += fetched_count
         restricted_placeholders += restricted_count
         catch_up_restricted += restricted_count
+        skipped_invalid += invalid_count
         # Now it is local — avoid double-fetching if iter_all_summaries
         # returns the same id twice (shouldn't happen, defensive).
         local_ids_after_main.add(item_id)
@@ -363,19 +448,27 @@ def incremental_sync(
         f"fetched this pass={catch_up_count}, "
         f"restricted placeholders={catch_up_restricted}"
     )
+    delete_phase_blocked = False
     if remote_total is not None and scanned_remote_ids != remote_total:
         # Tripwire for a regression in the server's list endpoint. After the
         # 2026-04-12 fix (incident `2026-04-12-notes-list-permission-leaks`)
         # this branch should never trigger in a steady state. If it does,
         # the most likely causes are a stable-sort regression in
         # `notes.vcoeur.com`'s `listNotes.orderBy` or a new filter applied
-        # to the data query but not the count query. Keep the warning as
-        # surface area even if it never fires — silent drift is worse.
+        # to the data query but not the count query — either way the scanned
+        # ID set cannot be trusted, so the delete phase is skipped for this
+        # run: a live note missed by an unstable scan must never translate
+        # into a local deletion.
         log(
             f"  ⚠ server `total` ({remote_total}) disagrees with scanned count "
             f"({scanned_remote_ids}) — pagination walk saw a different row set "
-            f"than the count query. Should not happen post-2026-04-12 fix."
+            f"than the count query. Skipping delete detection this run."
         )
+        warnings.append(
+            f"server total ({remote_total}) disagrees with scanned count "
+            f"({scanned_remote_ids}) — delete detection skipped this run"
+        )
+        delete_phase_blocked = True
 
     # Push pass — drain locally-authored writes (synced=0) before reconciling.
     # Must run *before* delete detection: a synced=0 note that is "local but
@@ -416,14 +509,37 @@ def incremental_sync(
             log(f"    ⏸ '{row['filename']}' (local-only, push failed) — preserving")
             continue
         to_delete.add(note_id)
-    if to_delete:
-        log(f"  {len(to_delete)} local row(s) absent from the remote")
-        for note_id in to_delete:
-            row = store.find_by_id(note_id)
-            label = row["filename"] if row else note_id
-            log(f"    ✗ removing '{label}' (trashed or hard-deleted on remote)")
-            delete_ingested(store, settings.paths.vault_dir, note_id)
-        deleted = len(to_delete)
+    if delete_phase_blocked:
+        if to_delete:
+            log(
+                f"  ⏸ skipping deletion of {len(to_delete)} local row(s) — "
+                "remote scan was inconsistent"
+            )
+    elif to_delete:
+        # Mass-delete circuit breaker — a remote that suddenly lists far
+        # fewer notes (fresh backend behind KNOTEN_API_URL, server-side
+        # regression) must not wipe the local mirror without an explicit
+        # opt-in.
+        # `to_delete` rows are still in the store here, so this count
+        # includes them — the denominator is "synced rows before deletion".
+        synced_total = store.count_synced_notes()
+        if not force_delete and len(to_delete) > 5 and len(to_delete) > 0.2 * synced_total:
+            warnings.append(
+                f"delete detection wants to remove {len(to_delete)} of {synced_total} "
+                "synced notes (>20%) — skipped; re-run with --force-delete to apply"
+            )
+            log(
+                f"  ⚠ refusing to delete {len(to_delete)} of {synced_total} synced "
+                "note(s) (>20%) — re-run with --force-delete to apply"
+            )
+        else:
+            log(f"  {len(to_delete)} local row(s) absent from the remote")
+            for note_id in to_delete:
+                row = store.find_by_id(note_id)
+                label = row["filename"] if row else note_id
+                log(f"    ✗ removing '{label}' (trashed or hard-deleted on remote)")
+                delete_ingested(store, settings.paths.vault_dir, note_id)
+            deleted = len(to_delete)
     else:
         log("  no remote deletions detected")
     if preserved:
@@ -475,6 +591,10 @@ def incremental_sync(
         pushed_edits=push_outcome.edits,
         push_failed=push_outcome.failed,
         push_preserved_local_only=push_outcome.preserved_local_only,
+        pushed_deletes=pushed_deletes,
+        conflicts=conflicts,
+        warnings=warnings,
+        skipped_invalid=skipped_invalid,
     )
 
 
@@ -484,6 +604,7 @@ def full_sync(
     store: Store,
     settings: Settings,
     verify_hashes: bool = False,
+    force_delete: bool = False,
     progress: ProgressCallback | None = None,
 ) -> SyncResult:
     """Force a full refetch by clearing the cursor and running incremental.
@@ -500,6 +621,7 @@ def full_sync(
         progress=progress,
         cursor_override="",
         verify_hashes=verify_hashes,
+        force_delete=force_delete,
     )
     result.mode = "full"
     now = _utcnow_iso()
@@ -509,6 +631,23 @@ def full_sync(
     return result
 
 
+def _invalid_filename_reason(filename: str | None) -> str | None:
+    """Reason a server-provided filename is unsafe to ingest, or None when fine.
+
+    The filename becomes a path component of the mirror file, so anything
+    that could make it escape the vault (path separators) or break the
+    filesystem layer (NUL, empty) is rejected at the ingest boundary
+    instead of trusted downstream.
+    """
+    if filename is None or not filename.strip():
+        return "empty filename"
+    if "\x00" in filename:
+        return "filename contains a NUL byte"
+    if "/" in filename or "\\" in filename:
+        return f"filename contains a path separator: {filename!r}"
+    return None
+
+
 def _fetch_or_placeholder(
     item: NoteSummary,
     *,
@@ -516,13 +655,45 @@ def _fetch_or_placeholder(
     store: Store,
     settings: Settings,
     log: ProgressCallback,
-) -> tuple[int, int]:
+    conflicts: list[dict],
+    warnings: list[str],
+) -> tuple[int, int, int]:
     """Fetch a full note by ID and ingest it. On 404, create a placeholder.
 
-    Returns `(fetched_full_count, placeholder_count)` — one of them is 0 and
-    the other is 1 depending on whether the body was readable.
+    Returns `(fetched_full_count, placeholder_count, skipped_invalid_count)`
+    — at most one of them is 1.
+
+    Guards, in order:
+
+    - A local row with `synced=0` is a pending local write — never
+      overwrite it from the pull pass. Recorded as a conflict; the push
+      pass later uploads the local version.
+    - A server-provided filename failing validation is skipped with a
+      warning — never written to disk, never committed to the store.
+    - A `UNIQUE(filename)` constraint failure (remote note colliding with
+      a different local row's filename) is recorded as a conflict instead
+      of aborting the whole sync.
     """
     item_id = item.id
+
+    existing = store.find_by_id(item_id)
+    if existing is not None and int(existing.get("synced", 1)) == 0:
+        conflicts.append(
+            {"id": item_id, "filename": existing["filename"], "reason": "local_unsynced_edit"}
+        )
+        warnings.append(
+            f"conflict: '{existing['filename']}' has an unpushed local edit — "
+            "kept the local version (the push pass uploads it)"
+        )
+        log(f"    ⚠ '{existing['filename']}' has an unpushed local edit — keeping local version")
+        return (0, 0, 0)
+
+    reason = _invalid_filename_reason(item.filename)
+    if reason is not None:
+        warnings.append(f"skipped remote note {item_id}: {reason}")
+        log(f"    ⚠ skipping remote note {item_id}: {reason}")
+        return (0, 0, 1)
+
     try:
         note = backend.read_note(item_id)
     except NoteForbiddenError:
@@ -534,13 +705,34 @@ def _fetch_or_placeholder(
             previous_path=previous.path if previous else None,
         )
         log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
-        return (0, 1)
+        return (0, 1, 0)
+
+    # Re-validate: the read response's filename is also server-controlled
+    # and may differ from the list summary's.
+    reason = _invalid_filename_reason(note.filename)
+    if reason is not None:
+        warnings.append(f"skipped remote note {item_id}: {reason}")
+        log(f"    ⚠ skipping remote note {item_id}: {reason}")
+        return (0, 0, 1)
 
     previous = store.get_row(note.id)
-    ingest_note(
-        note,
-        store=store,
-        vault_dir=settings.paths.vault_dir,
-        previous_path=previous.path if previous else None,
-    )
-    return (1, 0)
+    try:
+        ingest_note(
+            note,
+            store=store,
+            vault_dir=settings.paths.vault_dir,
+            previous_path=previous.path if previous else None,
+        )
+    except sqlite3.IntegrityError:
+        # UNIQUE(filename) — a different local row already uses this name
+        # (typically a local-only note created offline). The transaction
+        # rolled back, so nothing was committed; surface a conflict and let
+        # the sync carry on instead of wedging on this one note.
+        conflicts.append({"id": note.id, "filename": note.filename, "reason": "filename_collision"})
+        warnings.append(
+            f"conflict: remote note '{note.filename}' ({note.id}) collides with an "
+            "existing local note's filename — skipped; rename the local note to resolve"
+        )
+        log(f"    ⚠ '{note.filename}' collides with an existing local filename — skipped")
+        return (0, 0, 0)
+    return (1, 0, 0)

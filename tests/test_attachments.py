@@ -145,6 +145,36 @@ def test_download_attachment_streams_to_disk(
     assert result.filename == "scan.pdf"
 
 
+def test_download_attachment_midstream_failure_leaves_no_partial_file(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    """A connection drop mid-stream must not leave a truncated file at the
+    destination — the download streams to a sibling tmp file and only
+    `os.replace`s it into place after the stream completes."""
+    import httpx
+    from pytest_httpx import IteratorStream
+
+    from knoten.repositories.errors import NetworkError
+
+    def _broken_stream():
+        yield b"PARTIAL-"
+        raise httpx.ReadError("connection dropped mid-stream")
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        stream=IteratorStream(_broken_stream()),
+        headers={"content-type": "application/pdf"},
+    )
+
+    dest = tmp_path / "out.pdf"
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(NetworkError):
+        backend.download_attachment(STORAGE_KEY, dest)
+
+    assert not dest.exists(), "no partial file may remain at the destination"
+    assert not (tmp_path / "out.pdf.tmp").exists(), "tmp file must be cleaned up"
+
+
 def test_download_attachment_404_raises_not_found(
     tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
 ) -> None:
@@ -328,3 +358,135 @@ def test_download_file_remote_rejects_missing_attachment_key(
                 target="2024-11-10+ scan.pdf",
                 destination=tmp_path / "out.bin",
             )
+
+
+# ---- download default-destination confinement (server-controlled filename) --
+
+HOSTILE_NOTE_ID = "44444444-4444-4444-4444-444444444444"
+
+
+def _seed_raw_file_note(store: Store, *, filename: str) -> Note:
+    """Seed a file-family store row WITHOUT writing a mirror file.
+
+    The mirror writer would (rightly) reject hostile filenames, but the
+    download path reads only the store row — exactly what a hostile remote
+    can populate through sync.
+    """
+    note = Note(
+        id=HOSTILE_NOTE_ID,
+        filename=filename,
+        title=filename,
+        family="file",
+        kind="file",
+        source=None,
+        body="",
+        frontmatter={"attachment": STORAGE_KEY},
+        tags=(),
+        wikilinks=(),
+        created_at="2024-11-10T00:00:00Z",
+        updated_at="2024-11-10T00:00:00Z",
+        permissions="ALL",
+    )
+    store.upsert_note(note, path="file/hostile.md", body_sha256="0" * 64)
+    return note
+
+
+def test_download_default_confines_absolute_server_filename_to_cwd(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path, monkeypatch
+) -> None:
+    """A note filename like /home/victim/.bashrc must NOT escape the cwd."""
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        content=b"EVIL",
+    )
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    with Store(tmp_settings.paths.index_path) as store:
+        note = _seed_raw_file_note(store, filename="/home/victim/.bashrc")
+        with RemoteBackend(tmp_settings) as backend:
+            result = download_file_remote(
+                backend=backend, store=store, target=note.id, destination=None
+            )
+    expected = (workdir / ".bashrc").resolve()
+    assert Path(result["path"]).resolve() == expected
+    assert expected.read_bytes() == b"EVIL"
+
+
+def test_download_default_confines_dotdot_server_filename_to_cwd(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path, monkeypatch
+) -> None:
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        content=b"EVIL",
+    )
+    workdir = tmp_path / "inner" / "workdir"
+    workdir.mkdir(parents=True)
+    monkeypatch.chdir(workdir)
+    with Store(tmp_settings.paths.index_path) as store:
+        note = _seed_raw_file_note(store, filename="../../escape.bin")
+        with RemoteBackend(tmp_settings) as backend:
+            download_file_remote(backend=backend, store=store, target=note.id, destination=None)
+    assert (workdir / "escape.bin").exists()
+    assert not (workdir.parent / "escape.bin").exists()
+    assert not (workdir.parent.parent / "escape.bin").exists()
+
+
+@pytest.mark.parametrize("hostile_filename", ["..", "trick\\name.bin", "nul\x00name"])
+def test_download_default_rejects_unusable_server_filename(
+    tmp_settings: Settings, tmp_path: Path, monkeypatch, hostile_filename: str
+) -> None:
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    with Store(tmp_settings.paths.index_path) as store:
+        note = _seed_raw_file_note(store, filename=hostile_filename)
+        with (
+            RemoteBackend(tmp_settings) as backend,
+            pytest.raises(UserError, match="-o/--output"),
+        ):
+            download_file_remote(backend=backend, store=store, target=note.id, destination=None)
+
+
+def test_download_default_plain_filename_lands_in_cwd(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path, monkeypatch
+) -> None:
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        content=b"PDFBLOB",
+    )
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_file_note(store, tmp_settings)
+        with RemoteBackend(tmp_settings) as backend:
+            result = download_file_remote(
+                backend=backend, store=store, target="2024-11-10+ scan.pdf", destination=None
+            )
+    expected = (workdir / "2024-11-10+ scan.pdf").resolve()
+    assert Path(result["path"]).resolve() == expected
+    assert expected.read_bytes() == b"PDFBLOB"
+
+
+def test_download_explicit_output_is_honoured_even_with_hostile_filename(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    """-o/--output is the user's explicit choice — no cwd confinement applied."""
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{STORAGE_KEY}",
+        method="GET",
+        content=b"BYTES",
+    )
+    dest = tmp_path / "elsewhere" / "explicit.bin"
+    with Store(tmp_settings.paths.index_path) as store:
+        note = _seed_raw_file_note(store, filename="/home/victim/.bashrc")
+        with RemoteBackend(tmp_settings) as backend:
+            result = download_file_remote(
+                backend=backend, store=store, target=note.id, destination=dest
+            )
+    assert result["path"] == dest
+    assert dest.read_bytes() == b"BYTES"

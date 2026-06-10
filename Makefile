@@ -19,7 +19,7 @@ sync-full: ## Full export-based rebuild
 	uv run knoten sync --full
 
 test: ## Run pytest
-	uv run pytest; RET=$$?; if [ $$RET -eq 5 ]; then exit 0; else exit $$RET; fi
+	uv run pytest
 
 coverage: ## Run pytest with line-coverage report
 	uv run pytest --cov=knoten --cov-report=term-missing --cov-report=html
@@ -32,4 +32,7 @@ format: ## Ruff auto-fix + format
 	uv run ruff check --fix .
 	uv run ruff format .
 
-.PHONY: help install dev-install run sync sync-full test coverage lint format
+tool-install: ## Install `knoten` globally via `uv tool install`
+	uv tool install --force .
+
+.PHONY: help install dev-install run sync sync-full test coverage lint format tool-install

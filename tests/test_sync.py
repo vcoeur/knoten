@@ -261,3 +261,406 @@ def test_sync_preserves_local_only_when_push_fails(
         row = store.find_by_id(local_id)
         assert row is not None
         assert int(row["synced"]) == 0
+
+
+def _seed_synced(
+    store: Store,
+    settings: Settings,
+    note_id: str,
+    filename: str,
+    *,
+    body: str = "synced body",
+    synced: bool = True,
+) -> None:
+    ingest_note(
+        Note(
+            id=note_id,
+            filename=filename,
+            title=filename.lstrip("!- ").strip(),
+            family="permanent",
+            kind="permanent",
+            source=None,
+            body=body,
+            frontmatter={"kind": "permanent"},
+            tags=(),
+            wikilinks=(),
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+        ),
+        store=store,
+        vault_dir=settings.paths.vault_dir,
+        synced=synced,
+    )
+
+
+def _summary_item(note_id: str, filename: str, updated_at: str = "2024-01-02T00:00:00Z") -> dict:
+    return {
+        "id": note_id,
+        "filename": filename,
+        "title": filename.lstrip("!- ").strip(),
+        "family": "permanent",
+        "kind": "permanent",
+        "source": None,
+        "tags": [],
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": updated_at,
+    }
+
+
+def _read_payload(
+    note_id: str, filename: str, body: str, updated_at: str = "2024-01-02T00:00:00Z"
+) -> dict:
+    return {
+        "id": note_id,
+        "filename": filename,
+        "title": filename.lstrip("!- ").strip(),
+        "family": "permanent",
+        "kind": "permanent",
+        "source": None,
+        "body": body,
+        "frontmatter": {"kind": "permanent"},
+        "tags": [],
+        "linkMap": {},
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": updated_at,
+    }
+
+
+def test_full_sync_preserves_offline_edit_and_pushes_it(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """`sync --full` must not clobber a `synced=0` row with the remote body (C3).
+
+    The pull pass runs before the push pass; before the fix it re-ingested
+    the unchanged remote body over the offline edit and flipped `synced`
+    to 1, so the push pass never saw the edit. Now the pull skips the row
+    (surfacing a conflict) and the push uploads the local version.
+    """
+    from knoten.services.sync import full_sync
+
+    note_id = "11111111-2222-3333-4444-555555555555"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(
+            store,
+            tmp_settings,
+            note_id,
+            "! Conflicted",
+            body="OFFLINE EDIT body",
+            synced=False,
+        )
+
+    item = _summary_item(note_id, "! Conflicted")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    # The push pass PUTs the local body. No GET /api/notes/{id} is
+    # registered: pytest-httpx fails the test if the pull tries to fetch.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="PUT",
+        json={"id": note_id},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = full_sync(backend=backend, store=store, settings=tmp_settings)
+
+        assert result.pushed_edits == 1
+        assert result.fetched == 0
+        assert [c["reason"] for c in result.conflicts] == ["local_unsynced_edit"]
+        row = store.find_by_id(note_id)
+        assert row is not None
+        assert int(row["synced"]) == 1  # pushed, not clobbered
+
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Conflicted.md"
+    assert "OFFLINE EDIT body" in mirror.read_text(encoding="utf-8")
+    put_requests = [r for r in httpx_mock.get_requests() if r.method == "PUT"]
+    assert len(put_requests) == 1
+    assert b"OFFLINE EDIT body" in put_requests[0].content
+
+
+def test_true_conflict_keeps_local_version_and_surfaces_it(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """Remote AND local both edited: local wins, conflict lands in the result (C3)."""
+    note_id = "22222222-3333-4444-5555-666666666666"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(
+            store,
+            tmp_settings,
+            note_id,
+            "! Diverged",
+            body="LOCAL version",
+            synced=False,
+        )
+
+    item = _summary_item(note_id, "! Diverged", updated_at="2026-06-09T12:00:00Z")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="PUT",
+        json={"id": note_id},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.conflicts == [
+            {"id": note_id, "filename": "! Diverged", "reason": "local_unsynced_edit"}
+        ]
+        assert result.warnings  # surfaced in the JSON payload, not just logs
+
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Diverged.md"
+    assert "LOCAL version" in mirror.read_text(encoding="utf-8")
+
+
+def test_sync_skips_delete_phase_when_scan_disagrees_with_total(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """The remote-total tripwire must gate the delete phase, not just log (M3)."""
+    kept_id = "33333333-4444-5555-6666-777777777777"
+    missed_id = "44444444-5555-6666-7777-888888888888"
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
+        '{"schema_version": 1, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, kept_id, "! Kept")
+        _seed_synced(store, tmp_settings, missed_id, "! Missed by unstable scan")
+
+    # The server claims total=2 but the scan only ever yields one row —
+    # an unstable offset-paginated walk. `missed_id` must NOT be deleted.
+    item = _summary_item(kept_id, "! Kept")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 2, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 2, "limit": 200, "offset": 0},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.deleted == 0
+        assert store.find_by_id(missed_id) is not None
+        assert any("delete detection skipped" in warning for warning in result.warnings)
+
+
+def test_sync_mass_delete_circuit_breaker_blocks_wipe(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """An empty remote must not wipe the local mirror without --force-delete (M3)."""
+    ids = [f"aaaaaaa{i}-0000-0000-0000-00000000000{i}" for i in range(8)]
+    with Store(tmp_settings.paths.index_path) as store:
+        for i, note_id in enumerate(ids):
+            _seed_synced(store, tmp_settings, note_id, f"! Note {i}")
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.deleted == 0
+        assert store.count_notes() == 8
+        assert any("--force-delete" in warning for warning in result.warnings)
+
+
+def test_sync_mass_delete_applies_with_force_delete(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """--force-delete overrides the circuit breaker (M3)."""
+    ids = [f"bbbbbbb{i}-0000-0000-0000-00000000000{i}" for i in range(8)]
+    with Store(tmp_settings.paths.index_path) as store:
+        for i, note_id in enumerate(ids):
+            _seed_synced(store, tmp_settings, note_id, f"! Note {i}")
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(
+            backend=backend, store=store, settings=tmp_settings, force_delete=True
+        )
+        assert result.deleted == 8
+        assert store.count_notes() == 0
+
+
+def test_sync_filename_collision_surfaces_conflict_and_continues(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A remote note colliding with a local filename must not wedge the sync (M4)."""
+    local_id = "55555555-6666-7777-8888-999999999999"
+    remote_id = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
+        '{"schema_version": 1, "last_sync_max_updated_at": "2030-01-01T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, local_id, "! Meeting notes")
+
+    local_item = _summary_item(local_id, "! Meeting notes")
+    remote_item = _summary_item(remote_id, "! Meeting notes")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [local_item], "total": 2, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [local_item, remote_item], "total": 2, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{remote_id}",
+        json=_read_payload(remote_id, "! Meeting notes", "remote twin body"),
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.conflicts == [
+            {"id": remote_id, "filename": "! Meeting notes", "reason": "filename_collision"}
+        ]
+        # The sync completed: no store row committed for the twin, the
+        # original local note is untouched, nothing got deleted.
+        assert store.find_by_id(remote_id) is None
+        assert store.find_by_id(local_id) is not None
+        assert result.deleted == 0
+
+
+def test_local_soft_delete_propagates_to_remote(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """Deleting a synced note in local mode issues DELETE on the next sync (M5).
+
+    Before the fix `trashed_notes` was never consulted by sync, so the
+    remote copy survived and the catch-up scan resurrected the note.
+    """
+    from knoten.repositories.local_backend import LocalBackend
+
+    note_id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, note_id, "! Old idea")
+
+    with LocalBackend(tmp_settings) as backend:
+        backend.delete_note(note_id)
+
+    with Store(tmp_settings.paths.index_path) as store:
+        trashed = store.find_trashed(note_id)
+        assert trashed is not None
+        assert int(trashed["pending_remote_delete"]) == 1
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="DELETE",
+        status_code=204,
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_deletes == 1
+        # The note did not resurrect: no active row, no mirror file.
+        assert store.find_by_id(note_id) is None
+        trashed = store.find_trashed(note_id)
+        assert trashed is not None
+        assert int(trashed["pending_remote_delete"]) == 0
+
+    assert not (tmp_settings.paths.vault_dir / "note" / "! Old idea.md").exists()
+    delete_requests = [r for r in httpx_mock.get_requests() if r.method == "DELETE"]
+    assert len(delete_requests) == 1
+    assert delete_requests[0].url.path == f"/api/notes/{note_id}"
+
+
+def test_sync_refetches_boundary_same_second_edit(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """An item whose updatedAt equals the cursor is re-fetched (minor fix).
+
+    Timestamps are second-precision; the old strict `>` skipped a note
+    edited in the same second as the recorded cursor forever.
+    """
+    note_id = "88888888-9999-aaaa-bbbb-cccccccccccc"
+    tmp_settings.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_settings.paths.state_file.write_text(
+        '{"schema_version": 1, "last_sync_max_updated_at": "2024-01-02T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, note_id, "! Same second", body="stale body")
+
+    item = _summary_item(note_id, "! Same second", updated_at="2024-01-02T00:00:00Z")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        json=_read_payload(note_id, "! Same second", "same-second edit body"),
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 1
+
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Same second.md"
+    assert "same-second edit body" in mirror.read_text(encoding="utf-8")
+
+
+def test_sync_skips_hostile_server_filenames(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    """A server filename with path separators is skipped, never ingested (minor fix).
+
+    The old code passed it down to the file writer, which raised and
+    aborted the whole sync — after the store row was already committed.
+    """
+    hostile_id = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+    item = _summary_item(hostile_id, "../../escape attempt")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    # No GET /api/notes/{id} registered — validation must skip before the read.
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.skipped_invalid >= 1
+        assert any("path separator" in warning for warning in result.warnings)
+        assert store.find_by_id(hostile_id) is None
+        assert store.count_notes() == 0

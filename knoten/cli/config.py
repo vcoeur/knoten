@@ -172,12 +172,18 @@ def init_command() -> None:
 
 
 def _ensure_env_file(settings: Settings) -> bool:
-    """Create the .env file from the default template if it does not exist."""
+    """Create the .env file from the default template if it does not exist.
+
+    The file may later hold `KNOTEN_API_TOKEN`, so it is created `0600` and a
+    freshly-created config dir `0700`. Pre-existing directories keep their
+    permissions (in dev mode the config dir is the repo root).
+    """
     env_file = settings.paths.env_file
     if env_file.exists():
         return False
-    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     env_file.write_text(ENV_EXAMPLE_TEMPLATE)
+    env_file.chmod(0o600)
     return True
 
 

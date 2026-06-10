@@ -34,6 +34,7 @@ from knoten.repositories.backend import (
 )
 from knoten.repositories.errors import NotFoundError, UserError
 from knoten.repositories.store import Store
+from knoten.repositories.vault_files import path_for_note, strip_frontmatter
 from knoten.services.knoten_filename import parse_knoten_filename
 from knoten.services.markdown_parser import parse_body
 from knoten.services.notes import _assert_same_family_prefix, ingest_note
@@ -50,7 +51,7 @@ _SKIP_TOP_LEVEL = frozenset({".trash", ".attachments"})
 class LocalBackend(Backend):
     """`Backend` backed by a markdown vault + local SQLite index."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, store: Store | None = None) -> None:
         if not settings.paths.vault_dir.exists():
             raise UserError(
                 f"Vault directory does not exist: {settings.paths.vault_dir} — "
@@ -59,8 +60,16 @@ class LocalBackend(Backend):
             )
         self._settings = settings
         self._vault_dir = settings.paths.vault_dir
-        self._store = Store(settings.paths.index_path)
-        self._store.open()
+        # An injected store lets a caller that already holds an open Store
+        # (e.g. a CLI read command) run the stat walk on the same SQLite
+        # connection instead of opening a second, concurrently-writing one.
+        if store is not None:
+            self._store = store
+            self._owns_store = False
+        else:
+            self._store = Store(settings.paths.index_path)
+            self._store.open()
+            self._owns_store = True
         self._reindex_done: bool = False
 
     def __enter__(self) -> LocalBackend:
@@ -70,7 +79,12 @@ class LocalBackend(Backend):
         self.close()
 
     def close(self) -> None:
-        self._store.close()
+        if self._owns_store:
+            self._store.close()
+
+    def refresh_index(self) -> None:
+        """Run the mtime-gated stat walk now (public entry for read commands)."""
+        self._refresh_index_if_stale()
 
     def _refresh_index_if_stale(self) -> None:
         """Stat-walk the vault and refresh drifted rows in the store.
@@ -134,7 +148,7 @@ class LocalBackend(Backend):
                 raw = file_path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            body = _strip_frontmatter(raw)
+            body = strip_frontmatter(raw)
             parsed = parse_body(body)
             body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
             self._store.apply_drifted_body(
@@ -149,7 +163,11 @@ class LocalBackend(Backend):
 
         for missing_path in set(path_index) - seen_paths:
             _, _, missing_id = path_index[missing_path]
-            self._store.delete_note(missing_id)
+            # Conditional delete: reads run the walk without the advisory
+            # lock, so the row may have been re-pointed (e.g. by a concurrent
+            # rename) between the snapshot and now — only drop it if it still
+            # has the path this walk saw missing.
+            self._store.delete_note(missing_id, only_if_path=missing_path)
 
     def list_note_summaries(self, *, limit: int, offset: int) -> NotesPage:
         self._refresh_index_if_stale()
@@ -173,7 +191,7 @@ class LocalBackend(Backend):
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
 
-        body = _strip_frontmatter(raw)
+        body = strip_frontmatter(raw)
 
         frontmatter_raw = row.get("frontmatter_json") or "{}"
         try:
@@ -243,8 +261,25 @@ class LocalBackend(Backend):
             updated_at=now,
             permissions="ALL",
         )
+        self._refuse_unindexed_destination(path_for_note(note))
         ingest_note(note, store=self._store, vault_dir=self._vault_dir, synced=False)
         return note_id
+
+    def _refuse_unindexed_destination(self, relative_path: str) -> None:
+        """Refuse to write over an on-disk file the store does not know.
+
+        Collision checks consult the store only, so a file dropped into the
+        vault by hand (never indexed — the stat walk skips unknown files)
+        would be silently overwritten by `os.replace`. In local mode the
+        vault is authoritative, so clobbering those bytes is data loss.
+        """
+        destination = self._vault_dir / relative_path
+        if destination.exists():
+            raise UserError(
+                f"A file already exists at {relative_path!r} but is not in the "
+                "index — run `knoten sync` to import it, or rename the file "
+                "(or pick a different note name) first."
+            )
 
     def update_note(self, note_id: str, patch: NotePatch) -> NoteUpdateResult:
         self._refresh_index_if_stale()
@@ -262,7 +297,7 @@ class LocalBackend(Backend):
             current_raw = absolute.read_text(encoding="utf-8")
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
-        current_body = _strip_frontmatter(current_raw)
+        current_body = strip_frontmatter(current_raw)
 
         new_body = patch.body if patch.body is not None else current_body
         if patch.add_tags or patch.remove_tags:
@@ -319,8 +354,10 @@ class LocalBackend(Backend):
 
         Mirrors the server-side `cascadeRename` in notes.vcoeur.com so a
         local vault stays consistent after a filename change. Rollback on
-        partial failure: every rewritten file is restored to its original
-        bytes before the exception propagates.
+        partial failure restores both layers: every touched file goes back
+        to its original bytes AND every touched store row is re-upserted to
+        its pre-rename state — a file-only rollback left the store pointing
+        at the new path, which the next stat walk hard-deleted.
         """
         note_id = row["id"]
         old_filename = row["filename"]
@@ -345,9 +382,19 @@ class LocalBackend(Backend):
         source_ids = [str(r["source_id"]) for r in source_rows if str(r["source_id"]) != note_id]
 
         rewrite_re = re.compile(rf"\[\[{re.escape(old_filename)}(\]\]|#|\|)")
-        replacement = rf"[[{new_filename}\1"
+
+        def _replacement(match: re.Match[str]) -> str:
+            # Callable replacement so `\1` / `\g` sequences in the new
+            # filename are inserted literally instead of being expanded as
+            # regex template escapes (which would corrupt links or raise).
+            return f"[[{new_filename}{match.group(1)}"
 
         backups: list[tuple[Path, bytes]] = []
+        created_paths: list[Path] = []
+        # (note, path, body_sha256, synced) per touched store row, captured
+        # before the cascade mutates it, so rollback can restore the store
+        # alongside the file bytes.
+        row_snapshots: list[tuple[Note, str, str, bool]] = []
 
         def _save_backup(absolute: Path) -> None:
             try:
@@ -355,12 +402,77 @@ class LocalBackend(Backend):
             except OSError:
                 pass
 
+        def _snapshot_row(note_row: dict, raw_text: str) -> None:
+            body = strip_frontmatter(raw_text)
+            parsed = parse_body(body)
+            try:
+                fm = json.loads(note_row.get("frontmatter_json") or "{}")
+                if not isinstance(fm, dict):
+                    fm = {}
+            except (TypeError, ValueError):
+                fm = {}
+            original = Note(
+                id=note_row["id"],
+                filename=note_row["filename"],
+                title=note_row["title"],
+                family=note_row["family"],
+                kind=note_row["kind"],
+                source=note_row.get("source"),
+                body=body,
+                frontmatter=fm,
+                tags=tuple(sorted(set(parsed.tags))),
+                wikilinks=tuple(
+                    WikiLink(target_title=title, target_id=None) for title in parsed.wikilink_titles
+                ),
+                created_at=note_row.get("created_at") or _utcnow_iso(),
+                updated_at=note_row.get("updated_at") or _utcnow_iso(),
+                permissions=note_row.get("permissions") or "ALL",
+            )
+            row_snapshots.append(
+                (
+                    original,
+                    note_row["path"],
+                    note_row["body_sha256"],
+                    bool(note_row.get("synced", 0)),
+                )
+            )
+
         def _rollback() -> None:
+            # Files first: remove anything the cascade created, then restore
+            # the original bytes of everything it touched.
+            for created in created_paths:
+                try:
+                    created.unlink(missing_ok=True)
+                except OSError:
+                    _LOG.exception("Rollback could not remove %s", created)
             for absolute, original in reversed(backups):
                 try:
+                    absolute.parent.mkdir(parents=True, exist_ok=True)
                     absolute.write_bytes(original)
                 except OSError:
                     _LOG.exception("Rollback failed for %s", absolute)
+            # Store second: re-upsert every touched row to its pre-rename
+            # state so disk and index stay consistent (the stat walk would
+            # otherwise hard-delete a row whose path no longer exists).
+            for original_note, original_path, original_sha, original_synced in reversed(
+                row_snapshots
+            ):
+                try:
+                    stat = (self._vault_dir / original_path).stat()
+                    mtime_ns, size = stat.st_mtime_ns, stat.st_size
+                except OSError:
+                    mtime_ns, size = 0, 0
+                try:
+                    self._store.upsert_note(
+                        original_note,
+                        path=original_path,
+                        body_sha256=original_sha,
+                        path_mtime_ns=mtime_ns,
+                        path_size=size,
+                        synced=original_synced,
+                    )
+                except Exception:
+                    _LOG.exception("Store rollback failed for note %s", original_note.id)
 
         try:
             source_updates: list[tuple[dict, str]] = []
@@ -373,10 +485,11 @@ class LocalBackend(Backend):
                     raw = source_abs.read_text(encoding="utf-8")
                 except OSError:
                     continue
-                new_raw, count = rewrite_re.subn(replacement, raw)
+                new_raw, count = rewrite_re.subn(_replacement, raw)
                 if count == 0:
                     continue
                 _save_backup(source_abs)
+                _snapshot_row(source_row, raw)
                 source_abs.write_text(new_raw, encoding="utf-8")
                 source_updates.append((source_row, new_raw))
 
@@ -384,7 +497,8 @@ class LocalBackend(Backend):
             _save_backup(target_abs)
 
             body_raw = target_abs.read_text(encoding="utf-8")
-            body_only = _strip_frontmatter(body_raw)
+            _snapshot_row(row, body_raw)
+            body_only = strip_frontmatter(body_raw)
             if patch.body is not None:
                 body_only = patch.body
             if patch.add_tags or patch.remove_tags:
@@ -422,6 +536,10 @@ class LocalBackend(Backend):
                 updated_at=_utcnow_iso(),
                 permissions=row.get("permissions") or "ALL",
             )
+            new_relative = path_for_note(renamed_note)
+            if new_relative != row["path"]:
+                self._refuse_unindexed_destination(new_relative)
+                created_paths.append(self._vault_dir / new_relative)
             ingest_note(
                 renamed_note,
                 store=self._store,
@@ -432,7 +550,7 @@ class LocalBackend(Backend):
 
             affected_ids: list[str] = []
             for source_row, new_source_raw in source_updates:
-                source_body = _strip_frontmatter(new_source_raw)
+                source_body = strip_frontmatter(new_source_raw)
                 parsed_source_body = parse_body(source_body)
                 try:
                     source_fm = json.loads(source_row.get("frontmatter_json") or "{}")
@@ -478,7 +596,9 @@ class LocalBackend(Backend):
             current_raw = absolute.read_text(encoding="utf-8")
         except OSError as exc:
             raise NotFoundError(f"Mirror file missing for {note_id}: {exc}") from exc
-        current_body = _strip_frontmatter(current_raw)
+        # Normalise the trailing newline before joining so repeated appends
+        # insert exactly one blank-line separator (no newline accumulation).
+        current_body = strip_frontmatter(current_raw).rstrip("\n")
         new_body = f"{current_body}\n\n{content}" if current_body else content
 
         self.update_note(note_id, NotePatch(body=new_body))
@@ -490,16 +610,13 @@ class LocalBackend(Backend):
             raise NotFoundError(f"No note with id {note_id}")
 
         relative_path = row["path"]
-        trash_relative = f".trash/{relative_path}"
+        trash_relative, trash_abs = self._unique_trash_path(relative_path, note_id)
         source_abs = self._vault_dir / relative_path
-        trash_abs = self._vault_dir / trash_relative
 
         if not source_abs.exists():
             raise NotFoundError(f"Mirror file missing for {note_id}: {relative_path}")
 
         trash_abs.parent.mkdir(parents=True, exist_ok=True)
-        if trash_abs.exists():
-            trash_abs.unlink()
         source_abs.rename(trash_abs)
 
         try:
@@ -521,6 +638,27 @@ class LocalBackend(Backend):
         if not moved:
             trash_abs.rename(source_abs)
             raise NotFoundError(f"No note with id {note_id}")
+
+    def _unique_trash_path(self, relative_path: str, note_id: str) -> tuple[str, Path]:
+        """Derive a trash path that is unique per deletion.
+
+        The note id goes into the name (before the extension) so two
+        soft-deleted notes that ever shared a filename get distinct trash
+        files — deriving from the vault path alone made re-deleting a
+        same-filename note destroy the first note's only surviving body.
+        An existing occupant is never unlinked; a numeric suffix is added
+        until the path is free (e.g. a leftover from a crashed delete).
+        """
+        source_rel = Path(relative_path)
+        candidate = source_rel.with_name(f"{source_rel.stem}.{note_id}{source_rel.suffix}")
+        counter = 0
+        while (self._vault_dir / ".trash" / candidate).exists():
+            counter += 1
+            candidate = source_rel.with_name(
+                f"{source_rel.stem}.{note_id}-{counter}{source_rel.suffix}"
+            )
+        trash_relative = f".trash/{candidate}"
+        return trash_relative, self._vault_dir / trash_relative
 
     def restore_note(self, note_id: str) -> None:
         self._refresh_index_if_stale()
@@ -551,7 +689,7 @@ class LocalBackend(Backend):
             restore_abs.rename(trash_abs)
             raise NotFoundError(f"Cannot read restored file: {exc}") from exc
 
-        body = _strip_frontmatter(raw)
+        body = strip_frontmatter(raw)
         parsed_body = parse_body(body)
         try:
             fm = json.loads(trashed.get("frontmatter_json") or "{}")
@@ -645,16 +783,6 @@ class LocalBackend(Backend):
             content_type=row.get("content_type") or "",
             filename=row.get("original_name"),
         )
-
-
-def _strip_frontmatter(text: str) -> str:
-    """Remove a leading YAML frontmatter block, if any."""
-    if not text.startswith("---\n"):
-        return text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return text
-    return text[end + 5 :]
 
 
 def _utcnow_iso() -> str:

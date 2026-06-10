@@ -112,3 +112,49 @@ def test_no_banner_when_explicit_local_mode(monkeypatch, tmp_path: Path) -> None
     code, _out, err = _invoke(["list", "--json"])
     assert code == 0
     assert "warning" not in err.lower()
+
+
+# ---- local-mode read commands run the stat walk (M10) -------------------
+
+
+def _local_mode(monkeypatch) -> None:
+    monkeypatch.setenv("KNOTEN_MODE", "local")
+    monkeypatch.setenv("KNOTEN_API_URL", "")
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "")
+
+
+def test_search_sees_external_edit_without_sync(monkeypatch) -> None:
+    """`search` in local mode must run the stat walk before querying."""
+    _local_mode(monkeypatch)
+    code, out, _ = _invoke(
+        ["create", "--filename", "- Walk target", "--body", "original", "--json"]
+    )
+    assert code == 0, out
+    payload = json.loads(out)
+    note_file = Path(payload["absolute_path"])
+
+    # External edit — no knoten write in between.
+    note_file.write_text(
+        note_file.read_text(encoding="utf-8") + "\nzebraxylo\n",
+        encoding="utf-8",
+    )
+
+    code, out, _ = _invoke(["search", "zebraxylo", "--json"])
+    assert code == 0, out
+    hits = json.loads(out)["hits"]
+    assert [h["id"] for h in hits] == [payload["id"]]
+
+
+def test_list_sees_external_delete_without_sync(monkeypatch) -> None:
+    """`list` in local mode must drop rows whose file was externally removed."""
+    _local_mode(monkeypatch)
+    code, out, _ = _invoke(["create", "--filename", "- Doomed note", "--body", "x", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    Path(payload["absolute_path"]).unlink()
+
+    code, out, _ = _invoke(["list", "--json"])
+    assert code == 0, out
+    listing = json.loads(out)
+    assert payload["id"] not in {n["id"] for n in listing["notes"]}
+    assert listing["total"] == 0

@@ -152,6 +152,32 @@ def test_walk_runs_once_per_instance(tmp_settings: Settings, monkeypatch) -> Non
     )
 
 
+def test_walk_delete_spares_row_whose_path_changed_since_snapshot(
+    tmp_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The walk's missing-file hard-delete is conditional on the path (M8).
+
+    Reads run the walk without the advisory lock, so a concurrent rename can
+    re-point a row between the walk's snapshot and its delete. The delete
+    re-verifies the path inside the transaction; a row whose path moved on
+    survives instead of being dropped from the index.
+    """
+    notes = _seed(tmp_settings, count=1)
+    target = notes[0]
+
+    # Stale snapshot: the walk saw the note at a path that no longer exists
+    # on disk, while the store row (written by the "concurrent" rename)
+    # already points at the real file.
+    stale_snapshot = {"note/- Old name.md": (0, 0, target.id)}
+    monkeypatch.setattr(Store, "path_index", lambda self: stale_snapshot)
+
+    with LocalBackend(tmp_settings) as backend:
+        backend.list_note_summaries(limit=10, offset=0)
+        refreshed = backend.read_note(target.id)
+
+    assert refreshed.id == target.id, "row must survive the stale-path delete"
+
+
 def test_trash_directory_is_skipped(tmp_settings: Settings) -> None:
     _seed(tmp_settings, count=1)
 

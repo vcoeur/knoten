@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,7 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "no_proxy",
     ):
         monkeypatch.delenv(var, raising=False)
-    os.environ.setdefault("NO_PROXY", "*")
+    monkeypatch.setenv("NO_PROXY", "*")
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +47,10 @@ def _isolate_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(paths_module.ENV_DATA_DIR, str(sandbox / "data"))
     monkeypatch.setenv(paths_module.ENV_CACHE_DIR, str(sandbox / "cache"))
     monkeypatch.delenv("KNOTEN_HOME", raising=False)
+    # A developer's shell exporting remote-mode config must not flip tests
+    # into remote mode (or change timeouts) — tests opt in explicitly.
+    for var in ("KNOTEN_API_URL", "KNOTEN_MODE", "KNOTEN_API_TOKEN", "KNOTEN_HTTP_TIMEOUT"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(paths_module, "_repo_root", lambda: None)
 
 
