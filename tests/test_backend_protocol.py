@@ -31,6 +31,9 @@ class _FakeBackend:
     def list_note_summaries(self, *, limit: int, offset: int) -> NotesPage:
         return NotesPage(data=(), total=0, limit=limit, offset=offset)
 
+    def list_trashed_notes(self, *, limit: int | None = None):
+        return ()
+
     def read_note(self, note_id: str) -> Note:
         return Note(
             id=note_id,
@@ -110,6 +113,7 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
     forces the type checker / interpreter to notice signature drift.
     """
     _: Any = backend.list_note_summaries
+    _ = backend.list_trashed_notes
     _ = backend.read_note
     _ = backend.create_note
     _ = backend.update_note
@@ -121,6 +125,7 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
     _ = backend.close
     return (
         "list_note_summaries",
+        "list_trashed_notes",
         "read_note",
         "create_note",
         "update_note",
@@ -135,4 +140,4 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
 
 def test_backend_protocol_static_surface() -> None:
     names = _static_type_check(_FakeBackend())
-    assert len(names) == 10
+    assert len(names) == 11

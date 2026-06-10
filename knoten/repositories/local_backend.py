@@ -22,7 +22,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from knoten.models import Note, WikiLink
+from knoten.models import Note, NoteSummary, WikiLink
 from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
@@ -177,6 +177,26 @@ class LocalBackend(Backend):
             total=total,
             limit=limit,
             offset=offset,
+        )
+
+    def list_trashed_notes(self, *, limit: int | None = None) -> tuple[NoteSummary, ...]:
+        self._refresh_index_if_stale()
+        rows = self._store.list_trashed_notes(limit=limit)
+        return tuple(
+            NoteSummary(
+                id=row["id"],
+                filename=row["filename"],
+                title=row["title"],
+                family=row["family"],
+                kind=row["kind"],
+                source=row.get("source"),
+                tags=(),
+                created_at=row.get("created_at") or "",
+                updated_at=row.get("updated_at") or "",
+                permissions=row.get("permissions") or "ALL",
+                deleted_at=row.get("deleted_at"),
+            )
+            for row in rows
         )
 
     def read_note(self, note_id: str) -> Note:
@@ -375,13 +395,20 @@ class LocalBackend(Backend):
                 f"Cannot rename to {new_filename!r}: another note already uses that name."
             )
 
+        # Case-insensitive lookup (COLLATE NOCASE) so a source that wrote a
+        # case variant of the filename — e.g. `[[old note]]` for `Old Note` —
+        # is still found, matching the server's lowercased-slug resolution.
         source_rows = self._store.conn.execute(
-            "SELECT DISTINCT source_id FROM wikilinks WHERE target_title = ?",
+            "SELECT DISTINCT source_id FROM wikilinks WHERE target_title = ? COLLATE NOCASE",
             (old_filename,),
         ).fetchall()
         source_ids = [str(r["source_id"]) for r in source_rows if str(r["source_id"]) != note_id]
 
-        rewrite_re = re.compile(rf"\[\[{re.escape(old_filename)}(\]\]|#|\|)")
+        # Anchor the slug after `[[`, tolerating surrounding whitespace, and
+        # match case-insensitively — mirrors the server cascade. The suffix
+        # (`]]`, `#…`, or `|…`) is captured and re-emitted verbatim; only the
+        # slug and its padding are normalised to the new filename.
+        rewrite_re = re.compile(rf"\[\[\s*{re.escape(old_filename)}\s*(\]\]|#|\|)", re.IGNORECASE)
 
         def _replacement(match: re.Match[str]) -> str:
             # Callable replacement so `\1` / `\g` sequences in the new
@@ -805,12 +832,16 @@ def _apply_tag_edits(
 
     new_body = body
     for tag in remove_tags:
-        pattern = re.compile(rf"(?<![\w#])#{re.escape(tag)}\b")
+        # Case-insensitive so `--remove-tag foo` strips `#Foo` / `#FOO` too
+        # (see notes._compose_body — tags are case-folded everywhere else).
+        pattern = re.compile(rf"(?<![\w#])#{re.escape(tag)}\b", re.IGNORECASE)
         new_body = pattern.sub("", new_body)
     new_body = re.sub(r"[ \t]+\n", "\n", new_body).rstrip()
 
     missing = [
-        tag for tag in add_tags if not re.search(rf"(?<![\w#])#{re.escape(tag)}\b", new_body)
+        tag
+        for tag in add_tags
+        if not re.search(rf"(?<![\w#])#{re.escape(tag)}\b", new_body, re.IGNORECASE)
     ]
     if missing:
         suffix = " ".join(f"#{tag}" for tag in missing)

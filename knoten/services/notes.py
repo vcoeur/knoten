@@ -310,6 +310,47 @@ def list_summaries_to_dicts(
     return out
 
 
+_TRASH_MINIMAL_KEYS = ("id", "filename", "deleted_at")
+
+
+def trashed_summary_to_dict(summary: NoteSummary, *, minimal: bool = False) -> dict[str, Any]:
+    """Project a trashed-note summary to the `knoten trash` row shape.
+
+    `minimal` keeps only id / filename / deleted_at; otherwise the full
+    metadata row (sans body) is returned. `deleted_at` is always present —
+    it is the soft-delete timestamp, distinct from `updated_at`.
+    """
+    full = {
+        "id": summary.id,
+        "filename": summary.filename,
+        "title": summary.title,
+        "family": summary.family,
+        "kind": summary.kind,
+        "source": summary.source,
+        "permissions": summary.permissions,
+        "created_at": summary.created_at,
+        "updated_at": summary.updated_at,
+        "deleted_at": summary.deleted_at,
+    }
+    if minimal:
+        return {key: full[key] for key in _TRASH_MINIMAL_KEYS}
+    return full
+
+
+def list_trash(
+    backend: Backend, *, limit: int | None = None, minimal: bool = False
+) -> dict[str, Any]:
+    """Build the `knoten trash` payload — `{data: [...], total}`.
+
+    Read-only. Delegates to the backend's `list_trashed_notes` (remote: GET
+    /api/trash/notes; local: the `trashed_notes` table), then projects each
+    row to the machine output shape.
+    """
+    summaries = backend.list_trashed_notes(limit=limit)
+    data = [trashed_summary_to_dict(summary, minimal=minimal) for summary in summaries]
+    return {"data": data, "total": len(data)}
+
+
 def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": hit.id,
@@ -868,9 +909,20 @@ def append_note_remote(
     return fresh
 
 
-def restore_note_remote(*, backend: Backend, store: Store, vault_dir: Path, note_id: str) -> Note:
+def restore_note_remote(
+    *, backend: Backend, store: Store, vault_dir: Path, note_id: str, force: bool = False
+) -> Note:
     if not is_uuid(note_id):
         raise UserError("restore only accepts UUIDs (trash lookups are by id)")
+    # Local permission pre-check (restore needs WRITE on the server). The
+    # trashed row carries the note's permission level when one is mirrored
+    # locally; in remote mode after a remote-only delete there is no local
+    # trash row, so the check is best-effort and the server stays the final
+    # authority (its 403 FORBIDDEN now maps to permission_denied). `--force`
+    # skips it, consistent with edit/delete/append.
+    trashed = store.find_trashed(note_id)
+    if trashed is not None:
+        _assert_permission(trashed, required_level="WRITE", operation="restore", force=force)
     backend.restore_note(note_id)
     fresh = backend.read_note(note_id)
     ingest_note(fresh, store=store, vault_dir=vault_dir, synced=not _is_local_backend(backend))
@@ -889,12 +941,17 @@ def _compose_body(body: str, *, add_tags: list[str], remove_tags: list[str]) -> 
     """
     new_body = body
     for tag in remove_tags:
-        pattern = re.compile(rf"(?<![\w#])#{re.escape(tag)}\b")
+        # Case-insensitive so `--remove-tag foo` strips `#Foo` / `#FOO` too —
+        # tags are case-folded everywhere else (parser + store), so the body
+        # rewrite must match every case variant of the tag literal.
+        pattern = re.compile(rf"(?<![\w#])#{re.escape(tag)}\b", re.IGNORECASE)
         new_body = pattern.sub("", new_body)
     new_body = re.sub(r"[ \t]+\n", "\n", new_body).rstrip()
 
     missing = [
-        tag for tag in add_tags if not re.search(rf"(?<![\w#])#{re.escape(tag)}\b", new_body)
+        tag
+        for tag in add_tags
+        if not re.search(rf"(?<![\w#])#{re.escape(tag)}\b", new_body, re.IGNORECASE)
     ]
     if missing:
         suffix = " ".join(f"#{tag}" for tag in missing)

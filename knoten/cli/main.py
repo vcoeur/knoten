@@ -45,6 +45,7 @@ from knoten.cli.output import (
     render_status,
     render_summary_list,
     render_sync_result,
+    render_trash,
     render_unresolved,
 )
 from knoten.cli.skill import skill_app
@@ -57,6 +58,7 @@ from knoten.repositories.errors import (
     LockTimeoutError,
     NetworkError,
     NotFoundError,
+    RemoteRejectionError,
     StoreError,
     UserError,
     ValidationError,
@@ -78,6 +80,7 @@ from knoten.services.notes import (
     find_similar,
     hit_to_dict,
     list_summaries_to_dicts,
+    list_trash,
     preview_create,
     preview_edit,
     preview_reference,
@@ -373,6 +376,10 @@ def _error_extras(exc: Exception) -> dict[str, Any]:
         return {"candidates": exc.candidates}
     if isinstance(exc, ValidationError):
         return {"issues": exc.issues}
+    if isinstance(exc, RemoteRejectionError):
+        # Distinct key from the envelope's integer `code` (the exit code) —
+        # this carries the server's structured error code string.
+        return {"error_code": exc.error_code}
     return {}
 
 
@@ -2218,6 +2225,11 @@ def cmd_delete(
 @app.command("restore")
 def cmd_restore(
     note_id: str = typer.Argument(...),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the local permissions pre-check (web-scope tokens only)",
+    ),
     fields: Fields = typer.Option(
         Fields.minimal,
         "--fields",
@@ -2227,7 +2239,13 @@ def cmd_restore(
     ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Restore a note from trash."""
+    """Restore a note from trash.
+
+    Restore requires WRITE on the note; a local pre-check fast-fails when the
+    mirror knows the note's level, and `--force` bypasses it (the server is
+    the final authority). The restore handle is the `deleted_id` returned by
+    `knoten delete`.
+    """
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
@@ -2236,10 +2254,48 @@ def cmd_restore(
             vault_dir = settings.paths.vault_dir
             with _build_backend(settings) as backend:
                 note = restore_note_remote(
-                    backend=backend, store=store, vault_dir=vault_dir, note_id=note_id
+                    backend=backend,
+                    store=store,
+                    vault_dir=vault_dir,
+                    note_id=note_id,
+                    force=force,
                 )
             payload = _write_response(store, vault_dir, note.id, fields)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _fail(exc, mode=mode)
+
+
+@app.command("trash")
+def cmd_trash(
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    fields: Fields = typer.Option(
+        Fields.full,
+        "--fields",
+        help="Row shape: `full` (default) or `minimal` (id, filename, deleted_at only).",
+        case_sensitive=False,
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List soft-deleted notes (the trash) — read-only.
+
+    Remote mode lists the server's trash (GET /api/trash/notes); local mode
+    lists the local `trashed_notes` table. Each row carries `deleted_at`, the
+    soft-delete timestamp; the note id is the restore handle for
+    `knoten restore <id>`.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        if settings.effective_mode != "local":
+            _require_token(settings)
+        with _build_backend(settings) as backend:
+            payload = list_trash(
+                backend, limit=limit, minimal=fields is Fields.minimal and mode.json
+            )
+        render_trash(payload, mode=mode)
     except typer.Exit:
         raise
     except Exception as exc:

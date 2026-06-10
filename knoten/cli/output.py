@@ -291,6 +291,35 @@ def render_counts(payload: dict[str, Any], key: str, *, mode: OutputMode) -> Non
             sys.stdout.write(f"{item.get('count', 0)}\t{item.get(key[:-1], item.get('tag', ''))}\n")
 
 
+def render_trash(payload: dict[str, Any], *, mode: OutputMode) -> None:
+    """Render the trash listing — table on a TTY, id/filename lines on a pipe."""
+    if mode.json:
+        emit_json(payload)
+        return
+    rows = payload.get("data", [])
+    total = payload.get("total", len(rows))
+    if not rows:
+        _console.print("Trash is empty.")
+        return
+    if mode.tty:
+        table = Table(title=f"{len(rows)} / {total} trashed note(s)")
+        table.add_column("Deleted", style="dim")
+        table.add_column("Filename", style="bold")
+        table.add_column("Family", style="cyan")
+        table.add_column("Kind", style="magenta")
+        for row in rows:
+            table.add_row(
+                (row.get("deleted_at") or "")[:19],
+                row.get("filename", ""),
+                row.get("family", ""),
+                row.get("kind", ""),
+            )
+        _console.print(table)
+    else:
+        for row in rows:
+            sys.stdout.write(f"{row.get('id', '')}\t{row.get('filename', '')}\n")
+
+
 def render_unresolved(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if mode.json:
         emit_json(payload)

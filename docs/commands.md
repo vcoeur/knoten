@@ -223,11 +223,20 @@ In remote mode the server's cascade rewrites every referencing note regardless o
 
 ### `knoten delete` / `knoten restore`
 
-`delete` moves the file to `<vault>/.trash/` — reversible. `rm foo.md` in a shell is a permanent delete (no trash copy). Declining the interactive confirmation prompt exits 0 (a successful no-op, not an error). `restore` accepts only a note UUID — trash lookups are by id, not filename.
+`delete` moves the file to `<vault>/.trash/` — reversible. `rm foo.md` in a shell is a permanent delete (no trash copy). Declining the interactive confirmation prompt exits 0 (a successful no-op, not an error). The `--json` response is `{"deleted_id": "<uuid>"}` — **that id is the restore handle**: pass it to `knoten restore` (or find it again via `knoten trash`). `restore` accepts only a note UUID — trash lookups are by id, not filename. Restore requires WRITE on the note; a local pre-check fast-fails when the mirror knows the level, and `--force` bypasses it (the server stays the final authority).
 
 ```bash
-knoten delete "- Scratch" --json
+knoten delete "- Scratch" --json          # → {"deleted_id": "0d4f…"}
 knoten restore 0d4f6c0e-93f7-4f4e-9a44-1c8b1a2f3d4e
+```
+
+### `knoten trash`
+
+List soft-deleted notes (read-only), most-recently-deleted first. Remote mode lists the server's trash (`GET /api/trash/notes`); local mode lists the local `trashed_notes` table — both work offline-consistent with their own source of truth. The `--json` payload is `{"data": [{"id", "filename", "title", "family", "kind", "source", "permissions", "created_at", "updated_at", "deleted_at"}], "total"}`; `--fields minimal` trims each JSON row to `id`, `filename`, `deleted_at`. `--limit` caps the rows. Each `id` is the restore handle for `knoten restore`.
+
+```bash
+knoten trash --json
+knoten trash --limit 10 --fields minimal --json
 ```
 
 ### `knoten upload` / `knoten download`

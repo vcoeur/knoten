@@ -127,6 +127,16 @@ class Backend(Protocol):
         """
         ...
 
+    def list_trashed_notes(self, *, limit: int | None = None) -> tuple[NoteSummary, ...]:
+        """Return soft-deleted notes, most-recently-deleted first.
+
+        Read-only and offline-consistent with each backend's source of truth:
+        `RemoteBackend` calls GET /api/trash/notes; `LocalBackend` reads the
+        local `trashed_notes` table. Each summary carries its `deleted_at`.
+        `limit` caps the number of rows when set.
+        """
+        ...
+
     def create_note(self, draft: NoteDraft) -> str:
         """Create a note and return its id. Caller re-fetches via read_note()."""
         ...

@@ -338,6 +338,57 @@ def test_backlinks_json_smoke(monkeypatch) -> None:
     assert payload["backlinks"] == []
 
 
+def test_trash_json_empty_store(monkeypatch) -> None:
+    monkeypatch.setenv("KNOTEN_MODE", "local")
+    runner = CliRunner()
+    result = runner.invoke(app, ["trash", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload == {"data": [], "total": 0}
+
+
+def test_trash_lists_deleted_note_and_restore_roundtrips(monkeypatch) -> None:
+    """Local mode: delete a note, see it in `trash`, restore it by its id."""
+    monkeypatch.setenv("KNOTEN_MODE", "local")
+    runner = CliRunner()
+    result = runner.invoke(app, ["create", "--filename", "- Trashable", "--body", "x", "--json"])
+    assert result.exit_code == 0, result.output
+    note_id = json.loads(result.stdout)["id"]
+
+    result = runner.invoke(app, ["delete", "--yes", "--json", "--", note_id])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["deleted_id"] == note_id
+
+    result = runner.invoke(app, ["trash", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["total"] == 1
+    row = payload["data"][0]
+    assert row["id"] == note_id
+    assert row["filename"] == "- Trashable"
+    assert row["deleted_at"]  # soft-delete timestamp present
+
+    result = runner.invoke(app, ["restore", note_id, "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["id"] == note_id
+
+    # Trash is empty again; the note is back in the active list.
+    result = runner.invoke(app, ["trash", "--json"])
+    assert json.loads(result.stdout)["total"] == 0
+
+
+def test_trash_minimal_fields(monkeypatch) -> None:
+    monkeypatch.setenv("KNOTEN_MODE", "local")
+    runner = CliRunner()
+    result = runner.invoke(app, ["create", "--filename", "- Min", "--body", "x", "--json"])
+    note_id = json.loads(result.stdout)["id"]
+    runner.invoke(app, ["delete", "--yes", "--json", "--", note_id])
+    result = runner.invoke(app, ["trash", "--fields", "minimal", "--json"])
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.stdout)["data"][0]
+    assert set(row.keys()) == {"id", "filename", "deleted_at"}
+
+
 def test_tags_json_empty_store(monkeypatch) -> None:
     monkeypatch.setenv("KNOTEN_MODE", "local")
     runner = CliRunner()

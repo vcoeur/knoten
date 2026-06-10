@@ -59,6 +59,9 @@ class NoteSummary:
     created_at: str
     updated_at: str
     permissions: str = "ALL"
+    # Soft-delete timestamp — set only for rows from a trash listing (GET
+    # /api/trash/notes or the local trashed_notes table); None for active notes.
+    deleted_at: str | None = None
 
 
 @dataclass(frozen=True)

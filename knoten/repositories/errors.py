@@ -47,33 +47,61 @@ class AmbiguousTargetError(UserError):
 
 
 class PermissionError(UserError):
-    """Local client-side pre-check blocked a write because the note's
-    `permissions` level is below what the operation needs.
+    """A write was blocked because the note's `permissions` level is below
+    what the operation needs.
 
-    This is a fast-fail guard for tokens that enforce per-note permissions
-    (`api` scope). `web`-scope tokens can bypass it with `--force`, which
-    skips the check entirely — the server is still the final authority.
+    Raised in two situations, both exit 1 / kind `permission_denied`:
+
+    - The **local** client-side pre-check (full context: `filename`,
+      `current_level`, `operation`). A fast-fail guard for tokens that enforce
+      per-note permissions (`api` scope); `web`-scope tokens bypass it with
+      `--force`, the server staying the final authority.
+    - A **server** 403 `{"error": "FORBIDDEN", "detail": {noteId, level}}` that
+      slipped past the local check (stale mirror, or `--force`). Only `note_id`
+      and `required_level` are known there — the other fields stay `None`.
     """
 
     def __init__(
         self,
         *,
         note_id: str,
-        filename: str,
-        current_level: str,
         required_level: str,
-        operation: str,
+        filename: str | None = None,
+        current_level: str | None = None,
+        operation: str | None = None,
     ) -> None:
-        super().__init__(
-            f"{operation} requires {required_level} on '{filename}' "
-            f"(note {note_id} is {current_level}). "
-            f"Use --force to bypass the local check — the server may still reject."
-        )
+        if filename is not None and current_level is not None and operation is not None:
+            message = (
+                f"{operation} requires {required_level} on '{filename}' "
+                f"(note {note_id} is {current_level}). "
+                f"Use --force to bypass the local check — the server may still reject."
+            )
+        else:
+            # Server-origin 403 FORBIDDEN — we only learn the note id and the
+            # level the server demanded.
+            message = (
+                f"permission denied by the remote: requires {required_level} on note {note_id}"
+            )
+        super().__init__(message)
         self.note_id = note_id
         self.filename = filename
         self.current_level = current_level
         self.required_level = required_level
         self.operation = operation
+
+
+class RemoteRejectionError(UserError):
+    """The remote rejected a mutation with a structured, user-actionable 4xx.
+
+    Covers 409 `DUPLICATE_FILENAME` / `DUPLICATE_REFERENCE` and 400
+    `INVALID_FILENAME`. Exit 1 / kind `user`. The server's error code is
+    preserved on `error_code` and surfaced in the JSON envelope under
+    `error_code` (the envelope's own `code` field is the integer exit code).
+    """
+
+    def __init__(self, message: str, *, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class ValidationError(UserError):

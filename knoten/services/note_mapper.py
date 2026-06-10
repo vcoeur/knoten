@@ -25,6 +25,9 @@ def summary_from_api(payload: dict[str, Any]) -> NoteSummary:
         created_at=_as_str(payload.get("createdAt") or payload.get("created_at", "")),
         updated_at=_as_str(payload.get("updatedAt") or payload.get("updated_at", "")),
         permissions=_as_str(payload.get("permissions")) or "ALL",
+        # Present only on trash-listing rows (GET /api/trash/notes); absent for
+        # active notes, so this stays additive for the existing list endpoint.
+        deleted_at=_as_str(payload.get("deletedAt") or payload.get("deleted_at")) or None,
     )
 
 
