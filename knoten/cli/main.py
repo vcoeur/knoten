@@ -20,7 +20,7 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import UTC
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,7 @@ from knoten.services.notes import (
     delete_note_remote,
     download_file_remote,
     edit_note_remote,
+    find_similar,
     hit_to_dict,
     list_summaries_to_dicts,
     preview_create,
@@ -691,6 +692,12 @@ def cmd_search(
         help="Attach a per-column bm25 breakdown to each hit (title/body/filename). "
         "Local, ranked search only.",
     ),
+    in_columns: list[str] = typer.Option(
+        [],
+        "--in",
+        help="Restrict the match to one or more FTS5 columns (title, body, filename). "
+        "Repeatable or comma-separated. Ranked search only.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Full-text search against the local index."""
@@ -700,9 +707,13 @@ def cmd_search(
             raise UserError(
                 "--explain only applies to ranked unicode61 search; drop --fuzzy to use it"
             )
+        if in_columns and fuzzy:
+            raise UserError("--in only applies to ranked unicode61 search; drop --fuzzy to use it")
+        columns = _parse_search_columns(in_columns)
         settings = _load()
         with Store(settings.paths.index_path) as store:
             _local_stat_walk(settings, store)
+            fuzzy_total: int | None = None
             if fuzzy:
                 hits, total = store.search_fuzzy(
                     query,
@@ -728,10 +739,29 @@ def cmd_search(
                     offset=offset,
                     vault_dir=settings.paths.vault_dir,
                     explain=explain,
+                    columns=columns,
                 )
                 source = "local"
             hint = _family_kind_hint(store, kind=kind, total=total)
-        payload = {
+            # Zero ranked hits: probe fuzzy under the same filters so we can tell
+            # the user --fuzzy would have found something instead of leaving them
+            # to conclude the vault is empty. Only on the zero-hit path, so the
+            # common case pays nothing.
+            if not fuzzy and total == 0:
+                fuzzy_total = _zero_hit_fuzzy_probe(
+                    store,
+                    query,
+                    settings=settings,
+                    family=family,
+                    kind=kind,
+                    tag=tag,
+                    min_permission=min_permission,
+                    max_permission=max_permission,
+                )
+                if fuzzy_total:
+                    fuzzy_hint = f"0 ranked hits; --fuzzy would find {fuzzy_total}"
+                    hint = f"{hint} {fuzzy_hint}" if hint else fuzzy_hint
+        payload: dict[str, Any] = {
             "query": query,
             "total": total,
             "limit": limit,
@@ -739,6 +769,10 @@ def cmd_search(
             "hits": [hit_to_dict(h) for h in hits],
             "source": source,
         }
+        if columns:
+            payload["scope"] = columns
+        if fuzzy_total:
+            payload["fuzzy_total"] = fuzzy_total
         if hint:
             payload["hint"] = hint
         render_search_hits(payload, mode=mode)
@@ -748,6 +782,62 @@ def cmd_search(
         raise
     except Exception as exc:
         _fail(exc, mode=mode)
+
+
+_SEARCH_COLUMNS = ("title", "body", "filename")
+
+
+def _parse_search_columns(raw: list[str]) -> list[str]:
+    """Flatten + validate `--in` values into an ordered, de-duplicated column list.
+
+    Accepts repeated flags and comma-separated values (`--in title,body`).
+    Each value must name an FTS5 column (title / body / filename); anything
+    else raises a UserError so the typo surfaces at the CLI boundary.
+    """
+    columns: list[str] = []
+    for value in raw:
+        for part in value.split(","):
+            column = part.strip().lower()
+            if not column:
+                continue
+            if column not in _SEARCH_COLUMNS:
+                raise UserError(
+                    f"--in: '{column}' is not a searchable column "
+                    f"(choose from: {', '.join(_SEARCH_COLUMNS)})"
+                )
+            if column not in columns:
+                columns.append(column)
+    return columns
+
+
+def _zero_hit_fuzzy_probe(
+    store: Store,
+    query: str,
+    *,
+    settings: Settings,
+    family: str | None,
+    kind: str | None,
+    tag: str | None,
+    min_permission: str | None,
+    max_permission: str | None,
+) -> int:
+    """Count fuzzy matches for a query that returned zero ranked hits.
+
+    Reuses `Store.search_fuzzy` with a tiny limit (only the total matters)
+    under the same filters. Returns 0 when fuzzy finds nothing too.
+    """
+    _hits, total = store.search_fuzzy(
+        query,
+        family=family,
+        kind=kind,
+        tag=tag,
+        min_permission=min_permission,
+        max_permission=max_permission,
+        limit=1,
+        offset=0,
+        vault_dir=settings.paths.vault_dir,
+    )
+    return total
 
 
 def _family_kind_hint(store: Store, *, kind: str | None, total: int) -> str | None:
@@ -774,6 +864,49 @@ def _family_kind_hint(store: Store, *, kind: str | None, total: int) -> str | No
         f"--kind {kind!r} matched 0 rows, but {family_total} note(s) live in the "
         f"{kind!r} family under other kinds. Did you mean --family {kind}?"
     )
+
+
+@app.command("similar")
+def cmd_similar(
+    target: str = typer.Argument(..., help="Note UUID or filename (or prefix)"),
+    family: str | None = typer.Option(None, "--family"),
+    kind: str | None = typer.Option(None, "--kind"),
+    tag: str | None = typer.Option(None, "--tag"),
+    limit: int = typer.Option(10, "--limit", min=1, max=50),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Find notes related to a target — ranked FTS5 search, no embeddings.
+
+    Resolves the target like `read`, derives a query from its title + most
+    frequent body terms, runs it through ranked search (matching any term),
+    drops the note itself, and returns the top hits. The JSON shape mirrors
+    `search` hits, wrapped with `target_id`, `target_filename`, and the
+    `derived_query`. No network, no lock.
+    """
+    mode = OutputMode.detect(json_output)
+    try:
+        settings = _load()
+        with Store(settings.paths.index_path) as store:
+            _local_stat_walk(settings, store)
+            payload = find_similar(
+                store,
+                settings.paths.vault_dir,
+                target,
+                limit=limit,
+                family=family,
+                kind=kind,
+                tag=tag,
+            )
+        if mode.json:
+            render_search_hits(payload, mode=mode)
+        else:
+            # The TTY/plain renderer keys off `query` for its heading; the JSON
+            # payload keeps the documented `derived_query` shape untouched.
+            render_search_hits({**payload, "query": payload["derived_query"]}, mode=mode)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        _fail(exc, mode=mode)
 
 
 @app.command("read")
@@ -827,6 +960,27 @@ def cmd_path(
         _fail(exc, mode=mode)
 
 
+def _parse_iso_filter(value: str | None, *, flag: str) -> str | None:
+    """Validate an ISO date/datetime CLI bound, returning it normalised for SQL.
+
+    Accepts a bare `YYYY-MM-DD` date or a full ISO-8601 timestamp (a trailing
+    `Z` is honoured). Returns the trimmed string unchanged — the stored
+    timestamps sort lexicographically, so the validated string is a usable
+    `>=` bound directly. An unparseable value raises a UserError (exit 1).
+    """
+    if value is None:
+        return None
+    candidate = value.strip()
+    try:
+        datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise UserError(
+            f"{flag}: '{value}' is not an ISO date or datetime "
+            "(use YYYY-MM-DD or a full ISO-8601 timestamp)"
+        ) from exc
+    return candidate
+
+
 @app.command("list")
 def cmd_list(
     family: str | None = typer.Option(None, "--family"),
@@ -843,6 +997,18 @@ def cmd_list(
         "--max-permission",
         help="Only include notes at this permission level or lower",
     ),
+    updated_after: str | None = typer.Option(
+        None,
+        "--updated-after",
+        help="Only notes updated on or after this ISO date/datetime "
+        "(YYYY-MM-DD or a full ISO-8601 timestamp).",
+    ),
+    created_after: str | None = typer.Option(
+        None,
+        "--created-after",
+        help="Only notes created on or after this ISO date/datetime "
+        "(YYYY-MM-DD or a full ISO-8601 timestamp).",
+    ),
     sort: str = typer.Option("updated", "--sort"),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
     offset: int = typer.Option(0, "--offset", min=0),
@@ -851,6 +1017,8 @@ def cmd_list(
     """List notes from the local index."""
     mode = OutputMode.detect(json_output)
     try:
+        updated_after_value = _parse_iso_filter(updated_after, flag="--updated-after")
+        created_after_value = _parse_iso_filter(created_after, flag="--created-after")
         settings = _load()
         with Store(settings.paths.index_path) as store:
             _local_stat_walk(settings, store)
@@ -861,6 +1029,8 @@ def cmd_list(
                 source=source,
                 min_permission=min_permission,
                 max_permission=max_permission,
+                updated_after=updated_after_value,
+                created_after=created_after_value,
                 sort=sort,
                 limit=limit,
                 offset=offset,
@@ -868,7 +1038,16 @@ def cmd_list(
             vault_dir = settings.paths.vault_dir
             notes = list_summaries_to_dicts(summaries, vault_dir=vault_dir, store=store)
             hint = _family_kind_hint(store, kind=kind, total=total)
-        payload = {"total": total, "limit": limit, "offset": offset, "notes": notes}
+        payload: dict[str, Any] = {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "notes": notes,
+        }
+        if updated_after_value is not None:
+            payload["updated_after"] = updated_after_value
+        if created_after_value is not None:
+            payload["created_after"] = created_after_value
         if hint:
             payload["hint"] = hint
         render_summary_list(payload, mode=mode)

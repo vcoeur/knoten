@@ -139,6 +139,120 @@ def test_append_adds_to_existing_body(local_env) -> None:
     assert "line 2" in payload["body"]
 
 
+def test_similar_finds_related_note(local_env) -> None:
+    _invoke(
+        [
+            "create",
+            "--filename",
+            "- Encryption basics",
+            "--body",
+            "Symmetric encryption uses shared keys and ciphers for confidentiality.",
+            "--json",
+        ]
+    )
+    _invoke(
+        [
+            "create",
+            "--filename",
+            "- Cipher design",
+            "--body",
+            "Block ciphers and stream ciphers rely on keys for encryption.",
+            "--json",
+        ]
+    )
+    _invoke(["create", "--filename", "- Garden log", "--body", "Tomatoes need sunlight.", "--json"])
+
+    code, out = _invoke(["similar", "--json", "--", "- Encryption basics"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["target_filename"] == "- Encryption basics"
+    assert payload["derived_query"]
+    filenames = {hit["filename"] for hit in payload["hits"]}
+    assert "- Encryption basics" not in filenames  # self excluded
+    assert "- Cipher design" in filenames
+    assert payload["total"] == len(payload["hits"])
+
+
+def test_similar_respects_limit(local_env) -> None:
+    for index in range(4):
+        _invoke(
+            [
+                "create",
+                "--filename",
+                f"- Note {index}",
+                "--body",
+                "shared keyword routing networking protocol packets",
+                "--json",
+            ]
+        )
+    code, out = _invoke(["similar", "--limit", "2", "--json", "--", "- Note 0"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert len(payload["hits"]) <= 2
+
+
+def test_search_in_column_scope(local_env) -> None:
+    _invoke(["create", "--filename", "- Zephyr title", "--body", "nothing here", "--json"])
+    _invoke(["create", "--filename", "- Plain", "--body", "mentions zephyr in body", "--json"])
+
+    # Scope to title: only the note with zephyr in the title/filename matches.
+    code, out = _invoke(["search", "zephyr", "--in", "title", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["scope"] == ["title"]
+    assert {hit["filename"] for hit in payload["hits"]} == {"- Zephyr title"}
+
+    # Comma-separated form is accepted and de-duplicated.
+    code, out = _invoke(["search", "zephyr", "--in", "title,body", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["scope"] == ["title", "body"]
+    assert payload["total"] == 2
+
+
+def test_search_in_invalid_column_is_user_error(local_env) -> None:
+    code, out = _invoke(["search", "anything", "--in", "nope", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_search_in_with_fuzzy_is_user_error(local_env) -> None:
+    code, out = _invoke(["search", "anything", "--in", "title", "--fuzzy", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_search_zero_hit_fuzzy_hint(local_env) -> None:
+    _invoke(["create", "--filename", "- Encryption handbook", "--body", "ciphers", "--json"])
+    # A typo gets 0 ranked hits but the fuzzy probe finds the note.
+    code, out = _invoke(["search", "encrpytion", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["total"] == 0
+    assert payload["fuzzy_total"] >= 1
+    assert "--fuzzy" in payload["hint"]
+
+
+def test_list_updated_after_filter_and_echo(local_env) -> None:
+    _invoke(["create", "--filename", "- One", "--body", "a", "--json"])
+    # A future bound excludes everything; the filter is echoed in the payload.
+    code, out = _invoke(["list", "--updated-after", "2999-01-01", "--json"])
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["total"] == 0
+    assert payload["updated_after"] == "2999-01-01"
+
+    # A past bound keeps the note.
+    code, out = _invoke(["list", "--updated-after", "2000-01-01", "--json"])
+    assert json.loads(out)["total"] == 1
+
+
+def test_list_created_after_invalid_is_user_error(local_env) -> None:
+    code, out = _invoke(["list", "--created-after", "not-a-date", "--json"])
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
 def test_verify_local_mode_is_non_destructive(local_env) -> None:
     """`knoten verify` in local mode must not sweep `.trash/` / `.attachments/` (C1).
 

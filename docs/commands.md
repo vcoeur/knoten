@@ -27,9 +27,29 @@ Ranked full-text search on the local index, with snippets, filters, and JSON out
 knoten search "zettelkasten"
 knoten search "query" --fuzzy --tag research --json
 knoten search "trigram" --family permanent --limit 5
+knoten search "alice" --in title --json          # scope the match to a column
+knoten search "auth" --in title,filename --json  # repeatable / comma-separated
 ```
 
 Ranking: **title > filename > body**. Add `--fuzzy` for typo-tolerant + substring match (trigram FTS + rapidfuzz on titles).
+
+`--in <column>` restricts the match to one or more FTS5 columns — `title`, `body`, `filename` — repeatable or comma-separated. Invalid column names are a `user` error, and `--in` cannot be combined with `--fuzzy` (ranked search only). When set, the active scope is echoed back in the JSON payload as `scope`.
+
+When a title or filename matches but the body has no match, the body snippet falls back to the note's first non-empty body line (truncated, no `<<>>` markers) so highly-ranked hits still carry a preview.
+
+When a ranked search returns **0 hits**, knoten runs a cheap fuzzy probe under the same filters; if fuzzy would have found matches it adds `fuzzy_total` to the payload and a `hint` like `0 ranked hits; --fuzzy would find 3`. The mode is never switched automatically.
+
+### `knoten similar`
+
+Related notes without embeddings. Resolves the target like `read` (UUID, exact filename, or unambiguous prefix), derives a query from the note's title + most frequent body terms, runs it through ranked search (matching any term), drops the note itself, and returns the top hits. Network- and lock-free.
+
+```bash
+knoten similar "! Core insight" --json
+knoten similar 202604151820-core-insight --limit 5 --json
+knoten similar "! Core insight" --family permanent --json
+```
+
+`--limit` defaults to 10 (max 50). `--family` / `--kind` / `--tag` narrow the candidate pool, same as `search`. JSON is `{target_id, target_filename, derived_query, total, hits}` — `hits` share the `search` hit shape.
 
 ### `knoten read`
 
@@ -47,7 +67,11 @@ Metadata listing — filter by family, kind, or tag.
 ```bash
 knoten list --family permanent --limit 10
 knoten list --tag research --json
+knoten list --updated-after 2026-06-01 --json
+knoten list --created-after 2026-06-01T09:00:00Z --json
 ```
+
+`--updated-after` / `--created-after` keep only notes updated / created on or after the given moment. Each accepts a bare `YYYY-MM-DD` date or a full ISO-8601 timestamp (a bare date is inclusive of that whole day); an unparseable value is a `user` error. Active date filters are echoed back in the JSON payload (`updated_after` / `created_after`).
 
 ### `knoten backlinks`
 

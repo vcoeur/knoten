@@ -101,6 +101,15 @@ def test_search_fuzzy_empty_store(monkeypatch, tmp_path) -> None:
     assert payload["hits"] == []
 
 
+def test_similar_no_such_note(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KNOTEN_HOME", str(tmp_path))
+    monkeypatch.setenv("KNOTEN_API_TOKEN", "nt_test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["similar", "nonexistent", "--json"])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"] == "not_found"
+
+
 def test_missing_token_is_config_error(monkeypatch, tmp_path) -> None:
     # Force remote mode so the missing-token path is exercised; without an
     # api_url the CLI would resolve to local mode and skip the token check.

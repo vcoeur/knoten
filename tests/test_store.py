@@ -735,3 +735,214 @@ def test_distinct_citekeys_prefix_filter(store: Store) -> None:
 
 def test_distinct_citekeys_empty_vault(store: Store) -> None:
     assert store.distinct_citekeys() == []
+
+
+# ---- snippet fallback (finding 1) ---------------------------------------
+
+
+def test_snippet_fallback_recovers_first_nonempty_line() -> None:
+    from knoten.repositories.store import _snippet_fallback
+
+    assert _snippet_fallback("") == ""
+    assert _snippet_fallback("\n\n") == ""
+    assert _snippet_fallback("   \n \nFirst real line.\nSecond.") == "First real line."
+    # Trimmed and truncated to ~120 chars, no highlight markers.
+    long_line = "word " * 60
+    out = _snippet_fallback(f"\n\n{long_line}")
+    assert len(out) <= 120
+    assert "<<" not in out and ">>" not in out
+
+
+def test_ranked_search_empty_body_snippet_is_clean(store: Store, tmp_path: Path) -> None:
+    """A title-only match on a body-less note yields "" (not "\\n\\n")."""
+    store.upsert_note(
+        _make_note(note_id="n1", filename="! Zephyr protocol", body=""),
+        path="note/! Zephyr protocol.md",
+        body_sha256="1",
+    )
+    hits, total = store.search("zephyr", vault_dir=tmp_path)
+    assert total == 1
+    # Whitespace-only natural snippet is normalised away by the fallback.
+    assert hits[0].snippet == ""
+
+
+def test_fuzzy_snippet_falls_back_to_body_line(store: Store, tmp_path: Path) -> None:
+    """A rapidfuzz-only title hit carries no snippet; the fallback recovers one."""
+    store.upsert_note(
+        _make_note(
+            note_id="n1",
+            filename="! Encryption handbook",
+            body="\n\nSymmetric and asymmetric ciphers explained in depth.",
+        ),
+        path="note/! Encryption handbook.md",
+        body_sha256="1",
+    )
+    # Typo on the title → rapidfuzz match, no trigram snippet.
+    hits, total = store.search_fuzzy("encrpytion", vault_dir=tmp_path)
+    assert total >= 1
+    assert hits[0].id == "n1"
+    assert hits[0].snippet == "Symmetric and asymmetric ciphers explained in depth."
+
+
+# ---- column-scoped search (finding 5) -----------------------------------
+
+
+def test_search_in_columns_scopes_to_named_columns(store: Store, tmp_path: Path) -> None:
+    # n1: term only in the body. n2: term only in the title.
+    store.upsert_note(
+        _make_note(note_id="n1", filename="! Alpha note", body="mentions zephyr in the body"),
+        path="note/! Alpha note.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(note_id="n2", filename="! Zephyr title", body="nothing relevant here"),
+        path="note/! Zephyr title.md",
+        body_sha256="2",
+    )
+    # Unscoped: both match.
+    _hits, total = store.search("zephyr", vault_dir=tmp_path)
+    assert total == 2
+    # Scoped to title: only the title hit.
+    hits, total = store.search("zephyr", vault_dir=tmp_path, columns=["title"])
+    assert total == 1
+    assert hits[0].id == "n2"
+    # Scoped to body: only the body hit.
+    hits, total = store.search("zephyr", vault_dir=tmp_path, columns=["body"])
+    assert total == 1
+    assert hits[0].id == "n1"
+
+
+def test_search_match_any_uses_or_semantics(store: Store, tmp_path: Path) -> None:
+    store.upsert_note(
+        _make_note(note_id="n1", filename="! Ciphers", body="symmetric ciphers and keys"),
+        path="note/! Ciphers.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(note_id="n2", filename="! Routing", body="packets and routers only"),
+        path="note/! Routing.md",
+        body_sha256="2",
+    )
+    # Implicit AND of two disjoint terms matches nothing.
+    _hits, total_and = store.search("ciphers routers", vault_dir=tmp_path)
+    assert total_and == 0
+    # OR semantics matches both notes.
+    _hits, total_or = store.search("ciphers routers", vault_dir=tmp_path, match_any=True)
+    assert total_or == 2
+
+
+# ---- list date filters (finding 3) --------------------------------------
+
+
+def _make_dated_note(note_id: str, filename: str, *, created: str, updated: str) -> Note:
+    return Note(
+        id=note_id,
+        filename=filename,
+        title=filename.lstrip("! "),
+        family="permanent",
+        kind="permanent",
+        source=None,
+        body="",
+        frontmatter={},
+        created_at=created,
+        updated_at=updated,
+    )
+
+
+def test_list_filters_by_updated_after(store: Store) -> None:
+    store.upsert_note(
+        _make_dated_note(
+            "old", "! Old", created="2024-01-01T00:00:00Z", updated="2024-01-05T00:00:00Z"
+        ),
+        path="note/! Old.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_dated_note(
+            "new", "! New", created="2024-01-01T00:00:00Z", updated="2024-03-10T12:00:00Z"
+        ),
+        path="note/! New.md",
+        body_sha256="2",
+    )
+    notes, total = store.list_notes(updated_after="2024-02-01")
+    assert total == 1
+    assert notes[0].id == "new"
+
+
+def test_list_filters_by_created_after_is_inclusive(store: Store) -> None:
+    store.upsert_note(
+        _make_dated_note(
+            "a", "! A", created="2024-01-02T00:00:00Z", updated="2024-01-02T00:00:00Z"
+        ),
+        path="note/! A.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_dated_note(
+            "b", "! B", created="2024-01-01T00:00:00Z", updated="2024-01-01T00:00:00Z"
+        ),
+        path="note/! B.md",
+        body_sha256="2",
+    )
+    # A bare date bound includes timestamps on that day (lexicographic >=).
+    notes, total = store.list_notes(created_after="2024-01-02")
+    assert {n.id for n in notes} == {"a"}
+    assert total == 1
+
+
+# ---- similar (finding 4) ------------------------------------------------
+
+
+def test_find_similar_returns_related_notes_excluding_self(store: Store, tmp_path: Path) -> None:
+    from knoten.services.notes import find_similar
+
+    store.upsert_note(
+        _make_note(
+            note_id="seed",
+            filename="! Encryption basics",
+            body="Symmetric encryption uses shared keys and ciphers for confidentiality.",
+        ),
+        path="note/! Encryption basics.md",
+        body_sha256="1",
+    )
+    store.upsert_note(
+        _make_note(
+            note_id="related",
+            filename="! Cipher design",
+            body="Block ciphers and stream ciphers both rely on keys for encryption.",
+        ),
+        path="note/! Cipher design.md",
+        body_sha256="2",
+    )
+    store.upsert_note(
+        _make_note(
+            note_id="unrelated",
+            filename="! Gardening log",
+            body="Tomatoes need sunlight and water in the summer months.",
+        ),
+        path="note/! Gardening log.md",
+        body_sha256="3",
+    )
+    payload = find_similar(store, tmp_path, "! Encryption basics", limit=10)
+    assert payload["target_id"] == "seed"
+    assert payload["target_filename"] == "! Encryption basics"
+    assert payload["derived_query"]
+    ids = {hit["id"] for hit in payload["hits"]}
+    assert "seed" not in ids  # the note itself is excluded
+    assert "related" in ids
+    assert payload["total"] == len(payload["hits"])
+
+
+def test_find_similar_empty_body_no_terms(store: Store, tmp_path: Path) -> None:
+    from knoten.services.notes import find_similar
+
+    # A note whose title tokens are all too short / stopwords and body empty.
+    store.upsert_note(
+        _make_note(note_id="bare", filename="! a", body="", title="a"),
+        path="note/! a.md",
+        body_sha256="1",
+    )
+    payload = find_similar(store, tmp_path, "! a", limit=10)
+    assert payload["derived_query"] == ""
+    assert payload["total"] == 0
+    assert payload["hits"] == []

@@ -330,6 +330,187 @@ def hit_to_dict(hit: SearchHit) -> dict[str, Any]:
     return payload
 
 
+# A small English stopword set — enough to keep the derived `similar` query
+# focused on content words. Deliberately not exhaustive: the frequency ranking
+# already demotes filler, and an over-broad list would strip useful terms.
+_SIMILAR_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "all",
+        "any",
+        "can",
+        "had",
+        "her",
+        "was",
+        "one",
+        "our",
+        "out",
+        "day",
+        "get",
+        "has",
+        "him",
+        "his",
+        "how",
+        "man",
+        "new",
+        "now",
+        "old",
+        "see",
+        "two",
+        "way",
+        "who",
+        "boy",
+        "did",
+        "its",
+        "let",
+        "put",
+        "say",
+        "she",
+        "too",
+        "use",
+        "that",
+        "this",
+        "with",
+        "from",
+        "they",
+        "have",
+        "were",
+        "what",
+        "your",
+        "when",
+        "than",
+        "then",
+        "them",
+        "some",
+        "into",
+        "more",
+        "only",
+        "over",
+        "such",
+        "also",
+        "been",
+        "both",
+        "each",
+        "here",
+        "just",
+        "like",
+        "much",
+        "must",
+        "most",
+        "very",
+        "will",
+        "would",
+        "about",
+        "there",
+        "their",
+        "which",
+        "these",
+        "those",
+        "other",
+        "could",
+        "after",
+        "before",
+        "between",
+    }
+)
+
+# Word characters for term extraction — alphanumerics across scripts, no
+# underscore. `re.findall` over this naturally drops markdown punctuation
+# (``# * _ [ ] ( ) ` >``), wikilink syntax, and stray symbols.
+_SIMILAR_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _derive_similarity_terms(title: str, body: str, *, max_terms: int = 10) -> list[str]:
+    """Pick up to `max_terms` content words to seed a "more like this" query.
+
+    Title words come first (high signal, always kept), then body words
+    ordered by descending frequency (ties broken by first appearance).
+    Tokens shorter than three characters and stopwords are dropped; the
+    result is de-duplicated while preserving that priority order.
+    """
+
+    def tokens(text: str) -> list[str]:
+        out: list[str] = []
+        for match in _SIMILAR_WORD_RE.findall(text.lower()):
+            if len(match) >= 3 and match not in _SIMILAR_STOPWORDS:
+                out.append(match)
+        return out
+
+    body_tokens = tokens(body)
+    frequency: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    for index, token in enumerate(body_tokens):
+        frequency[token] = frequency.get(token, 0) + 1
+        first_seen.setdefault(token, index)
+    ranked_body = sorted(frequency, key=lambda token: (-frequency[token], first_seen[token]))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for token in [*tokens(title), *ranked_body]:
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+        if len(ordered) >= max_terms:
+            break
+    return ordered
+
+
+def find_similar(
+    store: Store,
+    vault_dir: Path,
+    target: str,
+    *,
+    limit: int = 10,
+    family: str | None = None,
+    kind: str | None = None,
+    tag: str | None = None,
+) -> dict[str, Any]:
+    """Build the `knoten similar` payload — related notes, no embeddings.
+
+    Resolves `target` the same way `read` does, derives a disjunctive query
+    from its title + most frequent body terms, runs it through the ranked
+    FTS5 search (OR semantics), drops the note itself, and returns the top
+    `limit` hits. Shares the search-hit serialization so the JSON shape
+    matches `knoten search`. Network- and lock-free.
+    """
+    row = resolve_target(store, target)
+    note_id = row["id"]
+    derived_query = " ".join(_derive_similarity_terms(row["title"] or "", store.fts_body(note_id)))
+    if not derived_query:
+        return {
+            "target_id": note_id,
+            "target_filename": row["filename"],
+            "derived_query": "",
+            "total": 0,
+            "hits": [],
+        }
+    # Fetch one extra so excluding the note itself still leaves a full page.
+    hits, _total = store.search(
+        derived_query,
+        family=family,
+        kind=kind,
+        tag=tag,
+        limit=limit + 1,
+        offset=0,
+        vault_dir=vault_dir,
+        match_any=True,
+    )
+    similar = [hit for hit in hits if hit.id != note_id][:limit]
+    return {
+        "target_id": note_id,
+        "target_filename": row["filename"],
+        "derived_query": derived_query,
+        "total": len(similar),
+        "hits": [hit_to_dict(hit) for hit in similar],
+    }
+
+
 # ---- Write-path (remote-first) ------------------------------------------
 
 
