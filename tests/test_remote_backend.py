@@ -94,6 +94,34 @@ def test_delete_note_404_raises_not_found(tmp_settings: Settings, httpx_mock: HT
         backend.delete_note("missing-id")
 
 
+def test_create_note_omits_tags_from_wire_payload(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """The create payload must not carry a `tags` field — the server's
+    non-strict schema strips it and re-derives tags from the body's #hashtags,
+    so the body is the only tag surface on creation."""
+    import json as _json
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes",
+        method="POST",
+        json={"id": "id-1"},
+    )
+    with RemoteBackend(tmp_settings) as backend:
+        backend.create_note(
+            NoteDraft(
+                filename="! Tagged",
+                body="body text #alpha #beta",
+                tags=("alpha", "beta"),
+            )
+        )
+    post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+    sent = _json.loads(post.content)
+    assert "tags" not in sent
+    assert sent["filename"] == "! Tagged"
+    assert sent["body"] == "body text #alpha #beta"
+
+
 def test_create_note_400_validation_error_raises_validation_error(
     tmp_settings: Settings, httpx_mock: HTTPXMock
 ) -> None:

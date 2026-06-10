@@ -37,7 +37,16 @@ class NotesPage:
 
 @dataclass(frozen=True)
 class NoteDraft:
-    """New-note payload for `create_note`."""
+    """New-note payload for `create_note`.
+
+    The **body** is the only tag surface on creation: tags live as
+    `#hashtags` in the body (composed by `services.notes._compose_body`), and
+    the server re-derives a note's tags from the body on every write. The
+    `tags` tuple below is consumed only by `LocalBackend.create_note` (which
+    merges it with the body-parsed tags for the offline mirror); `RemoteBackend`
+    never puts it on the wire, because the server's non-strict create schema
+    silently strips an unknown `tags` field.
+    """
 
     filename: str
     body: str = ""

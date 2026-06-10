@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from pytest_httpx import HTTPXMock
 
 from knoten.models import Note
@@ -195,6 +197,19 @@ def test_sync_pushes_local_only_notes_upstream(
         },
         status_code=201,
     )
+    # After the push, knoten re-fetches the server-normalised note and ingests
+    # it (synced=1). The server inserts a fleeting filename prefix on create —
+    # the refetch is what lands that normalisation in the mirror.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{server_id}",
+        method="GET",
+        json=_read_payload(
+            server_id,
+            "- 2026-05-08 1000 Local pending",
+            "written offline",
+            updated_at="2026-05-08T10:00:05Z",
+        ),
+    )
 
     with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
         result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
@@ -204,9 +219,15 @@ def test_sync_pushes_local_only_notes_upstream(
         # The local row's id was swapped to the server-issued one.
         assert store.find_by_id(server_id) is not None
         assert store.find_by_id(local_id) is None
-        # And it is now synced.
+        # And it is now synced, carrying the server-normalised filename.
         row = store.find_by_id(server_id)
         assert int(row["synced"]) == 1
+        assert row["filename"] == "- 2026-05-08 1000 Local pending"
+
+    # The mirror file was relocated to the server-normalised name; the old
+    # local-only path no longer exists.
+    assert (tmp_settings.paths.vault_dir / "note" / "- 2026-05-08 1000 Local pending.md").exists()
+    assert not (tmp_settings.paths.vault_dir / "note" / "- Local pending.md").exists()
 
 
 def test_sync_preserves_local_only_when_push_fails(
@@ -358,12 +379,18 @@ def test_full_sync_preserves_offline_edit_and_pushes_it(
         url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
         json={"data": [item], "total": 1, "limit": 200, "offset": 0},
     )
-    # The push pass PUTs the local body. No GET /api/notes/{id} is
-    # registered: pytest-httpx fails the test if the pull tries to fetch.
+    # The pull pass must NOT GET this note (it is a synced=0 conflict). The
+    # only GET is the push pass's post-PUT refetch, which echoes the body the
+    # server now stores (what we just PUT).
     httpx_mock.add_response(
         url=f"{tmp_settings.api_url}/api/notes/{note_id}",
         method="PUT",
         json={"id": note_id},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="GET",
+        json=_read_payload(note_id, "! Conflicted", "OFFLINE EDIT body"),
     )
 
     with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
@@ -411,6 +438,12 @@ def test_true_conflict_keeps_local_version_and_surfaces_it(
         url=f"{tmp_settings.api_url}/api/notes/{note_id}",
         method="PUT",
         json={"id": note_id},
+    )
+    # Post-push refetch: the server now stores the local version we PUT.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="GET",
+        json=_read_payload(note_id, "! Diverged", "LOCAL version"),
     )
 
     with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
@@ -713,4 +746,266 @@ def test_sync_runs_delete_phase_when_same_scan_agrees(
         assert result.deleted == 1
         assert store.find_by_id(gone_id) is None
         assert store.find_by_id(kept_id) is not None
+
+
+# ---- item 2: post-push refetch lands server normalisation ----------------
+
+
+def test_pushed_edit_mirror_gets_server_normalised_frontmatter(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """After pushing an offline edit, the post-push refetch lands the server's
+    injected frontmatter + bumped updatedAt in the mirror (item 2)."""
+    note_id = "abababab-cdcd-efef-0101-232345456767"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, note_id, "! Edited", body="local edit", synced=False)
+
+    item = _summary_item(note_id, "! Edited")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="PUT",
+        json={"id": note_id},
+    )
+    # Server injects a frontmatter field + bumps updatedAt on the write.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="GET",
+        json={
+            "id": note_id,
+            "filename": "! Edited",
+            "title": "Edited",
+            "family": "permanent",
+            "kind": "permanent",
+            "source": None,
+            "body": "local edit",
+            "frontmatter": {"kind": "permanent", "server-field": "injected"},
+            "tags": [],
+            "linkMap": {},
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-02T09:00:00Z",
+        },
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_edits == 1
+        row = store.find_by_id(note_id)
+        assert int(row["synced"]) == 1
+        assert json.loads(row["frontmatter_json"]).get("server-field") == "injected"
+        assert row["updated_at"] == "2024-01-02T09:00:00Z"
+
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Edited.md"
+    assert "injected" in mirror.read_text(encoding="utf-8")
+
+
+def test_pushed_edit_forbidden_refetch_falls_back_to_mark_synced(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A post-push refetch that 404s (token lost READ) degrades to the bare
+    mark_synced with a warning — it never fails the push pass (item 2)."""
+    note_id = "fefefefe-1111-2222-3333-444455556666"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, note_id, "! Locked", body="local edit", synced=False)
+
+    item = _summary_item(note_id, "! Locked")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [item], "total": 1, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [item], "total": 1, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="PUT",
+        json={"id": note_id},
+    )
+    # The refetch is forbidden (404 → NoteForbiddenError).
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        method="GET",
+        status_code=404,
+        json={"error": "NOT_FOUND"},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_edits == 1
+        assert result.push_failed == 0
+        row = store.find_by_id(note_id)
+        assert row is not None
+        assert int(row["synced"]) == 1  # marked synced despite the refetch failure
+        assert any("forbidden" in warning for warning in result.warnings)
+
+
+# ---- item 3: poison-row escape hatch for permanently rejected pushes ------
+
+
+def test_push_rejection_is_marked_surfaced_and_preserved(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A create rejected with a permanent 4xx (duplicate filename) records a
+    marker, surfaces in push_rejected + warnings, and is NOT reconciled away."""
+    local_id = "12121212-3434-5656-7878-909090909090"
+    with Store(tmp_settings.paths.index_path) as store:
+        ingest_note(
+            Note(
+                id=local_id,
+                filename="- Dupe",
+                title="Dupe",
+                family="fleeting",
+                kind="fleeting",
+                source=None,
+                body="written offline",
+                frontmatter={"kind": "fleeting"},
+                tags=(),
+                wikilinks=(),
+                created_at="2026-05-08T10:00:00Z",
+                updated_at="2026-05-08T10:00:00Z",
+            ),
+            store=store,
+            vault_dir=tmp_settings.paths.vault_dir,
+            synced=False,
+        )
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+    # POST permanently rejected — 409 DUPLICATE_FILENAME maps to RemoteRejectionError.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes",
+        method="POST",
+        status_code=409,
+        json={"error": "DUPLICATE_FILENAME"},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_creates == 0
+        assert result.push_failed == 1
+        assert [entry["id"] for entry in result.push_rejected] == [local_id]
+        assert "DUPLICATE_FILENAME" in result.push_rejected[0]["reason"]
+        assert any("permanently rejected" in warning for warning in result.warnings)
+        row = store.find_by_id(local_id)
+        assert row is not None  # NOT reconciled away
+        assert row["push_rejected_at"] is not None
+        assert int(row["synced"]) == 0
+
+
+def test_push_skips_row_with_existing_rejection_marker(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A row already carrying a rejection marker is skipped up-front — no POST
+    is attempted — but is still surfaced so the user knows it is stuck."""
+    local_id = "34343434-5656-7878-9090-121212121212"
+    with Store(tmp_settings.paths.index_path) as store:
+        ingest_note(
+            Note(
+                id=local_id,
+                filename="- Stuck",
+                title="Stuck",
+                family="fleeting",
+                kind="fleeting",
+                source=None,
+                body="written offline",
+                frontmatter={"kind": "fleeting"},
+                tags=(),
+                wikilinks=(),
+                created_at="2026-05-08T10:00:00Z",
+                updated_at="2026-05-08T10:00:00Z",
+            ),
+            store=store,
+            vault_dir=tmp_settings.paths.vault_dir,
+            synced=False,
+        )
+        store.record_push_rejection(
+            local_id, reason="INVALID_FILENAME — bad grammar", at="2026-06-10T00:00:00Z"
+        )
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+    # NO POST mock — a push attempt would raise (pytest-httpx has no match).
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_creates == 0
+        assert result.push_failed == 0  # never attempted, so not counted as a failure
+        assert [entry["id"] for entry in result.push_rejected] == [local_id]
+        # The row survived (synced=0 preserved), not deleted by reconcile.
+        row = store.find_by_id(local_id)
+        assert row is not None
+        assert int(row["synced"]) == 0
+    # The push pass never issued a POST.
+    assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+
+
+def test_transient_push_failure_is_not_marked_rejected(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A 5xx push failure is transient: no rejection marker, retried next sync."""
+    local_id = "56565656-7878-9090-1212-343434343434"
+    with Store(tmp_settings.paths.index_path) as store:
+        ingest_note(
+            Note(
+                id=local_id,
+                filename="- Flaky",
+                title="Flaky",
+                family="fleeting",
+                kind="fleeting",
+                source=None,
+                body="written offline",
+                frontmatter={"kind": "fleeting"},
+                tags=(),
+                wikilinks=(),
+                created_at="2026-05-08T10:00:00Z",
+                updated_at="2026-05-08T10:00:00Z",
+            ),
+            store=store,
+            vault_dir=tmp_settings.paths.vault_dir,
+            synced=False,
+        )
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes",
+        method="POST",
+        status_code=503,
+        json={"error": "vault locked"},
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.push_failed == 1
+        assert result.push_rejected == []
+        row = store.find_by_id(local_id)
+        assert row is not None
+        assert row["push_rejected_at"] is None  # transient — retried next sync
+        assert int(row["synced"]) == 0
         assert not any("delete detection skipped" in warning for warning in result.warnings)

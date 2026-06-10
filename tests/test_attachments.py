@@ -31,7 +31,8 @@ from knoten.services.notes import (
 from knoten.settings import Settings
 
 FILE_NOTE_ID = "22222222-2222-2222-2222-222222222222"
-STORAGE_KEY = "att_abc123"
+# Server-shaped storage key: 32 lowercase hex chars + the original extension.
+STORAGE_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6.pdf"
 
 
 def _seed_file_note(
@@ -358,6 +359,64 @@ def test_download_file_remote_rejects_missing_attachment_key(
                 target="2024-11-10+ scan.pdf",
                 destination=tmp_path / "out.bin",
             )
+
+
+@pytest.mark.parametrize(
+    "hostile_key",
+    [
+        "../x",  # path traversal
+        "a/b",  # path separator
+        "a?x=1",  # query string — would redirect the authed GET
+        "abc#frag",  # fragment
+        "DEADBEEFDEADBEEFDEADBEEFDEADBEEF.pdf",  # uppercase hex (server keys are lowercase)
+    ],
+)
+def test_download_file_remote_rejects_hostile_storage_key(
+    tmp_settings: Settings, tmp_path: Path, hostile_key: str
+) -> None:
+    """A storage key carrying `/ ? #` (or non-lowercase-hex) is refused before
+    any URL is built — interpolating it would redirect the authenticated GET."""
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_file_note(store, tmp_settings, frontmatter={"attachment": hostile_key})
+        with RemoteBackend(tmp_settings) as backend:
+            with pytest.raises(UserError, match="invalid") as excinfo:
+                download_file_remote(
+                    backend=backend,
+                    store=store,
+                    target="2024-11-10+ scan.pdf",
+                    destination=tmp_path / "out.bin",
+                )
+    # The error names both the offending key and the referencing note.
+    message = str(excinfo.value)
+    assert repr(hostile_key) in message
+    assert "2024-11-10+ scan.pdf" in message
+    # Nothing was written — the rejection happens before the download.
+    assert not (tmp_path / "out.bin").exists()
+
+
+def test_download_file_remote_accepts_extensionless_hex_key(
+    tmp_settings: Settings, httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    """A bare 32-hex key (upload had no file extension) passes validation."""
+    bare_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/attachments/{bare_key}",
+        method="GET",
+        content=b"BLOB",
+        headers={"content-type": "application/octet-stream"},
+    )
+    dest = tmp_path / "out.bin"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_file_note(store, tmp_settings, frontmatter={"attachment": bare_key})
+        with RemoteBackend(tmp_settings) as backend:
+            result = download_file_remote(
+                backend=backend,
+                store=store,
+                target="2024-11-10+ scan.pdf",
+                destination=dest,
+            )
+    assert dest.read_bytes() == b"BLOB"
+    assert result["storage_key"] == bare_key
 
 
 # ---- download default-destination confinement (server-controlled filename) --

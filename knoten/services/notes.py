@@ -613,6 +613,13 @@ def upload_file_remote(
     return fresh, upload_meta
 
 
+# Server attachment storage keys are `crypto.randomBytes(16).toString("hex")`
+# (32 lowercase hex chars) plus the original file extension (`path.extname`),
+# which may be absent. Mirrors the server's own ref-parser shape — see
+# ATTACHMENT_URL_RE in the backend's `services/refs.ts`.
+_ATTACHMENT_STORAGE_KEY_RE = re.compile(r"[a-f0-9]+(\.\w+)?")
+
+
 def download_file_remote(
     *,
     backend: Backend,
@@ -645,6 +652,19 @@ def download_file_remote(
         raise UserError(
             f"Note '{row['filename']}' has no `attachment` key in its frontmatter — "
             "the link to the uploaded blob is missing"
+        )
+    # The key is interpolated straight into `GET /api/attachments/{storage_key}`,
+    # so a key containing `/`, `?`, or `#` would redirect the authenticated
+    # request to an unintended path. Server-issued keys are strictly hex16 with
+    # an optional file extension (the server's own ref-parser keys on
+    # `[a-f0-9]+\.\w+` — see ATTACHMENT_URL_RE in refs.ts); reject anything else
+    # before a URL is built. Local mode is already guarded: LocalBackend looks
+    # the key up in the `attachments` table and never builds a URL from it.
+    if not _ATTACHMENT_STORAGE_KEY_RE.fullmatch(storage_key):
+        raise UserError(
+            f"Note '{row['filename']}' references an attachment with an invalid "
+            f"storage key {storage_key!r} — keys must be hexadecimal with an "
+            "optional file extension. Refusing to build a download URL from it."
         )
 
     # -o/--output is the user's explicit choice and is honoured as-is; the
