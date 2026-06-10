@@ -193,6 +193,25 @@ def render_note(payload: dict[str, Any], *, mode: OutputMode, minimal: bool = Fa
             sys.stdout.write("\n")
 
 
+def render_notes(payload: dict[str, Any], *, mode: OutputMode, minimal: bool = False) -> None:
+    """Render a multi-target `read` payload — `{targets, notes, failed}`.
+
+    JSON mode emits the whole envelope. TTY / plain mode renders each note
+    sequentially via `render_note`, then lists any per-target failures so a
+    partial result is never silent.
+    """
+    if mode.json:
+        emit_json(payload)
+        return
+    for note in payload.get("notes", []):
+        render_note(note, mode=mode, minimal=minimal)
+    for failure in payload.get("failed", []):
+        _console.print(
+            f"[red]failed[/red] {failure.get('target', '')}: "
+            f"{failure.get('error', '')} — {failure.get('message', '')}"
+        )
+
+
 def render_summary_list(payload: dict[str, Any], *, mode: OutputMode) -> None:
     if mode.json:
         emit_json(payload)

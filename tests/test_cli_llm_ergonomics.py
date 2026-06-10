@@ -129,6 +129,77 @@ def test_create_batch_and_filename_are_exclusive(local_env) -> None:
     assert json.loads(out)["error"] == "user"
 
 
+# ---- batch edit ---------------------------------------------------------
+
+
+def test_edit_batch_from_stdin(local_env) -> None:
+    _invoke(["create", "--filename", "- One", "--body", "one", "--json"])
+    _invoke(["create", "--filename", "- Two", "--body", "two", "--json"])
+    patches = [
+        {"target": "- One", "add_tags": ["alpha"]},
+        {"target": "- Two", "title": "Two updated", "set_frontmatter": {"rank": 3}},
+    ]
+    code, out = _invoke(["edit", "--batch", "-", "--json"], stdin=json.dumps(patches))
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["operation"] == "edit-batch"
+    assert payload["edited"] == 2
+    assert payload["failed"] == 0
+    assert all(r["ok"] for r in payload["results"])
+
+    code, out = _invoke(["read", "--json", "--", "- One"])
+    assert "alpha" in json.loads(out)["tags"]
+    # Typed frontmatter round-trips as an int (routed through the json path).
+    code, out = _invoke(["read", "--fields", "full", "--json", "--", "- Two"])
+    fm = json.loads(out)["frontmatter"]
+    assert fm["rank"] == 3
+    assert isinstance(fm["rank"], int)
+
+
+def test_edit_batch_continues_past_a_bad_item(local_env) -> None:
+    _invoke(["create", "--filename", "- Good", "--body", "x", "--json"])
+    patches = [
+        {"target": "- Good", "add_tags": ["kept"]},
+        {"target": "- Missing", "title": "nope"},  # not_found
+        {"body": "no target"},  # invalid — missing target
+    ]
+    code, out = _invoke(["edit", "--batch", "-", "--json"], stdin=json.dumps(patches))
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["edited"] == 1
+    assert payload["failed"] == 2
+    assert payload["results"][1]["error"] == "not_found"
+    assert payload["results"][2]["error"] == "user"
+
+
+def test_edit_batch_dry_run_does_not_write(local_env) -> None:
+    _invoke(["create", "--filename", "- Preview me", "--body", "v1", "--json"])
+    patches = [{"target": "- Preview me", "add_tags": ["draft"]}]
+    code, out = _invoke(["edit", "--batch", "-", "--dry-run", "--json"], stdin=json.dumps(patches))
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["operation"] == "edit-batch"
+    assert payload["dry_run"] is True
+    assert payload["count"] == 1
+    assert payload["results"][0]["ok"] is True
+    assert payload["results"][0]["changes"]["add_tags"] == ["draft"]
+
+    code, out = _invoke(["read", "--json", "--", "- Preview me"])
+    assert "draft" not in json.loads(out)["tags"]
+
+
+def test_edit_batch_and_positional_are_exclusive(local_env) -> None:
+    code, out = _invoke(["edit", "somenote", "--batch", "-", "--json"], stdin="[]")
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
+def test_edit_batch_and_per_note_flag_are_exclusive(local_env) -> None:
+    code, out = _invoke(["edit", "--batch", "-", "--add-tag", "x", "--json"], stdin="[]")
+    assert code == 1, out
+    assert json.loads(out)["error"] == "user"
+
+
 # ---- unresolved ---------------------------------------------------------
 
 

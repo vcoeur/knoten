@@ -40,6 +40,7 @@ from knoten.cli.output import (
     render_counts,
     render_dry_run,
     render_note,
+    render_notes,
     render_search_hits,
     render_status,
     render_summary_list,
@@ -214,10 +215,61 @@ class Fields(StrEnum):
     wikilinks, no backlinks). `full` returns the same shape as `knoten
     read` — body, frontmatter, wikilinks, backlinks. Default is `minimal`
     because most callers only need to confirm the note identity.
+
+    Also reused by the read-path `search` / `list` token-budget flag, where
+    `minimal` projects each hit / entry down to a small key set at the
+    serialization layer (see `_project_hits` / the `list` minimal keys).
     """
 
     minimal = "minimal"
     full = "full"
+
+
+class ReadFields(StrEnum):
+    """Body-inclusion level for `knoten read`.
+
+    `full` (default) is today's read payload — body included. `meta` omits
+    the `body` field entirely while keeping frontmatter, wikilinks, and
+    backlinks, for callers that only want a note's metadata + link graph
+    without paying for the body text.
+    """
+
+    meta = "meta"
+    full = "full"
+
+
+# Per-hit key sets for the `--fields minimal` token-budget projections. The
+# projection happens at serialization time (JSON only) so TTY tables, which
+# already show a curated subset, keep rendering the full row.
+_SEARCH_MINIMAL_KEYS = ("id", "filename", "title", "family", "kind", "score", "snippet")
+_LIST_MINIMAL_KEYS = ("id", "filename", "family", "kind", "updated_at")
+
+
+def _project_hits(hits: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Project each hit / entry dict down to `keys`, dropping the rest."""
+    return [{key: hit[key] for key in keys if key in hit} for hit in hits]
+
+
+def _apply_read_fields(
+    payload: dict[str, Any], *, fields: ReadFields, max_body_chars: int | None
+) -> dict[str, Any]:
+    """Apply the `read` token-budget controls to a full read payload, in place.
+
+    `--fields meta` drops the `body` field outright. `--max-body-chars N`
+    truncates `body` to N characters and records the additive
+    `body_truncated` / `body_total_chars` fields only when a cut happened —
+    so an untruncated payload is byte-for-byte the pre-flag shape.
+    """
+    if fields is ReadFields.meta:
+        payload.pop("body", None)
+        return payload
+    if max_body_chars is not None:
+        body = payload.get("body") or ""
+        if len(body) > max_body_chars:
+            payload["body"] = body[:max_body_chars]
+            payload["body_truncated"] = True
+            payload["body_total_chars"] = len(body)
+    return payload
 
 
 # ---- global state -------------------------------------------------------
@@ -698,6 +750,13 @@ def cmd_search(
         help="Restrict the match to one or more FTS5 columns (title, body, filename). "
         "Repeatable or comma-separated. Ranked search only.",
     ),
+    fields: Fields = typer.Option(
+        Fields.full,
+        "--fields",
+        help="Hit shape: `full` (default) or `minimal` (id, filename, title, "
+        "family, kind, score, snippet only). Trims JSON output.",
+        case_sensitive=False,
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Full-text search against the local index."""
@@ -775,6 +834,10 @@ def cmd_search(
             payload["fuzzy_total"] = fuzzy_total
         if hint:
             payload["hint"] = hint
+        # Minimal projection trims the JSON payload only; the TTY table already
+        # renders a curated subset, so it keeps the full hit dicts.
+        if fields is Fields.minimal and mode.json:
+            payload["hits"] = _project_hits(payload["hits"], _SEARCH_MINIMAL_KEYS)
         render_search_hits(payload, mode=mode)
         if hint and not mode.json:
             sys.stderr.write(f"hint: {hint}\n")
@@ -911,23 +974,85 @@ def cmd_similar(
 
 @app.command("read")
 def cmd_read(
-    target: str = typer.Argument(..., help="Note UUID or filename (or prefix)"),
+    targets: list[str] = typer.Argument(
+        ..., help="One or more note UUIDs or filenames (or prefixes)"
+    ),
     no_backlinks: bool = typer.Option(False, "--no-backlinks"),
+    fields: ReadFields = typer.Option(
+        ReadFields.full,
+        "--fields",
+        help="Body-inclusion level: `full` (default, body included) or `meta` "
+        "(omit body; keep frontmatter, wikilinks, backlinks).",
+        case_sensitive=False,
+    ),
+    max_body_chars: int | None = typer.Option(
+        None,
+        "--max-body-chars",
+        min=1,
+        help="Truncate the body to N characters; adds body_truncated / "
+        "body_total_chars when a cut happens. Excludes --fields meta.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Read a note from the local mirror — body + wikilinks + backlinks."""
+    """Read one or more notes from the local mirror — body + wikilinks + backlinks.
+
+    A single target keeps the exact pre-existing payload shape. With two or
+    more targets the payload becomes `{targets, notes, failed}` — each target
+    resolves independently, one bad target never aborts the rest, and the
+    command exits 0 if at least one note resolved (exit 1 with the usual
+    error envelope only when every target failed).
+    """
     mode = OutputMode.detect(json_output)
     try:
+        if fields is ReadFields.meta and max_body_chars is not None:
+            raise UserError(
+                "--max-body-chars cannot be combined with --fields meta (meta omits the body)"
+            )
         settings = _load()
         with Store(settings.paths.index_path) as store:
             _local_stat_walk(settings, store)
-            payload = read_note_full(
-                store,
-                settings.paths.vault_dir,
-                target,
-                include_backlinks=not no_backlinks,
-            )
-        render_note(payload, mode=mode)
+            if len(targets) == 1:
+                payload = read_note_full(
+                    store,
+                    settings.paths.vault_dir,
+                    targets[0],
+                    include_backlinks=not no_backlinks,
+                )
+                payload = _apply_read_fields(payload, fields=fields, max_body_chars=max_body_chars)
+                render_note(payload, mode=mode, minimal=fields is ReadFields.meta)
+                return
+            notes: list[dict[str, Any]] = []
+            failed: list[dict[str, Any]] = []
+            first_error: Exception | None = None
+            for one in targets:
+                try:
+                    note_payload = read_note_full(
+                        store,
+                        settings.paths.vault_dir,
+                        one,
+                        include_backlinks=not no_backlinks,
+                    )
+                    notes.append(
+                        _apply_read_fields(
+                            note_payload, fields=fields, max_body_chars=max_body_chars
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 — per-target isolation
+                    if first_error is None:
+                        first_error = exc
+                    _code, kind = _classify_error(exc)
+                    failed.append({"target": one, "error": kind, "message": str(exc)})
+        if not notes:
+            # Every target failed — surface the usual error envelope using the
+            # first failure's kind, exactly as a single failed read would.
+            assert first_error is not None
+            _fail(first_error, mode=mode)
+            return
+        render_notes(
+            {"targets": len(targets), "notes": notes, "failed": failed},
+            mode=mode,
+            minimal=fields is ReadFields.meta,
+        )
     except typer.Exit:
         raise
     except Exception as exc:
@@ -1012,6 +1137,13 @@ def cmd_list(
     sort: str = typer.Option("updated", "--sort"),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
     offset: int = typer.Option(0, "--offset", min=0),
+    fields: Fields = typer.Option(
+        Fields.full,
+        "--fields",
+        help="Entry shape: `full` (default) or `minimal` (id, filename, family, "
+        "kind, updated_at only). Trims JSON output.",
+        case_sensitive=False,
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """List notes from the local index."""
@@ -1050,6 +1182,10 @@ def cmd_list(
             payload["created_after"] = created_after_value
         if hint:
             payload["hint"] = hint
+        # Minimal projection trims the JSON payload only; the TTY table keeps
+        # its full rows (it already shows a curated subset of columns).
+        if fields is Fields.minimal and mode.json:
+            payload["notes"] = _project_hits(payload["notes"], _LIST_MINIMAL_KEYS)
         render_summary_list(payload, mode=mode)
         if hint and not mode.json:
             sys.stderr.write(f"hint: {hint}\n")
@@ -1199,19 +1335,34 @@ def cmd_kinds(
 
 @app.command("unresolved")
 def cmd_unresolved(
+    target: str | None = typer.Option(
+        None,
+        "--target",
+        help="Restrict to dangling wiki-links referenced FROM this note "
+        "(UUID, filename, or prefix — resolved like `read`).",
+    ),
     limit: int = typer.Option(0, "--limit", min=0, help="Max distinct targets to show (0 = all)"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """List dangling wiki-link targets — links pointing at notes that don't
     exist yet — grouped by target, with the notes that reference each. No
     network. Use after a write to find the stubs you still need to create.
+
+    Pass `--target <note>` to scope the view to one note's outgoing dangling
+    links; the resolved note is echoed back in the payload's `target` field.
     """
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
+        target_echo: dict[str, Any] | None = None
         with Store(settings.paths.index_path) as store:
             _local_stat_walk(settings, store)
-            rows = store.unresolved_wikilinks()
+            source_id: str | None = None
+            if target is not None:
+                source_row = resolve_target(store, target)
+                source_id = source_row["id"]
+                target_echo = {"id": source_row["id"], "filename": source_row["filename"]}
+            rows = store.unresolved_wikilinks(source_id=source_id)
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             grouped.setdefault(row["target_title"], []).append(
@@ -1227,7 +1378,10 @@ def cmd_unresolved(
         ]
         if limit:
             targets = targets[:limit]
-        render_unresolved({"total": len(grouped), "targets": targets}, mode=mode)
+        payload: dict[str, Any] = {"total": len(grouped), "targets": targets}
+        if target_echo is not None:
+            payload["target"] = target_echo
+        render_unresolved(payload, mode=mode)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -1527,6 +1681,156 @@ def _run_create_batch(
     )
 
 
+def _patch_from_edit_batch_item(index: int, item: Any) -> dict[str, Any]:
+    """Validate one edit --batch item and return edit_note_remote()/preview kwargs.
+
+    Mirrors `_draft_from_batch_item` (create): a single bad item raises a
+    `UserError` that the batch loop records without aborting the rest. The
+    item's `set_frontmatter` carries typed JSON values, so it is routed
+    through the `set_frontmatter_json` path to preserve int/list/bool/null.
+    """
+    if not isinstance(item, dict):
+        raise UserError(f"--batch item {index} is not a JSON object")
+    target = item.get("target")
+    if not isinstance(target, str) or not target:
+        raise UserError(f"--batch item {index} is missing a 'target' string")
+    for key in ("filename", "title", "body"):
+        value = item.get(key)
+        if value is not None and not isinstance(value, str):
+            raise UserError(f"--batch item {index} '{key}' must be a string")
+    body = item.get("body")
+    if item.get("ai"):
+        if body is None:
+            raise UserError(f"--batch item {index} sets 'ai' but has no 'body'")
+        body = _wrap_ai(body)
+    add_tags = item.get("add_tags") or []
+    if not isinstance(add_tags, list) or not all(isinstance(t, str) for t in add_tags):
+        raise UserError(f"--batch item {index} 'add_tags' must be an array of strings")
+    remove_tags = item.get("remove_tags") or []
+    if not isinstance(remove_tags, list) or not all(isinstance(t, str) for t in remove_tags):
+        raise UserError(f"--batch item {index} 'remove_tags' must be an array of strings")
+    set_frontmatter = item.get("set_frontmatter") or {}
+    if not isinstance(set_frontmatter, dict):
+        raise UserError(f"--batch item {index} 'set_frontmatter' must be an object")
+    unset_frontmatter = item.get("unset_frontmatter") or []
+    if not isinstance(unset_frontmatter, list) or not all(
+        isinstance(k, str) for k in unset_frontmatter
+    ):
+        raise UserError(f"--batch item {index} 'unset_frontmatter' must be an array of strings")
+    return {
+        "target": target,
+        "new_filename": item.get("filename"),
+        "new_title": item.get("title"),
+        "new_body": body,
+        "set_frontmatter_json": dict(set_frontmatter),
+        "unset_frontmatter": list(unset_frontmatter),
+        "add_tags": list(add_tags),
+        "remove_tags": list(remove_tags),
+    }
+
+
+def _run_edit_batch(
+    settings: Settings, batch_path: Path, *, mode: OutputMode, dry_run: bool, force: bool
+) -> None:
+    """Edit many notes under one lock pass; never aborts on a single bad patch.
+
+    Always emits a JSON summary on stdout (batch is a machine-oriented path):
+    `{operation, count, edited, failed, results: [{index, ok, id|error}]}`.
+    Works in both modes — remote does N API calls in one process, local does
+    N filesystem writes; either way the win is one lock pass + one invocation.
+    """
+    items = _read_batch_items(batch_path)
+    results: list[dict[str, Any]] = []
+
+    if dry_run:
+        with Store(settings.paths.index_path) as store:
+            for index, item in enumerate(items):
+                try:
+                    kwargs = _patch_from_edit_batch_item(index, item)
+                    preview = preview_edit(
+                        store,
+                        settings.paths.vault_dir,
+                        target=kwargs["target"],
+                        new_filename=kwargs["new_filename"],
+                        new_title=kwargs["new_title"],
+                        new_body=kwargs["new_body"],
+                        set_frontmatter={},
+                        set_frontmatter_json=kwargs["set_frontmatter_json"],
+                        unset_frontmatter=kwargs["unset_frontmatter"],
+                        add_tags=kwargs["add_tags"],
+                        remove_tags=kwargs["remove_tags"],
+                        force=force,
+                    )
+                    results.append({"index": index, "ok": True, **preview})
+                except Exception as exc:
+                    code, kind = _classify_error(exc)
+                    results.append(
+                        {
+                            "index": index,
+                            "ok": False,
+                            "error": kind,
+                            "code": code,
+                            "message": str(exc),
+                        }
+                    )
+        emit_json(
+            {
+                "operation": "edit-batch",
+                "dry_run": True,
+                "count": len(results),
+                "results": results,
+            }
+        )
+        return
+
+    _require_token(settings, for_write="edit")
+    with acquire_lock(settings.paths.lock_file), Store(settings.paths.index_path) as store:
+        with _build_backend(settings) as backend:
+            for index, item in enumerate(items):
+                try:
+                    kwargs = _patch_from_edit_batch_item(index, item)
+                    note = edit_note_remote(
+                        backend=backend,
+                        store=store,
+                        vault_dir=settings.paths.vault_dir,
+                        target=kwargs["target"],
+                        new_filename=kwargs["new_filename"],
+                        new_title=kwargs["new_title"],
+                        new_body=kwargs["new_body"],
+                        set_frontmatter={},
+                        set_frontmatter_json=kwargs["set_frontmatter_json"],
+                        unset_frontmatter=kwargs["unset_frontmatter"],
+                        add_tags=kwargs["add_tags"],
+                        remove_tags=kwargs["remove_tags"],
+                        force=force,
+                    )
+                    results.append(
+                        {"index": index, "ok": True, "id": note.id, "filename": note.filename}
+                    )
+                except Exception as exc:
+                    code, kind = _classify_error(exc)
+                    results.append(
+                        {
+                            "index": index,
+                            "ok": False,
+                            "error": kind,
+                            "code": code,
+                            "message": str(exc),
+                            **_error_extras(exc),
+                        }
+                    )
+    edited = sum(1 for r in results if r.get("ok"))
+    emit_json(
+        {
+            "operation": "edit-batch",
+            "count": len(results),
+            "edited": edited,
+            "failed": len(results) - edited,
+            "results": results,
+        }
+    )
+
+
 def _load_frontmatter_file(path: Path | None) -> dict[str, object] | None:
     """Load a JSON dict from a file, or return None if path is None."""
     if path is None:
@@ -1644,7 +1948,7 @@ def cmd_reference(
 
 @app.command("edit")
 def cmd_edit(
-    target: str = typer.Argument(...),
+    target: str | None = typer.Argument(None),
     filename: str | None = typer.Option(None, "--filename"),
     title: str | None = typer.Option(None, "--title"),
     body: str | None = typer.Option(None, "--body"),
@@ -1669,6 +1973,13 @@ def cmd_edit(
         "--force",
         help="Bypass the local permissions pre-check (web-scope tokens only)",
     ),
+    batch: Path | None = typer.Option(
+        None,
+        "--batch",
+        help="Edit many notes from a JSON array of patches (use '-' for stdin), one lock "
+        "pass. Each item: {target, filename?, title?, body?, add_tags?, remove_tags?, "
+        "set_frontmatter?, unset_frontmatter?, ai?}.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -1687,6 +1998,28 @@ def cmd_edit(
     mode = OutputMode.detect(json_output)
     try:
         settings = _load()
+        if batch is not None:
+            conflicting = (
+                target is not None
+                or filename is not None
+                or title is not None
+                or body is not None
+                or body_file is not None
+                or bool(set_frontmatter)
+                or bool(set_frontmatter_json)
+                or bool(unset_frontmatter)
+                or bool(add_tag)
+                or bool(remove_tag)
+                or ai
+            )
+            if conflicting:
+                raise UserError(
+                    "--batch is mutually exclusive with a positional target and per-note edit flags"
+                )
+            _run_edit_batch(settings, batch, mode=mode, dry_run=dry_run, force=force)
+            return
+        if target is None:
+            raise UserError("pass a target (or --batch <file> for bulk edit)")
         body_text = _resolve_body(body, body_file)
         if ai:
             if body_text is None:
@@ -1945,6 +2278,7 @@ def cmd_rename(
         remove_tag=[],
         ai=False,
         force=force,
+        batch=None,
         dry_run=dry_run,
         fields=fields,
         json_output=json_output,

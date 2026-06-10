@@ -187,6 +187,51 @@ def test_edit_default_is_minimal(cli_env, httpx_mock: HTTPXMock) -> None:
     _assert_minimal(payload)
 
 
+def test_edit_batch_remote_mode(cli_env, httpx_mock: HTTPXMock) -> None:
+    """`edit --batch` runs N PUT+GET round-trips under one process in remote mode."""
+    import json as _json
+
+    second_id = "44444444-4444-4444-4444-444444444444"
+    _seed_permanent(cli_env, note_id=NOTE_ID)
+    second = Note(
+        id=second_id,
+        filename="! Second",
+        title="Second",
+        family="permanent",
+        kind="permanent",
+        source=None,
+        body="second line",
+        frontmatter={},
+        tags=(),
+        wikilinks=(),
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+        permissions="ALL",
+    )
+    with Store(cli_env.paths.index_path) as store:
+        ingest_note(second, store=store, vault_dir=cli_env.paths.vault_dir)
+    for note_id, filename in ((NOTE_ID, "! Seed"), (second_id, "! Second")):
+        httpx_mock.add_response(
+            url=f"{API_URL}/api/notes/{note_id}", method="PUT", json={"id": note_id}
+        )
+        httpx_mock.add_response(
+            url=f"{API_URL}/api/notes/{note_id}",
+            method="GET",
+            json=_full_note_payload(id=note_id, filename=filename),
+        )
+    patches = [
+        {"target": NOTE_ID, "title": "First updated"},
+        {"target": second_id, "add_tags": ["batch"]},
+    ]
+    runner = CliRunner()
+    result = runner.invoke(app, ["edit", "--batch", "-", "--json"], input=_json.dumps(patches))
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["operation"] == "edit-batch"
+    assert payload["edited"] == 2
+    assert payload["failed"] == 0
+
+
 # ---- append -------------------------------------------------------------
 
 

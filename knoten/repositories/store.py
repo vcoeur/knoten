@@ -1168,23 +1168,31 @@ class Store:
         ).fetchone()
         return row["body"] if row and row["body"] is not None else ""
 
-    def unresolved_wikilinks(self) -> list[dict[str, Any]]:
+    def unresolved_wikilinks(self, *, source_id: str | None = None) -> list[dict[str, Any]]:
         """Every dangling wiki-link (target_id IS NULL) with its source note.
 
         One row per (source note, missing target title). The CLI groups
         these by target so a caller can batch-create the missing stubs.
+        When `source_id` is given, only links originating from that note are
+        returned — the `unresolved --target` note-scoped view.
         """
+        clause = "WHERE w.target_id IS NULL"
+        params: tuple[Any, ...] = ()
+        if source_id is not None:
+            clause += " AND w.source_id = ?"
+            params = (source_id,)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT w.target_title AS target_title,
                    n.id           AS source_id,
                    n.filename     AS source_filename,
                    n.title        AS source_title
             FROM wikilinks w
             JOIN notes n ON n.id = w.source_id
-            WHERE w.target_id IS NULL
+            {clause}
             ORDER BY w.target_title COLLATE NOCASE, n.filename
             """,
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 
