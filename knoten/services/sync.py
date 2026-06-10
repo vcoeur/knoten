@@ -24,7 +24,13 @@ from datetime import UTC, datetime
 
 from knoten.models import NoteSummary
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
-from knoten.repositories.errors import KnotenError, NoteForbiddenError, NotFoundError
+from knoten.repositories.errors import (
+    KnotenError,
+    NoteForbiddenError,
+    NotFoundError,
+    RemoteRejectionError,
+    ValidationError,
+)
 from knoten.repositories.store import Store
 from knoten.repositories.sync_state import load_state, save_state
 from knoten.repositories.vault_files import strip_frontmatter
@@ -130,6 +136,11 @@ class SyncResult:
     pushed_edits: int = 0
     push_failed: int = 0
     push_preserved_local_only: int = 0
+    # Local writes permanently rejected by the remote (bad filename, duplicate,
+    # frontmatter type mismatch) — each `{"id", "reason"}`. These rows are
+    # skipped by the push pass until a local edit clears the marker; surfaced
+    # here so the CLI / JSON consumer can list what is stuck and why.
+    push_rejected: list[dict] = field(default_factory=list)
     # Local soft-deletes of remote-known notes propagated to the remote.
     pushed_deletes: int = 0
     # Pull-pass conflicts — each entry is `{"id", "filename", "reason"}`.
@@ -156,6 +167,10 @@ class PushOutcome:
     failed: int = 0
     preserved_local_only: int = 0
     pushed_ids: set[str] = field(default_factory=set)
+    # Rows permanently rejected by the remote (now or on a prior run) — each is
+    # `{"id", "reason"}`. Surfaced in SyncResult.push_rejected and skipped by
+    # subsequent push passes until a local edit clears the marker.
+    rejected: list[dict] = field(default_factory=list)
 
 
 def push_local_writes(
@@ -164,6 +179,7 @@ def push_local_writes(
     store: Store,
     settings: Settings,
     remote_ids_seen: set[str],
+    warnings: list[str],
     progress: ProgressCallback | None = None,
 ) -> PushOutcome:
     """Push local-only changes (notes with `synced=0`) to the remote.
@@ -179,8 +195,27 @@ def push_local_writes(
       the swap through `Store.reid_note` so the local mirror's tags / wikilinks
       / FTS rows align with the canonical server-side ID.
 
-    Failures (network, conflict, validation) leave `synced=0` so the next sync
-    attempt retries. Notes never get silently dropped.
+    After a successful push the note is re-fetched (`read_note`) and re-ingested
+    with `synced=1`, so the mirror immediately carries the server's
+    normalisation (inserted filename prefix, injected frontmatter, derived
+    title/source, new `updatedAt`) instead of lagging a sync. The refetch does
+    NOT advance the pull cursor (`max_seen` in `incremental_sync`): the server's
+    post-push `updatedAt` is newer than this run's cursor, so leaving the cursor
+    where the pull pass left it means the next incremental sync re-ingests this
+    one note via the inclusive `>=` boundary (idempotent — see the cursor note
+    in `incremental_sync`) while skipping nothing. Advancing the cursor to the
+    post-push timestamp would be unsafe: a concurrent server-side edit to a
+    *different* note with an `updatedAt` between the old cursor and the push
+    time would then be skipped, because reconcile only catches up never-seen
+    ids, not already-local ones.
+
+    Permanent rejections (`RemoteRejectionError` / `ValidationError`: bad
+    filename, duplicate, frontmatter type mismatch) record a marker on the row
+    and are surfaced in `outcome.rejected` so the row is skipped on subsequent
+    runs instead of retried forever. Transient failures (network, 5xx, 429)
+    leave `synced=0` with no marker so the next sync retries. A row already
+    carrying a rejection marker is skipped up-front. Notes never get silently
+    dropped.
     """
     log: ProgressCallback = progress or _noop
     outcome = PushOutcome()
@@ -194,7 +229,19 @@ def push_local_writes(
         if row is None:
             continue
         filename = row["filename"]
-        absolute_path = settings.paths.vault_dir / row["path"]
+        # Skip rows already flagged as permanently rejected — retrying them
+        # every sync is exactly the loop this marker exists to break. Surface
+        # them so the user knows they are stuck and how to clear it.
+        if row.get("push_rejected_at"):
+            reason = row.get("push_reject_reason") or "previously rejected by the remote"
+            outcome.rejected.append({"id": note_id, "reason": reason})
+            log(
+                f"  ⏭ '{filename}' was permanently rejected ({reason}) — skipping. "
+                "Edit the note to retry."
+            )
+            continue
+        previous_path = row["path"]
+        absolute_path = settings.paths.vault_dir / previous_path
         try:
             raw = absolute_path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -221,9 +268,8 @@ def push_local_writes(
                         frontmatter=frontmatter,
                     ),
                 )
-                store.mark_synced(note_id)
+                target_id = note_id
                 outcome.edits += 1
-                outcome.pushed_ids.add(note_id)
                 log(f"  ↑ edited '{filename}'")
             else:
                 # Create on the remote — server may assign a new UUID.
@@ -237,18 +283,62 @@ def push_local_writes(
                 new_id = backend.create_note(draft)
                 if new_id != note_id:
                     store.reid_note(note_id, new_id)
-                store.mark_synced(new_id)
+                target_id = new_id
                 outcome.creates += 1
-                outcome.pushed_ids.add(new_id)
                 log(f"  ↑ created '{filename}' ({note_id} -> {new_id})")
+        except (RemoteRejectionError, ValidationError) as exc:
+            # Permanent, user-actionable rejection — mark the row so we stop
+            # retrying it, and surface it. No reid happened (the create/edit
+            # failed), so `note_id` is still the local row's id.
+            reason = str(exc)
+            store.record_push_rejection(note_id, reason=reason, at=_utcnow_iso())
+            outcome.failed += 1
+            outcome.preserved_local_only += 1
+            outcome.rejected.append({"id": note_id, "reason": reason})
+            log(
+                f"  ✗ '{filename}': permanently rejected ({exc}) — marked; "
+                "edit the note to clear the marker and retry."
+            )
+            continue
         except KnotenError as exc:
             log(f"  ✗ '{filename}': push failed ({exc}) — preserving locally")
             outcome.failed += 1
             outcome.preserved_local_only += 1
+            continue
         except Exception as exc:  # noqa: BLE001 — sync should be resilient
             log(f"  ✗ '{filename}': unexpected push error ({exc}) — preserving locally")
             outcome.failed += 1
             outcome.preserved_local_only += 1
+            continue
+
+        # Push succeeded. Re-fetch the server-normalised note and ingest it
+        # (synced=1) so the mirror carries the server's filename / frontmatter
+        # / updatedAt immediately. A refetch failure must never fail the push
+        # pass — fall back to the bare `mark_synced` the push used to do.
+        outcome.pushed_ids.add(target_id)
+        try:
+            fresh = backend.read_note(target_id)
+            ingest_note(
+                fresh,
+                store=store,
+                vault_dir=settings.paths.vault_dir,
+                previous_path=previous_path,
+                synced=True,
+            )
+        except NoteForbiddenError:
+            store.mark_synced(target_id)
+            warnings.append(
+                f"pushed '{filename}' but the token cannot re-read it (forbidden) — "
+                "kept it marked synced; the mirror may lag the server by one sync"
+            )
+            log(f"  ⚠ '{filename}' pushed but not re-readable (forbidden) — mirror may lag")
+        except Exception as exc:  # noqa: BLE001 — refetch is best-effort
+            store.mark_synced(target_id)
+            warnings.append(
+                f"pushed '{filename}' but could not re-fetch it ({exc}) — kept it "
+                "marked synced; the mirror catches up on the next sync"
+            )
+            log(f"  ⚠ '{filename}' pushed but refetch failed ({exc}) — mirror catches up next sync")
     return outcome
 
 
@@ -528,6 +618,7 @@ def incremental_sync(
         store=store,
         settings=settings,
         remote_ids_seen=remote_ids_seen,
+        warnings=warnings,
         progress=log,
     )
     remote_ids_seen.update(push_outcome.pushed_ids)
@@ -538,6 +629,16 @@ def incremental_sync(
         )
     elif push_outcome.failed:
         log(f"  ⚠ {push_outcome.failed} push(es) failed — preserved locally for retry")
+    if push_outcome.rejected:
+        warnings.append(
+            f"{len(push_outcome.rejected)} local write(s) permanently rejected by the "
+            "remote and skipped — edit each note (or delete it) to clear the marker and "
+            "retry: " + ", ".join(sorted({entry["id"] for entry in push_outcome.rejected}))
+        )
+        log(
+            f"  ⚠ {len(push_outcome.rejected)} local write(s) permanently rejected — "
+            "skipped; edit the note(s) to retry"
+        )
 
     # Delete detection — local IDs (pre-sync) absent from the remote set.
     # Notes ingested during this run are implicitly in the remote set, so
@@ -638,6 +739,7 @@ def incremental_sync(
         pushed_edits=push_outcome.edits,
         push_failed=push_outcome.failed,
         push_preserved_local_only=push_outcome.preserved_local_only,
+        push_rejected=push_outcome.rejected,
         pushed_deletes=pushed_deletes,
         conflicts=conflicts,
         warnings=warnings,

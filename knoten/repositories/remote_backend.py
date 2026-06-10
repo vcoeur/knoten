@@ -131,6 +131,11 @@ class RemoteBackend(Backend):
         return note_from_api(payload)
 
     def create_note(self, draft: NoteDraft) -> str:
+        # `tags` is deliberately NOT sent: the server's createNoteSchema is
+        # non-strict and silently strips an unknown `tags` field, re-deriving
+        # tags from the body's `#hashtags` instead. The client already composes
+        # tags into the body (`_compose_body`), so the body is the only tag
+        # surface on create — sending `tags` would be a misleading no-op.
         payload: dict[str, Any] = {"filename": draft.filename}
         if draft.body:
             payload["body"] = draft.body
@@ -138,8 +143,6 @@ class RemoteBackend(Backend):
             payload["kind"] = draft.kind
         if draft.frontmatter:
             payload["frontmatter"] = dict(draft.frontmatter)
-        if draft.tags:
-            payload["tags"] = list(draft.tags)
         raw = self._post_json("/api/notes", json=payload, expected=(200, 201))
         return str(raw.get("id"))
 

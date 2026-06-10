@@ -47,6 +47,27 @@ def test_upsert_and_count(store: Store) -> None:
     assert store.count_notes() == 1
 
 
+def test_push_rejection_marker_recorded_and_cleared_on_reingest(store: Store) -> None:
+    """record_push_rejection sets the marker; a fresh upsert (local edit /
+    refetch ingest) clears it, re-arming the push retry (item 3)."""
+    note = _make_note(note_id="n1", filename="! Rejected", body="bad note")
+    store.upsert_note(note, path="note/! Rejected.md", body_sha256="abc", synced=False)
+
+    store.record_push_rejection(
+        "n1", reason="INVALID_FILENAME — bad grammar", at="2026-06-10T00:00:00Z"
+    )
+    row = store.find_by_id("n1")
+    assert row["push_rejected_at"] == "2026-06-10T00:00:00Z"
+    assert "INVALID_FILENAME" in row["push_reject_reason"]
+
+    # A subsequent upsert (the user edited the note locally) clears the marker.
+    edited = _make_note(note_id="n1", filename="! Rejected", body="bad note fixed")
+    store.upsert_note(edited, path="note/! Rejected.md", body_sha256="def", synced=False)
+    row = store.find_by_id("n1")
+    assert row["push_rejected_at"] is None
+    assert row["push_reject_reason"] is None
+
+
 def test_find_by_filename_prefix(store: Store) -> None:
     store.upsert_note(
         _make_note(note_id="n1", filename="Voland2024= Book One", body=""),
@@ -656,6 +677,57 @@ def test_v8_without_permissions_column_gets_added(tmp_path: Path) -> None:
             row[1] for row in migrated.conn.execute("PRAGMA table_info(trashed_notes)").fetchall()
         }
         assert "permissions" in columns
+
+
+def test_v12_to_v13_adds_push_rejection_columns(tmp_path: Path) -> None:
+    """A v12 `notes` table gains `push_rejected_at` / `push_reject_reason`
+    without losing data (item 3)."""
+    db_path = tmp_path / "index.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE notes (
+                id                TEXT PRIMARY KEY,
+                filename          TEXT NOT NULL,
+                title             TEXT NOT NULL,
+                family            TEXT NOT NULL,
+                kind              TEXT NOT NULL,
+                source            TEXT,
+                path              TEXT NOT NULL,
+                frontmatter_json  TEXT NOT NULL DEFAULT '{}',
+                body_sha256       TEXT NOT NULL,
+                restricted        INTEGER NOT NULL DEFAULT 0,
+                permissions       TEXT NOT NULL DEFAULT 'ALL',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                path_mtime_ns     INTEGER NOT NULL DEFAULT 0,
+                path_size         INTEGER NOT NULL DEFAULT 0,
+                synced            INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                note_id UNINDEXED, title, body, filename,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """
+        )
+        conn.execute(
+            "INSERT INTO notes (id, filename, title, family, kind, path, body_sha256, "
+            "created_at, updated_at) VALUES "
+            "('keep', '! Keep', 'Keep', 'permanent', 'permanent', 'note/! Keep.md', 'h', 'c', 'u')"
+        )
+        conn.execute("INSERT INTO sync_meta(key, value) VALUES('schema_version', '12')")
+        conn.commit()
+
+    with Store(db_path) as migrated:
+        assert migrated.get_meta("schema_version") == str(SCHEMA_VERSION)
+        columns = {row[1] for row in migrated.conn.execute("PRAGMA table_info(notes)").fetchall()}
+        assert "push_rejected_at" in columns
+        assert "push_reject_reason" in columns
+        # Pre-existing rows survive with NULL markers.
+        row = migrated.find_by_id("keep")
+        assert row is not None
+        assert row["push_rejected_at"] is None
 
 
 def test_tag_and_kind_counts(store: Store) -> None:

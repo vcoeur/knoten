@@ -21,7 +21,7 @@ from rapidfuzz import fuzz, process
 from knoten.models import PERMISSIONS, Note, NoteSummary, SearchHit, permission_rank
 from knoten.repositories.errors import NotFoundError, StoreError, UserError
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -43,7 +43,14 @@ CREATE TABLE IF NOT EXISTS notes (
     -- 1 = ingested from remote (or successfully pushed up); 0 = created or
     -- edited locally but not yet pushed. The push pass at the start of every
     -- remote sync drains synced=0 rows by POSTing them upstream.
-    synced            INTEGER NOT NULL DEFAULT 1
+    synced            INTEGER NOT NULL DEFAULT 1,
+    -- Set when a push of this row was *permanently* rejected by the remote
+    -- (RemoteRejectionError / ValidationError — a bad filename, duplicate, or
+    -- frontmatter type mismatch). The push pass skips rows carrying this marker
+    -- so a doomed write is not retried every sync forever. Cleared on any
+    -- successful local edit / ingest of the row (which re-arms the retry).
+    push_rejected_at   TEXT,
+    push_reject_reason TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_filename ON notes(filename);
@@ -471,6 +478,17 @@ class Store:
             # IF NOT EXISTS in _SCHEMA already fired via executescript, so
             # this step only needs to bump the version.
             pass
+        if from_version < 13:
+            # v12 -> v13: `push_rejected_at` / `push_reject_reason` on `notes`
+            # so a permanently-rejected push (bad filename, duplicate, bad
+            # frontmatter) is marked and skipped instead of retried forever.
+            # Existing rows default to NULL — no row is rejected until a push
+            # actually fails permanently.
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(notes)").fetchall()}
+            if "push_rejected_at" not in columns:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN push_rejected_at TEXT")
+            if "push_reject_reason" not in columns:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN push_reject_reason TEXT")
 
     def _read_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
@@ -541,7 +559,12 @@ class Store:
                     updated_at = excluded.updated_at,
                     path_mtime_ns = excluded.path_mtime_ns,
                     path_size = excluded.path_size,
-                    synced = excluded.synced
+                    synced = excluded.synced,
+                    -- A fresh ingest (local edit or post-push refetch) re-arms
+                    -- the push retry: any prior permanent-rejection marker is
+                    -- cleared so the next sync attempts the row again.
+                    push_rejected_at = NULL,
+                    push_reject_reason = NULL
                 """,
                 (
                     note.id,
@@ -736,6 +759,21 @@ class Store:
         """Flip a note's `synced` flag to 1. Called after a successful remote push."""
         with self.transaction() as conn:
             conn.execute("UPDATE notes SET synced = 1 WHERE id = ?", (note_id,))
+
+    def record_push_rejection(self, note_id: str, *, reason: str, at: str) -> None:
+        """Mark a note as permanently rejected by the remote on push.
+
+        The push pass calls this when an upload fails with a non-retryable
+        rejection (RemoteRejectionError / ValidationError). Subsequent push
+        passes skip the row instead of re-attempting a doomed write; the
+        marker is cleared by any successful local edit / ingest (see
+        `upsert_note` / `apply_drifted_body`). The row stays `synced=0`.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE notes SET push_rejected_at = ?, push_reject_reason = ? WHERE id = ?",
+                (at, reason, note_id),
+            )
 
     def reid_note(self, old_id: str, new_id: str) -> None:
         """Swap a note's id, cascading to derived tables.
@@ -975,7 +1013,10 @@ class Store:
                 SET body_sha256   = ?,
                     path_mtime_ns = ?,
                     path_size     = ?,
-                    synced        = 0
+                    synced        = 0,
+                    -- An external edit re-arms the push retry (see upsert_note).
+                    push_rejected_at   = NULL,
+                    push_reject_reason = NULL
                 WHERE id = ? AND restricted = 0
                 """,
                 (body_sha256, path_mtime_ns, path_size, note_id),
