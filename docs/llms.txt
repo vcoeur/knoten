@@ -1,0 +1,22 @@
+# knoten
+
+> Standalone CLI zettelkasten with a local Markdown vault and SQLite FTS5 index. Offline-first, with an optional pluggable remote backend. Built to be driven by LLM agents: every command emits a stable `--json` envelope, and `knoten schema --json` dumps the whole machine-readable contract.
+
+## Docs
+
+- [Overview](https://knoten.vcoeur.com/): what knoten is, what it does, and who it is for.
+- [Quick start](https://knoten.vcoeur.com/quick-start/): install the CLI and the bundled agent skill, then a first create / search / link / rename session.
+- [Vault structure](https://knoten.vcoeur.com/vault-structure/): note families, filename prefixes, wiki-links, and the journal-vs-permanent convention.
+- [Install](https://knoten.vcoeur.com/install/): PyPI install, cross-OS paths, remote-mode setup, and upgrade notes.
+- [Commands](https://knoten.vcoeur.com/commands/): full CLI reference — every verb, flag, and JSON envelope, including the LLM-ergonomic read/write controls (`--fields`, `--max-body-chars`, multi-target `read`, `--batch` create/edit, `similar`, `--in` column scope, date-filtered `list`).
+
+## For agents
+
+- Run `knoten schema --json` for the contract: commands, flags, note families, the permission ladder, and error kinds. One call self-orients an agent without reading these docs.
+- `knoten skill install` drops a convention-free agent skill (`SKILL.md`) that teaches an LLM to drive the CLI safely: `--json` everywhere, structured errors, permission checks, batch writes, and shell-quoting hazards.
+- Reads never touch the network; writes go through the backend first in remote mode, straight to the vault in local mode. Pass `--fields full` on a write to get that note's `wikilinks` with a `broken` flag instead of a vault-wide `unresolved` scan.
+
+## Optional
+
+- [Source on GitHub](https://github.com/vcoeur/knoten)
+- [knoten on PyPI](https://pypi.org/project/knoten/)

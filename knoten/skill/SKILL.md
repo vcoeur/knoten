@@ -69,13 +69,14 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | Command | Purpose |
 |---|---|
 | `knoten status --json` | Mirror snapshot (counts, last sync, drift) |
-| `knoten search "<q>" --json` | FTS5 search (`--family --kind --tag --limit --offset --fuzzy --explain`) |
-| `knoten read <target> --json` | Full note: body + wikilinks + backlinks (`--no-backlinks`) |
-| `knoten list --json` | Metadata, no bodies (`--family --kind --tag --source --sort --limit`) |
+| `knoten search "<q>" --json` | FTS5 search (`--family --kind --tag --limit --offset --fuzzy --explain`). `--in title\|body\|filename` scopes columns (not with `--fuzzy`). `--fields minimal\|full` trims each hit. 0 ranked hits → payload `hint` + `fuzzy_total` when `--fuzzy` would match. |
+| `knoten similar <target> --json` | Related notes, no embeddings — derives a term query from the note + ranks it (`--limit` 10/max 50, `--family --kind --tag`). Payload `{target_id, target_filename, derived_query, total, hits}`. |
+| `knoten read <t> [<t2> …] --json` | Full note(s): body + wikilinks + backlinks (`--no-backlinks`). Multi-target → `{targets, notes, failed}` (exit 0 if ≥1 resolved). `--fields meta\|full` (meta drops body), `--max-body-chars N` (adds `body_truncated` + `body_total_chars` when cut; not with `meta`). |
+| `knoten list --json` | Metadata, no bodies (`--family --kind --tag --source --sort --limit`). `--updated-after`/`--created-after` ISO date or datetime. `--fields minimal\|full`. |
 | `knoten backlinks <target> --json` | Notes linking here |
 | `knoten graph <target> --json` | BFS wikilink neighbourhood (`--depth 0..5`, `--direction out\|in\|both`) |
 | `knoten tags --json` / `knoten kinds --json` | Counts |
-| `knoten unresolved --json` | Dangling wikilink targets + their referencing notes |
+| `knoten unresolved --json` | Dangling wikilink targets + their referencing notes. `--target <note>` scopes to links from one note. |
 | `knoten path <target> --json` | Absolute file path on disk |
 | `knoten citekeys --json` | The vault's in-use CiteKeys (distinct non-empty `source` values, sorted). `--prefix STR`. Plain output is one-per-line, pipe-friendly. |
 | `knoten inbox list --json` | Pending `#inbox` fleetings, oldest first (`--limit --offset`; notes tagged `inbox-promoted` are excluded and `total` is the global pending count). |
@@ -87,7 +88,7 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten create --batch FILE --json` | Bulk create from a JSON array of drafts (`-` for stdin) under one lock pass. See §9. |
 | `knoten reference --from-source FILE --json` | Create a CiteKey-anchored reference note from a quelle Source JSON object (`-` for stdin). Maps quelle `kind`→reference kind, builds hyphen-key frontmatter, filename `<CiteKey>= <Title>`. `--body`/`--body-file`, `--ai`, `--tag`, `--dry-run`, `--fields`. |
 | `knoten append <target> --content-file PATH --json` | Append (works at `APPEND` level). |
-| `knoten edit <target> --body-file PATH --json` | Replace body/filename/frontmatter/tags. `--add-tag --remove-tag --set-frontmatter k=v --unset-frontmatter k`. Family prefix immutable. `--dry-run` supported. |
+| `knoten edit <target> --body-file PATH --json` | Replace body/filename/frontmatter/tags. `--add-tag --remove-tag --set-frontmatter k=v --unset-frontmatter k`. Family prefix immutable. `--dry-run` supported. Bulk: `--batch FILE\|-` (see §9). |
 | `knoten edit <target> --set-frontmatter-json k=<json> --json` | Set a **typed** frontmatter value (int/list/bool/null round-trip). Use this for numbers/lists; `--set-frontmatter` only sends strings. See §8. |
 | `knoten rename <target> "<new>" --json` | Thin wrapper over `edit --filename`. `--dry-run` supported. |
 | `knoten delete <target> --yes --json` | **Soft** delete. Confirm with the user first. |
@@ -122,9 +123,19 @@ PY
 
 Each item: `{filename, body?, kind?, tags?, frontmatter?, ai?}`. The result is `{"results": [{"index", "ok", "id"|"error"}], "created", "failed"}` — one bad draft does not abort the rest. Add `--dry-run` to preview every draft without writing.
 
+`edit --batch FILE|-` mirrors this for edits (one lock pass, partial success, both modes). Each item: `{target, filename?, title?, body?, add_tags?, remove_tags?, set_frontmatter? (typed JSON — see §8), unset_frontmatter?, ai?}`; envelope `{operation: "edit-batch", count, edited, failed, results}`. `--batch` is mutually exclusive with a positional target and the per-note edit flags, and supports `--dry-run`.
+
 ## 10 — After a write: resolve dangling wikilinks
 
-Every `[[wikilink]]` in a note body should resolve to a real note. After a create/edit/append, list the dangling targets and stub them (per your conventions skill):
+Every `[[wikilink]]` in a note body should resolve to a real note. After a write, find the dangling targets and stub them (per your conventions skill).
+
+**After a single write, skip the vault-wide scan.** A write response (`create`, `edit`, `append`, `restore`, `reference`, `upload`) requested with `--fields full` carries `wikilinks: [{title, id, broken}]` for that one note — `broken: true` is a dangling target. Read it straight off the write you just did, no second command:
+
+```bash
+knoten create … --fields full --json | jq '.wikilinks[] | select(.broken) | .title'
+```
+
+For a vault-wide sweep (or after a `--batch`), list every dangling target instead:
 
 ```bash
 knoten unresolved --json    # vault-wide: {target, reference_count, referenced_by:[{id,filename}]}

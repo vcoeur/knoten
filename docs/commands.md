@@ -144,6 +144,8 @@ knoten citekeys | quelle resolve "<x>" --taken-file -   # avoid minting a collis
 
 In remote mode, writes hit the configured backend first (whatever `KNOTEN_API_URL` points at) and refresh the affected note locally. In local mode, writes go straight to the Markdown vault. The local mirror is never authoritative in remote mode.
 
+Every write response (`create`, `edit`, `append`, `restore`, `reference`, `upload`) accepts `--fields minimal|full` like the read commands. With `--fields full` the response carries the written note's `wikilinks: [{title, id, broken}]` — `broken: true` flags a target that does not resolve to an existing note. After a single write you can read dangling links straight off the response (`jq '.wikilinks[] | select(.broken)'`) instead of running a vault-wide [`unresolved`](#knoten-unresolved).
+
 ### `knoten create`
 
 ```bash
