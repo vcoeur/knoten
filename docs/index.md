@@ -27,7 +27,7 @@ description: Standalone CLI zettelkasten with a local Markdown vault and SQLite 
 ## Who it's for
 
 - A solo researcher or developer who wants **wiki-linked Markdown without a heavyweight app** — no Electron, no browser, no daemon.
-- Anyone building **agent skills** that need a queryable knowledge base — every command takes `--json`, the envelopes are stable, `knoten schema --json` dumps the whole contract, and a generic skill ships with the CLI (`knoten skill install`, see [Commands](commands.md#agent-integration)).
+- Anyone building **agent skills** that need a queryable knowledge base — every command takes `--json` (except `init`, `config edit`, and `mcp serve`), the envelopes are stable, `knoten schema --json` dumps the whole contract, and a generic skill ships with the CLI (`knoten skill install`, see [Commands](commands.md#agent-integration)).
 - Users who **already version their notes in git** and want the index to catch up to whatever they edit outside the CLI.
 
 ## Install

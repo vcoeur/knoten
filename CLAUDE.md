@@ -21,9 +21,9 @@ Strict layers — imports only go downward.
 ```
 knoten/
   models/        <- pure dataclasses, no I/O
-  repositories/  <- http_client, store, vault_files, lock, sync_state, errors
-  services/      <- sync, notes (read/write), markdown_parser, note_mapper
-  cli/           <- Typer app + rich/JSON output helpers
+  repositories/  <- backend (protocol), remote_backend, local_backend, store, vault_files, lock, sync_state, errors
+  services/      <- sync, reconcile, reindex, notes (read/write), markdown_parser, note_mapper, knoten_filename, schema
+  cli/           <- Typer app (main, inbox, config, skill, mcp_server) + rich/JSON output helpers
   settings.py    <- environs config
 ```
 
@@ -43,7 +43,7 @@ Every CLI command talks to a single `Backend` protocol defined in `knoten/reposi
 | `RemoteBackend` | `knoten/repositories/remote_backend.py` | compatible remote HTTP backend | every mutation + sync | `KNOTEN_API_TOKEN` (Bearer) |
 | `LocalBackend` | `knoten/repositories/local_backend.py` | the on-disk markdown vault | never | none |
 
-The protocol has 8 business methods: `list_note_summaries`, `read_note`, `create_note`, `update_note` (returns `NoteUpdateResult` with the rename cascade's `affected_notes` list), `append_to_note`, `delete_note`, `restore_note`, `upload_attachment`, `download_attachment`, plus `close`. Shapes live in `knoten/repositories/backend.py` as frozen dataclasses — `NotesPage`, `NoteDraft`, `NotePatch`, `NoteUpdateResult`, `AttachmentUploadResult`, `AttachmentDownloadResult`. Services depend on the protocol, not on either implementation, so the same `edit_note_remote` / `create_note_remote` helpers drive both backends.
+The protocol has 9 business methods: `list_note_summaries`, `read_note`, `create_note`, `update_note` (returns `NoteUpdateResult` with the rename cascade's `affected_notes` list), `append_to_note`, `delete_note`, `restore_note`, `upload_attachment`, `download_attachment`, plus `close`. Shapes live in `knoten/repositories/backend.py` as frozen dataclasses — `NotesPage`, `NoteDraft`, `NotePatch`, `NoteUpdateResult`, `AttachmentUploadResult`, `AttachmentDownloadResult`. Services depend on the protocol, not on either implementation, so the same `edit_note_remote` / `create_note_remote` helpers drive both backends.
 
 Selection: `knoten/cli/main.py:_build_backend` reads `settings.effective_mode` — `auto` resolves to `local` when `KNOTEN_API_URL` is empty and `remote` otherwise; explicit `KNOTEN_MODE=local` / `remote` overrides the URL-based inference.
 
@@ -61,7 +61,7 @@ Selection: `knoten/cli/main.py:_build_backend` reads `settings.effective_mode` �
 
 The single most important rule for anyone (especially Claude) using this CLI:
 
-- **Reads never touch the network** in either mode. Reads resolve against the local mirror + SQLite index. The only commands that might touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `reference`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`) — and even those go through the `Backend` protocol so they become filesystem ops in local mode.
+- **Reads never touch the network** in either mode. Reads resolve against the local mirror + SQLite index. The only commands that might touch the server are the sync family (`sync`, `verify`) and the mutation family (`create`, `reference`, `edit`, `append`, `delete`, `rename`, `restore`, `upload`, `download`, `inbox add`/`inbox append`) — and even those go through the `Backend` protocol so they become filesystem ops in local mode. (`inbox add`/`append` on a URL additionally make a best-effort title fetch in either mode.)
 - **In remote mode, writes always touch the network first.** Mutations call the REST API first; only after a 2xx do they re-fetch and mirror locally. The local mirror is never authoritative in remote mode.
 - **In local mode, writes go straight to disk.** The vault is authoritative; SQLite is derived. `_refresh_index_if_stale` catches up to external edits at the top of every read method.
 - **Sync never runs implicitly.** If the remote-mode mirror is stale, the user (or Claude) must run `knoten sync`. In local mode `knoten sync` is a shortcut for the stat-walk reindex, and `knoten verify` runs only the non-destructive checks (SQLite integrity, FTS cardinality, stat walk) — no orphan sweep, no re-fetch.
@@ -75,7 +75,7 @@ As of v0.2 the layout is cross-OS via `platformdirs` (see `knoten/paths.py`). Th
 - **data_dir** — holds the markdown vault under `kasten/` (user content). Linux: `~/.local/share/knoten/`. macOS: `~/Library/Application Support/knoten/`. Windows: `%LOCALAPPDATA%\knoten\`.
 - **cache_dir** — holds the SQLite index (`index.sqlite`), sync cursor (`state.json`), advisory lock (`sync.lock`), and tmp scratch. Linux: `~/.cache/knoten/`. macOS: `~/Library/Caches/knoten/`. Windows: `%LOCALAPPDATA%\knoten\Cache\`.
 
-Each dir can be overridden via `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` — process env wins over the file, tests / Docker / custom deployments set these directly. `knoten config path` prints the resolved paths.
+Each dir can be overridden via `KNOTEN_CONFIG_DIR` / `KNOTEN_DATA_DIR` / `KNOTEN_CACHE_DIR` — **process env only**: they decide where the `.env` file itself lives (`paths.resolve()` runs before the file is read), so setting them inside `.env` has no effect. Tests / Docker / custom deployments export them directly. `knoten config path` prints the resolved paths.
 
 ### Dev mode vs installed mode
 
@@ -117,6 +117,7 @@ make tool-install  # install `knoten` globally via `uv tool install`
 
 - CLI entrypoint: `knoten/cli/main.py` — one Typer function per subcommand, all wiring identical (load → lock → Store → `_build_backend` → service → render).
 - Schema dump: `knoten/services/schema.py` — `knoten schema --json` introspects the live Typer/Click app for commands+flags and reads the family/permission/error tables from the modules that own them, so the contract never drifts. Pure data; no network.
+- Inbox quick-capture: `knoten/cli/inbox.py` — `knoten inbox add|append|list`, a sub-app that captures a file / URL / text into a fleeting `#inbox` note. The filename grammar (`- YYYY-MM-DD HHMM inbox <slug>` fleetings, `YYYY-MM-DD+ inbox <slug> HHMM<ext>` file notes) is owned by `compose_inbox_fleeting_filename` / `compose_inbox_file_filename` and documented in `docs/commands.md` (§ Inbox). `inbox list` excludes `inbox-promoted` notes in SQL so `total` is the global pending count.
 - CiteKey ecosystem: `knoten citekeys` lists the vault's taken CiteKeys (distinct non-empty `source` values via `Store.distinct_citekeys`) so a sibling minting tool (quelle) can avoid collisions. `knoten reference --from-source` turns a quelle Source JSON into a CiteKey-anchored reference note — the pure Source→note mapping lives in `knoten/services/notes.py:source_to_reference_inputs` (with the `QUELLE_KIND_TO_REFERENCE_KIND` constant beside it), so it is unit-testable with no backend.
 - Agent skill: bundled at `knoten/skill/SKILL.md` (package data, force-included in the wheel via `pyproject.toml`). `knoten/cli/skill.py` (`knoten skill install|status`) copies it into a skills dir. Keep `SKILL.md` convention-free — it is the public CLI contract, not Alice's vault conventions.
 - MCP server: `knoten/cli/mcp_server.py` — `knoten mcp serve` is an opt-in stdio facade. The `_do_*` helpers carry the logic (no `mcp` dependency, unit-testable); `serve` wires them onto FastMCP. `mcp` is an optional extra (`knoten[mcp]`).

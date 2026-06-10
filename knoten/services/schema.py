@@ -135,7 +135,10 @@ def build_schema() -> dict[str, Any]:
         "tool": "knoten",
         "version": __version__,
         "conventions": {
-            "json": "Every command accepts --json; the JSON envelope is the stable contract.",
+            "json": (
+                "Every command accepts --json except `init`, `config edit`, and `mcp serve`; "
+                "the JSON envelope is the stable contract."
+            ),
             "errors": (
                 "On failure, --json commands print {error, message, code, ...extras} to stdout."
             ),

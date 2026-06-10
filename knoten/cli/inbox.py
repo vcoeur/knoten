@@ -12,9 +12,9 @@ matches `^https?://` → URL (best-effort `<title>` fetch); otherwise → plain
 text. `--as-file` / `--as-url` / `--as-text` force a mode.
 
 Filename grammar is part of the cross-repo contract documented in
-`docs/inbox-capture.md` (and the conception design.md). Keep
-`compose_inbox_fleeting_filename` and `compose_inbox_file_filename` as the
-single source of truth on the Python side.
+`docs/commands.md` (§ Inbox). Keep `compose_inbox_fleeting_filename` and
+`compose_inbox_file_filename` as the single source of truth on the Python
+side.
 """
 
 from __future__ import annotations

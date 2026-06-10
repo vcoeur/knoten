@@ -11,17 +11,24 @@ Both modes share the same CLI surface — the only difference is where data live
 
 ## What it does
 
-- **`knoten sync`** — pull new / changed notes from the configured backend into a local markdown mirror and SQLite FTS5 index. Always runs delete detection and reconciliation (re-fetch missing files, remove orphans). Add `--verify` for full body-hash verification.
+- **`knoten sync`** — pull new / changed notes from the configured backend into a local markdown mirror and SQLite FTS5 index. Pushes unsynced local writes and pending deletes first, then runs delete detection (guarded by a mass-delete circuit breaker — override with `--force-delete`) and reconciliation (re-fetch missing files, remove orphans). Add `--verify` for full body-hash verification.
 - **`knoten verify`** — run SQLite integrity check, FTS5 / notes cardinality check, file existence + orphan cleanup. Add `--hashes` to compare every file against its recorded body hash.
 - **`knoten reindex`** — rebuild derived tables (FTS5, tags, wikilinks, frontmatter fields) from the `notes` table + on-disk files. No network. Use when `verify` reports FTS5 drift or when you are offline.
 - **`knoten search "query"`** — full-text search on the local index, with snippets, ranking (title > filename > body), filters (`--family`, `--kind`, `--tag`), JSON output. Pass `--fuzzy` for typo-tolerant + substring match (trigram FTS + rapidfuzz on titles).
 - **`knoten read <id|filename>`** — full note body + wiki-links + backlinks, resolved from the local mirror (no network hit).
 - **`knoten backlinks <target>`**, **`knoten list`**, **`knoten tags`**, **`knoten kinds`** — metadata queries, all offline.
 - **`knoten graph <target> --depth N --direction out|in|both`** — BFS wiki-link neighbourhood for broadened search. Returns nodes with their distance from the start, plus edges. Depth 0-5.
-- **`knoten create`**, **`knoten edit`**, **`knoten append`**, **`knoten delete`**, **`knoten restore`**, **`knoten rename`**, **`knoten upload`**, **`knoten download`** — write / attachment operations that hit the configured backend first, then refresh the affected note locally. The local mirror is never authoritative.
+- **`knoten unresolved`** — dangling wiki-link targets (links pointing at notes that don't exist yet), grouped by target with the notes referencing each.
+- **`knoten citekeys`** — the vault's in-use CiteKeys (distinct non-empty `source` frontmatter values), pipe-friendly for collision-aware minting tools.
+- **`knoten create`**, **`knoten edit`**, **`knoten append`**, **`knoten delete`**, **`knoten restore`**, **`knoten rename`**, **`knoten upload`**, **`knoten download`** — write / attachment operations. In remote mode they hit the configured backend first, then refresh the affected note locally (the local mirror is never authoritative); in local mode they write straight to the vault.
+- **`knoten reference --from-source`** — create a CiteKey-anchored reference note from a quelle Source JSON object.
+- **`knoten inbox add|append|list`** — quick-capture flow: file, URL, or plain text into a fleeting `#inbox` note.
+- **`knoten schema`** — dump the whole machine-readable contract (commands + flags, families, permissions, error kinds) introspected from the live app.
+- **`knoten skill install|status`** — install the bundled convention-free agent skill into a skills directory.
+- **`knoten mcp serve`** — optional MCP server over the vault (needs the `mcp` extra).
 - **`knoten status`** / **`knoten config show`** / **`knoten config path`** / **`knoten config edit`** / **`knoten init`** — inspect the mirror, see the effective configuration, open the `.env` in your editor, or bootstrap the vault + state dirs. All offline.
 
-All commands accept `--json` for machine-parseable output. On a TTY without `--json`, output is rendered with rich (tables, snippet highlighting). Claude skills should always pass `--json`.
+All commands accept `--json` for machine-parseable output, except `init`, `config edit`, and `mcp serve` (no payload worth shaping). On a TTY without `--json`, output is rendered with rich (tables, snippet highlighting). Claude skills should always pass `--json`.
 
 ### Verbose output by default
 
@@ -74,9 +81,9 @@ Layered — models / repositories / services / CLI, the usual Python CLI layout.
 ```
 knoten/
   models/          <- pure dataclasses (Note, NoteSummary, WikiLink, SearchHit)
-  repositories/    <- data access: http_client, store (sqlite/FTS5), vault_files, lock, sync_state
-  services/        <- business logic: sync, notes (read/write), markdown_parser, note_mapper
-  cli/             <- Typer app + rich/JSON output helpers
+  repositories/    <- data access: backend (protocol), remote_backend, local_backend, store (sqlite/FTS5), vault_files, lock, sync_state, errors
+  services/        <- business logic: sync, reconcile, reindex, notes (read/write), markdown_parser, note_mapper, knoten_filename, schema
+  cli/             <- Typer app (main, inbox, config, skill, mcp_server) + rich/JSON output helpers
   settings.py      <- environs-backed configuration
 tests/             <- mirror the knoten layout
 ```
@@ -145,7 +152,7 @@ knoten --help
 knoten config show --json   # see the effective configuration
 ```
 
-For local mode (the default), that's all you need — the vault at `~/.knoten/kasten/` and the SQLite index are created lazily on your first command (`knoten list`, `knoten create`, …).
+For local mode (the default), that's all you need — the vault at `~/.local/share/knoten/kasten/` (Linux; see [Local paths](#local-paths) for macOS / Windows) and the SQLite index are created lazily on your first command (`knoten list`, `knoten create`, …).
 
 Optional bootstrap — pre-seed a commented `.env` and create the vault dirs up front instead of lazily:
 
@@ -276,7 +283,7 @@ For agents that prefer MCP tools to a shell, `knoten mcp serve` exposes the vaul
 
 ## Status
 
-v0.2 — adopts cross-OS `platformdirs` layout (XDG on Linux, `~/Library/…` on macOS, `%APPDATA%` / `%LOCALAPPDATA%` on Windows), with auto-migration from the v0.1 `KNOTEN_HOME`-anchored layout on first run. v0.1 introduced the initial CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search. No GUI.
+Actively developed; the version is derived from the latest `vX.Y.Z` git tag at build time (currently the v0.6.x line — check [PyPI](https://pypi.org/project/knoten/) or `knoten --help` for the exact release). Milestones so far: v0.1 introduced the CLI, local SQLite/FTS5 index, attachment upload/download, and fuzzy search; v0.2 adopted the cross-OS `platformdirs` layout with auto-migration from the v0.1 `KNOTEN_HOME`-anchored layout; later releases added the first-class local mode (the `Backend` protocol), CiteKey tooling (`citekeys`, `reference`), the `inbox` quick-capture flow, the bundled agent skill + optional MCP server, and a hardening pass on sync safety (conflict-safe pull, mass-delete circuit breaker, local-mode `verify`). No GUI.
 
 ## Licence
 

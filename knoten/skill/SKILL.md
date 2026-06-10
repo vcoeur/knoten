@@ -29,7 +29,7 @@ If `knoten` is not on PATH (webapp sessions, fresh host) the vault is unreachabl
 
 ## 2 — Always pass `--json`
 
-Every command supports `--json`. Pass it everywhere — the TTY rendering is for humans; the JSON envelope is the stable, parseable contract. Parse with `jq` or `python3 -c "import sys,json; ..."`.
+Every command supports `--json` except `init`, `config edit`, and `mcp serve` (no payload worth shaping — passing `--json` to those is a usage error). Pass it everywhere else — the TTY rendering is for humans; the JSON envelope is the stable, parseable contract. Parse with `jq` or `python3 -c "import sys,json; ..."`.
 
 ## 3 — Errors are structured (parse, don't string-match)
 
@@ -78,6 +78,7 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten unresolved --json` | Dangling wikilink targets + their referencing notes |
 | `knoten path <target> --json` | Absolute file path on disk |
 | `knoten citekeys --json` | The vault's in-use CiteKeys (distinct non-empty `source` values, sorted). `--prefix STR`. Plain output is one-per-line, pipe-friendly. |
+| `knoten inbox list --json` | Pending `#inbox` fleetings, oldest first (`--limit --offset`; notes tagged `inbox-promoted` are excluded and `total` is the global pending count). |
 
 ### Write path
 | Command | Purpose |
@@ -92,7 +93,9 @@ Path/id arguments accept a UUID, an exact filename, or an unambiguous filename p
 | `knoten delete <target> --yes --json` | **Soft** delete. Confirm with the user first. |
 | `knoten restore <uuid> --json` | Restore from trash. |
 | `knoten upload <path> --filename "<prefix Label>" --json` | Attachment + file-note. |
-| `knoten download <target> [-o PATH]` | Stream an attachment back out. |
+| `knoten download <target> [-o PATH]` | Stream an attachment back out (target is the file-family **note**, not the blob). |
+| `knoten inbox add <file\|url\|text> --json` | Quick capture into a new fleeting `#inbox` note. Heuristic: readable file → upload + wikilink; `https?://` → URL (title fetched for the slug); else text. Force with `--as-file\|--as-url\|--as-text`; `--note` adds context; `--tag` repeatable. |
+| `knoten inbox append <fleeting> <file\|url\|text> --json` | Append a capture to an existing fleeting (same heuristic; tags untouched). |
 
 ### Sync / maintenance
 `knoten sync --json` (incremental; `--full`, `--verify`, `--force-delete` to override the mass-delete guard) · `knoten verify --json` (local mode: integrity + index checks only, non-destructive) · `knoten reindex --json` (rebuild derived tables, no network).

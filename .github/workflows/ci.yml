@@ -5,9 +5,12 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    name: Tests
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -15,8 +18,33 @@ jobs:
           fetch-depth: 0   # hatch-vcs needs full history + tags to derive the version
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Ruff check
+        run: uv run --locked ruff check .
+      - name: Ruff format check
+        run: uv run --locked ruff format --check .
+
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # hatch-vcs needs full history + tags to derive the version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Run test suite
-        run: uv run pytest -q
+        run: uv run --locked pytest -q
+      - name: MCP extra smoke
+        # The `mcp` extra is opt-in and otherwise never installed by any test run;
+        # assert the FastMCP facade at least wires up.
+        run: uv run --locked --extra mcp knoten mcp serve --help
 
   smoke:
     name: Clean-install smoke
