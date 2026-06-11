@@ -503,6 +503,11 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
         + " [dim](LIST but not READ — body not fetchable)[/dim]",
     )
     changed.add_row("Deleted (remote gone)", _fmt(deleted, good="red"))
+    changed.add_row(
+        "Skipped (invalid server values)",
+        _fmt(payload.get("skipped_invalid", 0), good="yellow")
+        + " [dim](hostile filename or frontmatter — see warnings)[/dim]",
+    )
     _console.print(changed)
 
     # ── Section 3: mirror / index repair ────────────────────────────────
@@ -559,6 +564,10 @@ def render_sync_result(payload: dict[str, Any], *, mode: OutputMode) -> None:
             "[green]✓[/green] Local mirror matches the remote "
             f"({local_total} notes, {restricted_placeholders_total(payload)} restricted)."
         )
+    # Per-note warnings (skipped invalid payloads, conflicts, guard trips) —
+    # repeat them in the summary so they survive past the progress stream.
+    for warning in payload.get("warnings", []):
+        _console.print(f"[yellow]⚠[/yellow] {warning}")
 
 
 def restricted_placeholders_total(payload: dict[str, Any]) -> int:

@@ -699,6 +699,106 @@ def test_sync_skips_hostile_server_filenames(tmp_settings: Settings, httpx_mock:
         assert store.count_notes() == 0
 
 
+def test_full_sync_skips_note_with_control_char_frontmatter(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A server frontmatter value with a newline is skipped per-note with a
+    warning naming the note — never aborting the run.
+
+    Regression for the 2026-06-10 incident: a literature note's `journal`
+    frontmatter value contained a newline and `sync --full` aborted mid-pull
+    with the writer's UserError, violating the v0.7.0 ingest-boundary
+    contract (skip with a warning, like hostile filenames).
+    """
+    from knoten.services.sync import full_sync
+
+    good_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    bad_id = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+    good_item = _summary_item(good_id, "! Good note")
+    bad_item = _summary_item(bad_id, "Lit2024= Bad journal")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [good_item, bad_item], "total": 2, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [good_item, bad_item], "total": 2, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{good_id}",
+        json=_read_payload(good_id, "! Good note", "good body"),
+    )
+    # One read only: the reconcile catch-up pass must not re-fetch a note
+    # already skipped this run.
+    bad_payload = _read_payload(bad_id, "Lit2024= Bad journal", "bad body")
+    bad_payload["frontmatter"] = {"kind": "permanent", "journal": "Nature\nVol. 2"}
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{bad_id}",
+        json=bad_payload,
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = full_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 1
+        assert result.skipped_invalid == 1
+        # The warning names the note: id + filename + offending key.
+        assert any(
+            bad_id in warning and "Lit2024= Bad journal" in warning and "'journal'" in warning
+            for warning in result.warnings
+        )
+        # Everything else is mirrored; the bad note never touches store or disk.
+        assert store.find_by_id(good_id) is not None
+        assert store.find_by_id(bad_id) is None
+
+    assert (tmp_settings.paths.vault_dir / "note" / "! Good note.md").exists()
+    assert not (tmp_settings.paths.vault_dir / "note" / "Lit2024= Bad journal.md").exists()
+
+
+def test_push_refetch_skips_control_char_frontmatter(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A pushed note whose post-push server copy fails frontmatter validation
+    is kept marked synced and counted in skipped_invalid — the push pass warns
+    (naming the note) and the run completes."""
+    note_id = "12121212-3434-5656-7878-909090909090"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(store, tmp_settings, note_id, "! Local draft", body="local body", synced=False)
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [], "total": 0, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [], "total": 0, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{tmp_settings.api_url}/api/notes",
+        json={"id": note_id},
+    )
+    poisoned = _read_payload(note_id, "! Local draft", "local body")
+    poisoned["frontmatter"] = {"kind": "permanent", "journal": "broken\nvalue"}
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+        json=poisoned,
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.pushed_creates == 1
+        assert result.skipped_invalid == 1
+        assert any(
+            note_id in warning and "! Local draft" in warning and "'journal'" in warning
+            for warning in result.warnings
+        )
+        # The row is marked synced so the push is not retried forever; the
+        # mirror keeps the pre-push local content.
+        row = store.find_by_id(note_id)
+        assert row is not None
+        assert int(row["synced"]) == 1
+
+
 def test_same_scan_consistent_helper() -> None:
     """The same-scan decision: agree, single-page disagree, mid-walk shift."""
     from knoten.services.sync import _same_scan_consistent

@@ -122,6 +122,21 @@ def test_update_note_rename_round_trip(tmp_settings: Settings) -> None:
     assert not (tmp_settings.paths.vault_dir / "note" / "! Seed.md").exists()
 
 
+def test_update_note_control_char_frontmatter_fails_naming_note(tmp_settings: Settings) -> None:
+    """An interactive edit setting a frontmatter value with a newline fails
+    loudly — and the error names the note, not just the offending key."""
+    note_id = "33333333-3333-3333-3333-333333333333"
+    _seed_permanent(tmp_settings, note_id, "! Target", "Body one.")
+    with LocalBackend(tmp_settings) as backend:
+        with pytest.raises(UserError, match="control character") as excinfo:
+            backend.update_note(note_id, NotePatch(frontmatter={"journal": "multi\nline"}))
+    assert note_id in str(excinfo.value)
+    assert "! Target" in str(excinfo.value)
+    # Nothing was committed — file and store row keep the original content.
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Target.md"
+    assert "Body one." in mirror.read_text(encoding="utf-8")
+
+
 def test_delete_note_moves_file_to_trash(tmp_settings: Settings) -> None:
     seed = _seed_permanent(
         tmp_settings,

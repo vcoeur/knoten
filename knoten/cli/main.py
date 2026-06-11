@@ -564,6 +564,8 @@ def cmd_verify(
             "missing_ids": result.missing_ids,
             "mismatched_ids": result.mismatched_ids,
             "orphan_paths": result.orphan_paths,
+            "skipped_invalid": result.skipped_invalid,
+            "warnings": result.warnings,
         }
         if mode.json:
             emit_json(payload)
@@ -595,6 +597,8 @@ def cmd_verify(
                 console.print(f"  re-fetched missing: {', '.join(result.missing_ids[:10])}")
             if result.orphan_paths:
                 console.print(f"  orphans removed: {', '.join(result.orphan_paths[:10])}")
+            for warning in result.warnings:
+                console.print(f"[yellow]⚠ {warning}[/yellow]")
     except typer.Exit:
         raise
     except Exception as exc:
@@ -1818,6 +1822,7 @@ def _run_edit_batch(
                             "id": result.note.id,
                             "filename": result.note.filename,
                             "restricted_affected": len(result.restricted_affected),
+                            "warnings": list(result.warnings),
                         }
                     )
                 except Exception as exc:
@@ -2095,6 +2100,10 @@ def cmd_edit(
             # Additive field: how many rename-cascade targets the token could
             # not READ and were mirrored as placeholders. 0 on the common path.
             payload["restricted_affected"] = len(result.restricted_affected)
+            # Additive field: cascade targets whose re-mirror was skipped
+            # (frontmatter failed the writer's validation). Empty list on
+            # the common path.
+            payload["warnings"] = list(result.warnings)
         render_note(payload, mode=mode, minimal=fields is Fields.minimal)
     except typer.Exit:
         raise

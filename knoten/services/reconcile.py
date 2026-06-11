@@ -26,7 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from knoten.repositories.backend import Backend
-from knoten.repositories.errors import NoteForbiddenError, NotFoundError
+from knoten.repositories.errors import (
+    FrontmatterValidationError,
+    NoteForbiddenError,
+    NotFoundError,
+)
 from knoten.repositories.store import Store, StoreNoteRow
 from knoten.repositories.vault_files import strip_frontmatter
 from knoten.services.notes import (
@@ -56,6 +60,11 @@ class ReconcileResult:
     missing_ids: list[str] = field(default_factory=list)
     mismatched_ids: list[str] = field(default_factory=list)
     orphan_paths: list[str] = field(default_factory=list)
+    # Re-fetches skipped because the server copy's frontmatter failed the
+    # mirror writer's validation (control character) — each adds a
+    # `warnings` entry naming the note. Rolled up into the sync result.
+    skipped_invalid: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 def reconcile_local(
@@ -121,11 +130,11 @@ def reconcile_local(
 
     # --- Re-fetch missing + mismatched --------------------------------------
     for row in missing:
-        _refetch(row, backend=backend, store=store, settings=settings)
-        result.missing_refetched += 1
+        if _refetch(row, backend=backend, store=store, settings=settings, result=result):
+            result.missing_refetched += 1
     for row in mismatched:
-        _refetch(row, backend=backend, store=store, settings=settings)
-        result.mismatched_refetched += 1
+        if _refetch(row, backend=backend, store=store, settings=settings, result=result):
+            result.mismatched_refetched += 1
 
     # --- 3. Orphan cleanup --------------------------------------------------
     # Rebuild known_paths after re-fetch in case any note's path changed.
@@ -153,7 +162,8 @@ def _refetch(
     backend: Backend,
     store: Store,
     settings: Settings,
-) -> None:
+    result: ReconcileResult,
+) -> bool:
     """Pull a fresh copy of a single note and re-ingest it locally.
 
     If the note is restricted (server returns 404 because the token has
@@ -167,32 +177,48 @@ def _refetch(
     a `synced=0` row is a pending local write, and flipping it to 1 here
     would drop it from the push queue and arm the next sync's delete
     detection against it.
+
+    Returns True when the row was handled; False when the re-ingest was
+    skipped because the server copy's frontmatter failed the mirror
+    writer's validation — counted in `result.skipped_invalid` with a
+    `result.warnings` entry naming the note, never aborting the pass.
     """
     if row.restricted:
         _reingest_placeholder_from_row(row, store=store, settings=settings)
-        return
+        return True
     try:
         note = backend.read_note(row.id)
     except NoteForbiddenError:
         _reingest_placeholder_from_row(row, store=store, settings=settings)
-        return
+        return True
     except NotFoundError:
         # The remote no longer has this note (deleted server-side, or this
         # row is left over from a partial local delete). Drop the local row
         # + file so the next sync starts clean instead of crashing the whole
         # reconcile pass over a single phantom id.
         delete_ingested(store, settings.paths.vault_dir, row.id)
-        return
+        return True
     current = store.find_by_id(note.id)
     synced = bool(int(current.get("synced", 1))) if current is not None else True
     previous = store.get_row(note.id)
-    ingest_note(
-        note,
-        store=store,
-        vault_dir=settings.paths.vault_dir,
-        previous_path=previous.path if previous else None,
-        synced=synced,
-    )
+    try:
+        ingest_note(
+            note,
+            store=store,
+            vault_dir=settings.paths.vault_dir,
+            previous_path=previous.path if previous else None,
+            synced=synced,
+        )
+    except FrontmatterValidationError as exc:
+        result.skipped_invalid += 1
+        result.warnings.append(
+            f"reconcile: skipped re-mirroring note {note.id} ('{note.filename}'): "
+            f"frontmatter value for {exc.key!r} contains a control character — "
+            "frontmatter values must be single-line. Fix the value on the "
+            "server, then re-sync."
+        )
+        return False
+    return True
 
 
 def _reingest_placeholder_from_row(

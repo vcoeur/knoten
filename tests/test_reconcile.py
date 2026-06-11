@@ -79,6 +79,40 @@ def test_reconcile_refetches_missing_files(tmp_settings: Settings, httpx_mock: H
         assert "Body one." in target.read_text(encoding="utf-8")
 
 
+def test_reconcile_skips_refetch_with_control_char_frontmatter(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A missing-file re-fetch whose server copy carries a control character
+    in a frontmatter value is skipped with a warning naming the note — the
+    reconcile pass completes instead of aborting."""
+    note_id = "99999999-1111-2222-3333-444444444444"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_note(store, tmp_settings, note_id)
+        target = tmp_settings.paths.vault_dir / "note" / "! Seeded.md"
+        target.unlink()
+
+        poisoned = _note_read_payload(note_id)
+        poisoned["frontmatter"] = {"kind": "permanent", "journal": "broken\nvalue"}
+        httpx_mock.add_response(
+            url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+            json=poisoned,
+        )
+
+        with RemoteBackend(tmp_settings) as backend:
+            result = reconcile_local(backend=backend, store=store, settings=tmp_settings)
+
+        assert result.missing_refetched == 0
+        assert result.skipped_invalid == 1
+        # The warning names the note: id + filename + offending key.
+        assert any(
+            note_id in warning and "! Seeded" in warning and "'journal'" in warning
+            for warning in result.warnings
+        )
+        # Nothing was written; the row survives for the next attempt.
+        assert not target.exists()
+        assert store.find_by_id(note_id) is not None
+
+
 def test_reconcile_removes_orphan_files(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
     note_id = "22222222-2222-2222-2222-222222222222"
     with Store(tmp_settings.paths.index_path) as store:
