@@ -1,9 +1,11 @@
 """Sync orchestration — incremental and full modes.
 
 Incremental: page through `GET /api/notes` (sorted desc by updatedAt) until
-we hit items older than our local cursor, then fetch bodies and upsert each
-new/changed note. Delete detection runs when the remote `total` disagrees
-with the local count, or when explicitly requested.
+we hit items older than our local cursor, then fetch bodies — in chunks of
+50 via `POST /api/notes/batch-read`, falling back to per-note
+`GET /api/notes/{id}` on servers that predate the batch route — and upsert
+each new/changed note. Delete detection runs when the remote `total`
+disagrees with the local count, or when explicitly requested.
 
 Full: same algorithm but with an empty cursor and forced delete detection —
 effectively "refetch everything, reconcile both sides". The `/api/export`
@@ -22,9 +24,10 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from knoten.models import NoteSummary
+from knoten.models import Note, NoteSummary
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
 from knoten.repositories.errors import (
+    BatchReadUnsupportedError,
     FrontmatterValidationError,
     KnotenError,
     NoteForbiddenError,
@@ -44,6 +47,10 @@ from knoten.services.reconcile import reconcile_local
 from knoten.settings import Settings
 
 ProgressCallback = Callable[[str], None]
+
+# Ids per `POST /api/notes/batch-read` request in the pull pass — half the
+# server's 100-id cap, leaving headroom against future cap changes.
+BATCH_READ_CHUNK_SIZE = 50
 
 
 def _noop(_: str) -> None:
@@ -482,6 +489,11 @@ def incremental_sync(
     offset = 0
     page_size = 100
     page_num = 0
+    # Summaries needing a body fetch, in walk order. Bodies are fetched
+    # after pagination completes, in batch-read chunks (`_pull_note_bodies`)
+    # — one request per BATCH_READ_CHUNK_SIZE notes instead of one per note.
+    pending_items: list[NoteSummary] = []
+    pending_item_ids: set[str] = set()
     while True:
         page_num += 1
         page = backend.list_note_summaries(limit=page_size, offset=offset)
@@ -507,21 +519,9 @@ def incremental_sync(
             if updated >= cursor:
                 if item_id in pending_delete_ids:
                     continue  # delete push failed — do not resurrect it here
-                filename = item.filename or item_id
-                log(f"    ↓ fetching '{filename}'")
-                fetched_count, restricted_count, invalid_count = _fetch_or_placeholder(
-                    item,
-                    backend=backend,
-                    store=store,
-                    settings=settings,
-                    log=log,
-                    conflicts=conflicts,
-                    warnings=warnings,
-                    skipped_invalid_ids=skipped_invalid_ids,
-                )
-                fetched += fetched_count
-                restricted_placeholders += restricted_count
-                skipped_invalid += invalid_count
+                if item_id not in pending_item_ids:
+                    pending_item_ids.add(item_id)
+                    pending_items.append(item)
                 if updated > max_seen:
                     max_seen = updated
             else:
@@ -532,6 +532,22 @@ def incremental_sync(
         if len(items) < page_size:
             break
         offset += page_size
+
+    if pending_items:
+        log(f"  fetching {len(pending_items)} note bodies")
+        fetched_count, restricted_count, invalid_count = _pull_note_bodies(
+            pending_items,
+            backend=backend,
+            store=store,
+            settings=settings,
+            log=log,
+            conflicts=conflicts,
+            warnings=warnings,
+            skipped_invalid_ids=skipped_invalid_ids,
+        )
+        fetched += fetched_count
+        restricted_placeholders += restricted_count
+        skipped_invalid += invalid_count
 
     # Reconcile the local ID set against the remote ID set. This single pass
     # handles BOTH previously-separate concerns:
@@ -849,39 +865,26 @@ def _frontmatter_skip_warning(
     )
 
 
-def _fetch_or_placeholder(
+def _prefetch_guard(
     item: NoteSummary,
     *,
-    backend: Backend,
     store: Store,
-    settings: Settings,
     log: ProgressCallback,
     conflicts: list[dict],
     warnings: list[str],
     skipped_invalid_ids: set[str],
-) -> tuple[int, int, int]:
-    """Fetch a full note by ID and ingest it. On 404, create a placeholder.
+) -> tuple[int, int, int] | None:
+    """Run the pre-fetch ingest guards on a list summary.
 
-    Returns `(fetched_full_count, placeholder_count, skipped_invalid_count)`
-    — at most one of them is 1. Every skipped note's id is also added to
-    `skipped_invalid_ids` so the caller's catch-up pass does not re-fetch
-    (and re-count) it within the same run.
-
-    Guards, in order:
+    Returns the `(fetched, placeholder, skipped_invalid)` counts tuple when
+    the item must be skipped without a body fetch, or `None` when the caller
+    should go on and fetch the body. Guards, in order:
 
     - A local row with `synced=0` is a pending local write — never
       overwrite it from the pull pass. Recorded as a conflict; the push
       pass later uploads the local version.
     - A server-provided filename failing validation is skipped with a
       warning — never written to disk, never committed to the store.
-    - A server-provided frontmatter value failing the writer's validation
-      (control character — the mirror writes single-line YAML scalars) is
-      skipped with a warning naming the note and the offending key, never
-      aborting the run. The render failure happens before the store
-      transaction, so nothing is committed.
-    - A `UNIQUE(filename)` constraint failure (remote note colliding with
-      a different local row's filename) is recorded as a conflict instead
-      of aborting the whole sync.
     """
     item_id = item.id
 
@@ -903,34 +906,73 @@ def _fetch_or_placeholder(
         log(f"    ⚠ skipping remote note {item_id}: {reason}")
         skipped_invalid_ids.add(item_id)
         return (0, 0, 1)
+    return None
 
+
+def _ingest_restricted_placeholder(
+    item: NoteSummary,
+    *,
+    store: Store,
+    settings: Settings,
+    log: ProgressCallback,
+    warnings: list[str],
+    skipped_invalid_ids: set[str],
+) -> tuple[int, int, int]:
+    """Mirror a list-but-not-READ note as a metadata-only placeholder.
+
+    The branch a single read's 404 (`NoteForbiddenError`) and a batch read's
+    `failed` entry share — the server conflates "forbidden" and "missing"
+    the same way in both. Returns the counts tuple.
+    """
+    item_id = item.id
+    previous = store.get_row(item_id)
     try:
-        note = backend.read_note(item_id)
-    except NoteForbiddenError:
-        previous = store.get_row(item_id)
-        try:
-            ingest_placeholder(
-                item,
-                store=store,
-                vault_dir=settings.paths.vault_dir,
-                previous_path=previous.path if previous else None,
-            )
-        except FrontmatterValidationError as exc:
-            warning = _frontmatter_skip_warning(item_id, item.filename, exc)
-            warnings.append(warning)
-            log(f"    ⚠ {warning}")
-            skipped_invalid_ids.add(item_id)
-            return (0, 0, 1)
-        log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
-        return (0, 1, 0)
+        ingest_placeholder(
+            item,
+            store=store,
+            vault_dir=settings.paths.vault_dir,
+            previous_path=previous.path if previous else None,
+        )
+    except FrontmatterValidationError as exc:
+        warning = _frontmatter_skip_warning(item_id, item.filename, exc)
+        warnings.append(warning)
+        log(f"    ⚠ {warning}")
+        skipped_invalid_ids.add(item_id)
+        return (0, 0, 1)
+    log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
+    return (0, 1, 0)
 
-    # Re-validate: the read response's filename is also server-controlled
-    # and may differ from the list summary's.
+
+def _ingest_full_note(
+    note: Note,
+    *,
+    store: Store,
+    settings: Settings,
+    log: ProgressCallback,
+    conflicts: list[dict],
+    warnings: list[str],
+    skipped_invalid_ids: set[str],
+) -> tuple[int, int, int]:
+    """Ingest a fetched full note through the per-note guards.
+
+    Applies identically to single-read and batch-read payloads. Guards:
+
+    - The read response's filename is re-validated — it is also
+      server-controlled and may differ from the list summary's.
+    - A server-provided frontmatter value failing the writer's validation
+      (control character — the mirror writes single-line YAML scalars) is
+      skipped with a warning naming the note and the offending key, never
+      aborting the run. The render failure happens before the store
+      transaction, so nothing is committed.
+    - A `UNIQUE(filename)` constraint failure (remote note colliding with
+      a different local row's filename) is recorded as a conflict instead
+      of aborting the whole sync.
+    """
     reason = _invalid_filename_reason(note.filename)
     if reason is not None:
-        warnings.append(f"skipped remote note {item_id}: {reason}")
-        log(f"    ⚠ skipping remote note {item_id}: {reason}")
-        skipped_invalid_ids.add(item_id)
+        warnings.append(f"skipped remote note {note.id}: {reason}")
+        log(f"    ⚠ skipping remote note {note.id}: {reason}")
+        skipped_invalid_ids.add(note.id)
         return (0, 0, 1)
 
     previous = store.get_row(note.id)
@@ -942,20 +984,12 @@ def _fetch_or_placeholder(
             previous_path=previous.path if previous else None,
         )
     except FrontmatterValidationError as exc:
-        # The server sent a frontmatter value the mirror writer refuses
-        # (control character). Render fails before the store transaction,
-        # so nothing was committed — skip the note with a warning naming
-        # it, exactly like a hostile filename, instead of aborting the run.
         warning = _frontmatter_skip_warning(note.id, note.filename, exc)
         warnings.append(warning)
         log(f"    ⚠ {warning}")
         skipped_invalid_ids.add(note.id)
         return (0, 0, 1)
     except sqlite3.IntegrityError:
-        # UNIQUE(filename) — a different local row already uses this name
-        # (typically a local-only note created offline). The transaction
-        # rolled back, so nothing was committed; surface a conflict and let
-        # the sync carry on instead of wedging on this one note.
         conflicts.append({"id": note.id, "filename": note.filename, "reason": "filename_collision"})
         warnings.append(
             f"conflict: remote note '{note.filename}' ({note.id}) collides with an "
@@ -964,3 +998,182 @@ def _fetch_or_placeholder(
         log(f"    ⚠ '{note.filename}' collides with an existing local filename — skipped")
         return (0, 0, 0)
     return (1, 0, 0)
+
+
+def _fetch_or_placeholder(
+    item: NoteSummary,
+    *,
+    backend: Backend,
+    store: Store,
+    settings: Settings,
+    log: ProgressCallback,
+    conflicts: list[dict],
+    warnings: list[str],
+    skipped_invalid_ids: set[str],
+) -> tuple[int, int, int]:
+    """Fetch a full note by ID and ingest it. On 404, create a placeholder.
+
+    Returns `(fetched_full_count, placeholder_count, skipped_invalid_count)`
+    — at most one of them is 1. Every skipped note's id is also added to
+    `skipped_invalid_ids` so the caller's catch-up pass does not re-fetch
+    (and re-count) it within the same run.
+
+    Composes the same three pieces the batch pull path uses —
+    `_prefetch_guard`, `_ingest_restricted_placeholder`, `_ingest_full_note`
+    — so the per-note guards are byte-identical between the single-read
+    path (reconcile catch-up, old-server fallback) and the batch path.
+    """
+    guarded = _prefetch_guard(
+        item,
+        store=store,
+        log=log,
+        conflicts=conflicts,
+        warnings=warnings,
+        skipped_invalid_ids=skipped_invalid_ids,
+    )
+    if guarded is not None:
+        return guarded
+
+    try:
+        note = backend.read_note(item.id)
+    except NoteForbiddenError:
+        return _ingest_restricted_placeholder(
+            item,
+            store=store,
+            settings=settings,
+            log=log,
+            warnings=warnings,
+            skipped_invalid_ids=skipped_invalid_ids,
+        )
+    return _ingest_full_note(
+        note,
+        store=store,
+        settings=settings,
+        log=log,
+        conflicts=conflicts,
+        warnings=warnings,
+        skipped_invalid_ids=skipped_invalid_ids,
+    )
+
+
+def _pull_note_bodies(
+    items: list[NoteSummary],
+    *,
+    backend: Backend,
+    store: Store,
+    settings: Settings,
+    log: ProgressCallback,
+    conflicts: list[dict],
+    warnings: list[str],
+    skipped_invalid_ids: set[str],
+) -> tuple[int, int, int]:
+    """Fetch and ingest the bodies for the pull pass's pending summaries.
+
+    Returns the aggregated `(fetched, placeholder, skipped_invalid)` counts.
+
+    Runs `_prefetch_guard` per item first (so `synced=0` conflicts and
+    hostile summary filenames never reach the wire), then fetches the
+    remainder in `POST /api/notes/batch-read` chunks of
+    `BATCH_READ_CHUNK_SIZE`. Each note a batch returns goes through the
+    exact same per-note ingest guards as a single read
+    (`_ingest_full_note`); each id in the response's `failed` list takes
+    the placeholder branch, same as a single read's 404.
+
+    Old-server degradation: when the batch route itself 404s
+    (`BatchReadUnsupportedError`), the pass falls back to per-note
+    `read_note` calls for the rest of the run — detected once, never
+    retried per chunk.
+    """
+    fetched = 0
+    placeholders = 0
+    invalid = 0
+
+    to_fetch: list[NoteSummary] = []
+    for item in items:
+        guarded = _prefetch_guard(
+            item,
+            store=store,
+            log=log,
+            conflicts=conflicts,
+            warnings=warnings,
+            skipped_invalid_ids=skipped_invalid_ids,
+        )
+        if guarded is not None:
+            fetched += guarded[0]
+            placeholders += guarded[1]
+            invalid += guarded[2]
+            continue
+        to_fetch.append(item)
+
+    batch_supported = True
+    total_chunks = (len(to_fetch) + BATCH_READ_CHUNK_SIZE - 1) // BATCH_READ_CHUNK_SIZE
+    for chunk_index, start in enumerate(range(0, len(to_fetch), BATCH_READ_CHUNK_SIZE), start=1):
+        chunk = to_fetch[start : start + BATCH_READ_CHUNK_SIZE]
+        if batch_supported:
+            by_id = {item.id: item for item in chunk}
+            try:
+                batch = backend.read_notes(tuple(by_id))
+            except BatchReadUnsupportedError:
+                batch_supported = False
+                log(
+                    "  server has no batch-read endpoint (pre-batch-read release) — "
+                    "falling back to per-note fetches for this run"
+                )
+            else:
+                log(
+                    f"    ↓ batch {chunk_index}/{total_chunks}: fetched "
+                    f"{len(batch.notes)} note(s), {len(batch.failed)} restricted/missing"
+                )
+                for note in batch.notes:
+                    if note.id not in by_id:
+                        continue  # defensive: ignore notes we did not ask for
+                    counts = _ingest_full_note(
+                        note,
+                        store=store,
+                        settings=settings,
+                        log=log,
+                        conflicts=conflicts,
+                        warnings=warnings,
+                        skipped_invalid_ids=skipped_invalid_ids,
+                    )
+                    fetched += counts[0]
+                    placeholders += counts[1]
+                    invalid += counts[2]
+                for failed_id in batch.failed:
+                    item = by_id.get(failed_id)
+                    if item is None:
+                        continue
+                    counts = _ingest_restricted_placeholder(
+                        item,
+                        store=store,
+                        settings=settings,
+                        log=log,
+                        warnings=warnings,
+                        skipped_invalid_ids=skipped_invalid_ids,
+                    )
+                    fetched += counts[0]
+                    placeholders += counts[1]
+                    invalid += counts[2]
+                # An id in neither `notes` nor `failed` would violate the
+                # endpoint contract; it stays un-ingested this run and the
+                # reconcile catch-up pass re-fetches it per-note.
+                continue
+        # Per-note fallback — the server predates the batch route. The
+        # pre-fetch guard re-runs inside `_fetch_or_placeholder`; it is
+        # idempotent and the store has not changed for these ids.
+        for item in chunk:
+            log(f"    ↓ fetching '{item.filename or item.id}'")
+            counts = _fetch_or_placeholder(
+                item,
+                backend=backend,
+                store=store,
+                settings=settings,
+                log=log,
+                conflicts=conflicts,
+                warnings=warnings,
+                skipped_invalid_ids=skipped_invalid_ids,
+            )
+            fetched += counts[0]
+            placeholders += counts[1]
+            invalid += counts[2]
+    return (fetched, placeholders, invalid)

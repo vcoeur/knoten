@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,
+    BatchReadResult,
     NoteDraft,
     NotePatch,
     NotesPage,
@@ -245,6 +247,19 @@ class LocalBackend(Backend):
             updated_at=row.get("updated_at") or "",
             permissions=row.get("permissions") or "ALL",
         )
+
+    def read_notes(self, note_ids: Sequence[str]) -> BatchReadResult:
+        # Local reads are filesystem-cheap, so there is no batching win —
+        # loop `read_note` for contract symmetry. Missing ids land in
+        # `failed`, mirroring the remote backend's 404 conflation.
+        notes: list[Note] = []
+        failed: list[str] = []
+        for note_id in note_ids:
+            try:
+                notes.append(self.read_note(note_id))
+            except NotFoundError:
+                failed.append(note_id)
+        return BatchReadResult(notes=tuple(notes), failed=tuple(failed))
 
     def create_note(self, draft: NoteDraft) -> str:
         self._refresh_index_if_stale()

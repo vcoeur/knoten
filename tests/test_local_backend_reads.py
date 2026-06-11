@@ -137,6 +137,27 @@ def test_read_note_missing_id_raises_not_found(tmp_settings: Settings) -> None:
         backend.read_note("00000000-0000-0000-0000-000000000000")
 
 
+def test_read_notes_returns_batch_with_missing_ids_in_failed(tmp_settings: Settings) -> None:
+    """`read_notes` loops `read_note`; missing ids land in `failed` instead
+    of raising — contract symmetry with the remote batch-read endpoint."""
+    _seed_vault(tmp_settings)
+    with LocalBackend(tmp_settings) as backend:
+        result = backend.read_notes(
+            [
+                "11111111-1111-1111-1111-111111111111",
+                "00000000-0000-0000-0000-000000000000",
+                "22222222-2222-2222-2222-222222222222",
+            ]
+        )
+
+    assert [note.id for note in result.notes] == [
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    ]
+    assert result.failed == ("00000000-0000-0000-0000-000000000000",)
+    assert "First body" in result.notes[0].body
+
+
 def test_attachments_round_trip(tmp_settings: Settings, tmp_path) -> None:
     """Phase 7: attachments live under `<vault>/.attachments/<storage_key>`."""
     _seed_vault(tmp_settings)

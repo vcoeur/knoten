@@ -18,6 +18,7 @@ backends that have no permission model simply never raise
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -33,6 +34,20 @@ class NotesPage:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True)
+class BatchReadResult:
+    """Return value of `read_notes`.
+
+    `notes` carries every requested note the backend could read in full.
+    `failed` carries the ids it could not — for `RemoteBackend` those are
+    notes the viewer cannot READ or that do not exist (the server conflates
+    the two, exactly like the single read's 404).
+    """
+
+    notes: tuple[Note, ...]
+    failed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,7 +125,7 @@ class AttachmentDownloadResult:
 class Backend(Protocol):
     """The full contract knoten needs from a notes backend.
 
-    Eight business methods plus `close()` for resource release. Everything
+    Eleven business methods plus `close()` for resource release. Everything
     outside this Protocol is caller-side glue that does not belong on the
     backend contract (e.g. `iter_all_summaries` in the sync service wraps
     `list_note_summaries` with pagination logic).
@@ -133,6 +148,18 @@ class Backend(Protocol):
 
         Remote backends raise `NoteForbiddenError` when the caller has
         list-but-not-read permission on a note; local backends never do.
+        """
+        ...
+
+    def read_notes(self, note_ids: Sequence[str]) -> BatchReadResult:
+        """Fetch many full notes in one call.
+
+        Unreadable / missing ids land in `BatchReadResult.failed` instead of
+        raising, so one restricted note never fails the batch. `RemoteBackend`
+        drives `POST /api/notes/batch-read` (server caps a request at 100 ids;
+        sync chunks at 50) and raises `BatchReadUnsupportedError` when the
+        server predates the route; `LocalBackend` loops `read_note` and never
+        raises it.
         """
         ...
 
