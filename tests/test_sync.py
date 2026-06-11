@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 from pytest_httpx import HTTPXMock
 
 from knoten.models import Note
@@ -35,21 +36,28 @@ def test_incremental_sync_fetches_new_notes(tmp_settings: Settings, httpx_mock: 
         url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
         json=_list_payload([list_item], total=1),
     )
+    # The pull pass fetches bodies via batch-read (one chunk here).
     httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/11111111-1111-1111-1111-111111111111",
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
         json={
-            "id": "11111111-1111-1111-1111-111111111111",
-            "filename": "! First",
-            "title": "First",
-            "family": "permanent",
-            "kind": "permanent",
-            "source": None,
-            "body": "Body of first. [[Second]]",
-            "frontmatter": {"kind": "permanent", "title": "First"},
-            "tags": [],
-            "linkMap": {"Second": None},
-            "createdAt": "2024-01-01T00:00:00Z",
-            "updatedAt": "2024-01-02T00:00:00Z",
+            "notes": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "filename": "! First",
+                    "title": "First",
+                    "family": "permanent",
+                    "kind": "permanent",
+                    "source": None,
+                    "body": "Body of first. [[Second]]",
+                    "frontmatter": {"kind": "permanent", "title": "First"},
+                    "tags": [],
+                    "linkMap": {"Second": None},
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "updatedAt": "2024-01-02T00:00:00Z",
+                }
+            ],
+            "failed": [],
         },
     )
     # Delete detection scans at page_size=200 — always runs now.
@@ -661,8 +669,12 @@ def test_sync_refetches_boundary_same_second_edit(
         json={"data": [item], "total": 1, "limit": 200, "offset": 0},
     )
     httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/{note_id}",
-        json=_read_payload(note_id, "! Same second", "same-second edit body"),
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={
+            "notes": [_read_payload(note_id, "! Same second", "same-second edit body")],
+            "failed": [],
+        },
     )
 
     with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
@@ -724,17 +736,17 @@ def test_full_sync_skips_note_with_control_char_frontmatter(
         url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
         json={"data": [good_item, bad_item], "total": 2, "limit": 200, "offset": 0},
     )
-    httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/{good_id}",
-        json=_read_payload(good_id, "! Good note", "good body"),
-    )
-    # One read only: the reconcile catch-up pass must not re-fetch a note
-    # already skipped this run.
+    # One batch read only: the reconcile catch-up pass must not re-fetch a
+    # note already skipped this run (no per-note GET is registered).
     bad_payload = _read_payload(bad_id, "Lit2024= Bad journal", "bad body")
     bad_payload["frontmatter"] = {"kind": "permanent", "journal": "Nature\nVol. 2"}
     httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/{bad_id}",
-        json=bad_payload,
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={
+            "notes": [_read_payload(good_id, "! Good note", "good body"), bad_payload],
+            "failed": [],
+        },
     )
 
     with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
@@ -1109,3 +1121,243 @@ def test_transient_push_failure_is_not_marked_rejected(
         assert row["push_rejected_at"] is None  # transient — retried next sync
         assert int(row["synced"]) == 0
         assert not any("delete detection skipped" in warning for warning in result.warnings)
+
+
+# ---- batch-read pull pass --------------------------------------------------
+
+
+def _batch_read_requests(httpx_mock: HTTPXMock) -> list:
+    return [r for r in httpx_mock.get_requests() if r.url.path == "/api/notes/batch-read"]
+
+
+def _per_note_get_requests(httpx_mock: HTTPXMock) -> list:
+    return [
+        r
+        for r in httpx_mock.get_requests()
+        if r.method == "GET" and r.url.path.startswith("/api/notes/")
+    ]
+
+
+def test_pull_pass_chunks_batch_reads_at_50(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    """120 pending bodies → 3 batch-read requests of 50/50/20 ids, zero
+    per-note GETs — each id requested exactly once."""
+    ids = [f"aaaaaaaa-bbbb-cccc-dddd-{i:012d}" for i in range(120)]
+    items = [_summary_item(note_id, f"! Batch note {i:03d}") for i, note_id in enumerate(ids)]
+    filename_by_id = {item["id"]: item["filename"] for item in items}
+
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": items[:100], "total": 120, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=100",
+        json={"data": items[100:], "total": 120, "limit": 100, "offset": 100},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": items, "total": 120, "limit": 200, "offset": 0},
+    )
+
+    def batch_callback(request: httpx.Request) -> httpx.Response:
+        requested = json.loads(request.content)["ids"]
+        notes = [
+            _read_payload(note_id, filename_by_id[note_id], f"body of {note_id}")
+            for note_id in requested
+        ]
+        return httpx.Response(200, json={"notes": notes, "failed": []})
+
+    httpx_mock.add_callback(
+        batch_callback,
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        is_reusable=True,
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 120
+        assert store.count_notes() == 120
+
+    batch_requests = _batch_read_requests(httpx_mock)
+    assert [len(json.loads(r.content)["ids"]) for r in batch_requests] == [50, 50, 20]
+    requested_ids = [note_id for r in batch_requests for note_id in json.loads(r.content)["ids"]]
+    assert sorted(requested_ids) == sorted(ids)
+    assert _per_note_get_requests(httpx_mock) == []
+
+
+def test_batch_fetched_notes_pass_per_note_ingest_guards(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """Batch-fetched payloads go through the exact same ingest guards as
+    single reads: a control-char frontmatter value and a hostile filename
+    are each skipped with a warning naming the note — the run continues."""
+    from knoten.services.sync import full_sync
+
+    good_id = "cafecafe-0000-1111-2222-333333333333"
+    bad_frontmatter_id = "cafecafe-0000-1111-2222-444444444444"
+    hostile_filename_id = "cafecafe-0000-1111-2222-555555555555"
+    items = [
+        _summary_item(good_id, "! Good in batch"),
+        _summary_item(bad_frontmatter_id, "Lit2026= Poisoned journal"),
+        _summary_item(hostile_filename_id, "! Looks fine in the summary"),
+    ]
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": items, "total": 3, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": items, "total": 3, "limit": 200, "offset": 0},
+    )
+    bad_frontmatter = _read_payload(bad_frontmatter_id, "Lit2026= Poisoned journal", "bad body")
+    bad_frontmatter["frontmatter"] = {"kind": "permanent", "journal": "Nature\nVol. 3"}
+    # The read payload's filename is server-controlled too — re-validated
+    # even when the list summary's filename was fine.
+    hostile = _read_payload(hostile_filename_id, "../../escape attempt", "escape body")
+    # One batch read only — the reconcile catch-up must not re-fetch the
+    # skipped notes (no per-note GET is registered).
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={
+            "notes": [
+                _read_payload(good_id, "! Good in batch", "good body"),
+                bad_frontmatter,
+                hostile,
+            ],
+            "failed": [],
+        },
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = full_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 1
+        assert result.skipped_invalid == 2
+        assert any(
+            bad_frontmatter_id in warning
+            and "Lit2026= Poisoned journal" in warning
+            and "'journal'" in warning
+            for warning in result.warnings
+        )
+        assert any(
+            hostile_filename_id in warning and "path separator" in warning
+            for warning in result.warnings
+        )
+        assert store.find_by_id(good_id) is not None
+        assert store.find_by_id(bad_frontmatter_id) is None
+        assert store.find_by_id(hostile_filename_id) is None
+
+    assert (tmp_settings.paths.vault_dir / "note" / "! Good in batch.md").exists()
+    assert not (tmp_settings.paths.vault_dir / "note" / "Lit2026= Poisoned journal.md").exists()
+
+
+def test_batch_read_unsupported_falls_back_to_per_note_once(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """An old server 404s the batch route: the pull pass detects it on the
+    FIRST chunk only and falls back to per-note GETs for the whole run —
+    producing identical results (full notes + restricted placeholder)."""
+    ids = [f"bbbbbbbb-cccc-dddd-eeee-{i:012d}" for i in range(60)]
+    restricted_id = ids[7]
+    items = [_summary_item(note_id, f"! Fallback note {i:03d}") for i, note_id in enumerate(ids)]
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": items, "total": 60, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": items, "total": 60, "limit": 200, "offset": 0},
+    )
+    # The route itself does not exist on this server.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        status_code=404,
+        json={"error": "NOT_FOUND"},
+    )
+    for i, note_id in enumerate(ids):
+        if note_id == restricted_id:
+            httpx_mock.add_response(
+                url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+                status_code=404,
+                json={"error": "not_found"},
+            )
+        else:
+            httpx_mock.add_response(
+                url=f"{tmp_settings.api_url}/api/notes/{note_id}",
+                json=_read_payload(note_id, f"! Fallback note {i:03d}", f"body {i}"),
+            )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 59
+        assert result.restricted_placeholders == 1
+        assert store.count_notes() == 60  # 59 full + 1 placeholder
+        row = store.find_by_id(restricted_id)
+        assert row is not None
+        assert row["restricted"] == 1
+
+    # Detected once: a single batch-read attempt, never retried per chunk
+    # (60 pending ids span two chunks).
+    assert len(_batch_read_requests(httpx_mock)) == 1
+    assert len(_per_note_get_requests(httpx_mock)) == 60
+
+
+def test_synced0_rows_are_excluded_before_the_batch_fetch(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """A `synced=0` row never enters the batch-read request — the conflict
+    guard runs pre-batch, the local version is kept and pushed."""
+    offline_id = "dddddddd-1111-2222-3333-444444444444"
+    other_id = "dddddddd-1111-2222-3333-555555555555"
+    with Store(tmp_settings.paths.index_path) as store:
+        _seed_synced(
+            store,
+            tmp_settings,
+            offline_id,
+            "! Offline edited",
+            body="OFFLINE EDIT body",
+            synced=False,
+        )
+
+    offline_item = _summary_item(offline_id, "! Offline edited")
+    other_item = _summary_item(other_id, "! Plain remote note")
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
+        json={"data": [offline_item, other_item], "total": 2, "limit": 100, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes?limit=200&offset=0",
+        json={"data": [offline_item, other_item], "total": 2, "limit": 200, "offset": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={
+            "notes": [_read_payload(other_id, "! Plain remote note", "remote body")],
+            "failed": [],
+        },
+    )
+    # The push pass uploads the offline edit, then re-fetches it per-note.
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{offline_id}",
+        method="PUT",
+        json={"id": offline_id},
+    )
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/{offline_id}",
+        method="GET",
+        json=_read_payload(offline_id, "! Offline edited", "OFFLINE EDIT body"),
+    )
+
+    with Store(tmp_settings.paths.index_path) as store, RemoteBackend(tmp_settings) as backend:
+        result = incremental_sync(backend=backend, store=store, settings=tmp_settings)
+        assert result.fetched == 1
+        assert result.pushed_edits == 1
+        assert [c["reason"] for c in result.conflicts] == ["local_unsynced_edit"]
+
+    batch_requests = _batch_read_requests(httpx_mock)
+    assert len(batch_requests) == 1
+    assert json.loads(batch_requests[0].content)["ids"] == [other_id]
+    mirror = tmp_settings.paths.vault_dir / "note" / "! Offline edited.md"
+    assert "OFFLINE EDIT body" in mirror.read_text(encoding="utf-8")

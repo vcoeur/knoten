@@ -166,6 +166,16 @@ class AuthError(NetworkError):
     """Token missing, invalid, or lacks required scope."""
 
 
+class BatchReadUnsupportedError(NetworkError):
+    """The remote lacks `POST /api/notes/batch-read` (the route itself 404s).
+
+    Raised by `RemoteBackend.read_notes` when the server predates the
+    batch-read endpoint. The sync pull pass catches it once per run and
+    falls back to per-note `GET /api/notes/{id}` for the remainder — one
+    release of backward compatibility with older servers.
+    """
+
+
 class StoreError(KnotenError):
     """Local SQLite or filesystem failure."""
 

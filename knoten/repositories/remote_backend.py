@@ -11,6 +11,7 @@ dataclasses at the boundary.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,
+    BatchReadResult,
     NoteDraft,
     NotePatch,
     NotesPage,
@@ -28,6 +30,7 @@ from knoten.repositories.backend import (
 )
 from knoten.repositories.errors import (
     AuthError,
+    BatchReadUnsupportedError,
     NetworkError,
     NoteForbiddenError,
     NotFoundError,
@@ -129,6 +132,30 @@ class RemoteBackend(Backend):
     def read_note(self, note_id: str) -> Note:
         payload = self._request("GET", f"/api/notes/{note_id}", note_id=note_id)
         return note_from_api(payload)
+
+    def read_notes(self, note_ids: Sequence[str]) -> BatchReadResult:
+        # The server caps a batch-read request at 100 ids (400 above) —
+        # chunking is the caller's job (sync chunks at 50). `failed` carries
+        # ids the viewer cannot READ or that do not exist, conflated exactly
+        # like the single read's 404. A 404 on the route itself means the
+        # server predates the endpoint — mapped to BatchReadUnsupportedError
+        # so the caller can fall back to per-note reads.
+        payload = self._request(
+            "POST",
+            "/api/notes/batch-read",
+            json={"ids": [str(note_id) for note_id in note_ids]},
+            expected=(200,),
+            missing_route_message=(
+                "POST /api/notes/batch-read is not available on this server "
+                "(pre-batch-read release)"
+            ),
+        )
+        notes_raw = payload.get("notes") if isinstance(payload, dict) else None
+        failed_raw = payload.get("failed") if isinstance(payload, dict) else None
+        return BatchReadResult(
+            notes=tuple(note_from_api(item) for item in (notes_raw or [])),
+            failed=tuple(str(entry) for entry in (failed_raw or [])),
+        )
 
     def create_note(self, draft: NoteDraft) -> str:
         # `tags` is deliberately NOT sent: the server's createNoteSchema is
@@ -293,6 +320,7 @@ class RemoteBackend(Backend):
         expected: tuple[int, ...] = (200, 201, 204),
         note_id: str | None = None,
         not_found_message: str | None = None,
+        missing_route_message: str | None = None,
     ) -> Any:
         try:
             response = self._client.request(method, path, params=params, json=json)
@@ -344,6 +372,9 @@ class RemoteBackend(Backend):
                 raise NoteForbiddenError(note_id)
             if status == 404 and not_found_message is not None:
                 raise NotFoundError(not_found_message)
+            # 404 on the route itself — the server predates this endpoint.
+            if status == 404 and missing_route_message is not None:
+                raise BatchReadUnsupportedError(missing_route_message)
             # 400 VALIDATION_ERROR — frontmatter type mismatch (v2.9.1+).
             # Shape: {"error": "VALIDATION_ERROR", "detail": {"issues": [...]}}.
             if status == 400 and error_code == "VALIDATION_ERROR":

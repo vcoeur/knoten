@@ -295,7 +295,7 @@ knoten inbox list --limit 10 --offset 10
 
 ### `knoten sync`
 
-Pull new / changed notes from the remote into the local mirror. Always pushes local writes and pending deletes first, then runs delete detection and reconciliation (re-fetch missing files, remove orphans).
+Pull new / changed notes from the remote into the local mirror. Always pushes local writes and pending deletes first, then runs delete detection and reconciliation (re-fetch missing files, remove orphans). The pull pass fetches note bodies in chunks of 50 via `POST /api/notes/batch-read`; on a server that predates the endpoint (the route itself 404s) it falls back transparently to per-note `GET /api/notes/{id}` for the rest of the run — detected once, not retried per chunk.
 
 ```bash
 knoten sync                        # incremental

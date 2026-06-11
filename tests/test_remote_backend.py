@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import httpx
@@ -11,6 +12,7 @@ from pytest_httpx import HTTPXMock
 from knoten.repositories.backend import NoteDraft
 from knoten.repositories.errors import (
     AuthError,
+    BatchReadUnsupportedError,
     NetworkError,
     RemoteRejectionError,
     ValidationError,
@@ -76,6 +78,65 @@ def test_network_failure_raises_network_error(
     httpx_mock.add_exception(httpx.ConnectError("boom"))
     with RemoteBackend(tmp_settings) as backend, pytest.raises(NetworkError):
         backend.read_note("abc")
+
+
+def test_read_notes_parses_notes_and_failed(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={
+            "notes": [
+                {
+                    "id": "id-1",
+                    "filename": "! One",
+                    "title": "One",
+                    "family": "permanent",
+                    "kind": "permanent",
+                    "source": None,
+                    "body": "Body of one.",
+                    "frontmatter": {"kind": "permanent"},
+                    "tags": [],
+                    "linkMap": {},
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "updatedAt": "2024-01-02T00:00:00Z",
+                }
+            ],
+            "failed": ["id-missing"],
+        },
+    )
+    with RemoteBackend(tmp_settings) as backend:
+        result = backend.read_notes(["id-1", "id-missing"])
+    assert [note.id for note in result.notes] == ["id-1"]
+    assert result.notes[0].body == "Body of one."
+    assert result.failed == ("id-missing",)
+    request = httpx_mock.get_requests()[0]
+    assert json.loads(request.content) == {"ids": ["id-1", "id-missing"]}
+
+
+def test_read_notes_route_404_raises_batch_unsupported(
+    tmp_settings: Settings, httpx_mock: HTTPXMock
+) -> None:
+    """An old server without the route 404s — mapped to the dedicated error
+    so sync can fall back to per-note reads, NOT to NoteForbiddenError."""
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        status_code=404,
+        json={"error": "NOT_FOUND"},
+    )
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(BatchReadUnsupportedError):
+        backend.read_notes(["id-1"])
+
+
+def test_read_notes_401_raises_auth_error(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        status_code=401,
+        json={"error": "UNAUTHORIZED"},
+    )
+    with RemoteBackend(tmp_settings) as backend, pytest.raises(AuthError):
+        backend.read_notes(["id-1"])
 
 
 def test_delete_note_404_raises_not_found(tmp_settings: Settings, httpx_mock: HTTPXMock) -> None:

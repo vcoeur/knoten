@@ -190,7 +190,7 @@ When run from the repo, `knoten` picks up the `.env` at the repo root, keeps the
 knoten sync --full
 ```
 
-This pages through `GET /api/notes` with the cursor cleared, fetches each note's body via `GET /api/notes/{id}`, writes one markdown file per note under the vault directory, and builds the local SQLite index in the cache dir.
+This pages through `GET /api/notes` with the cursor cleared, fetches note bodies in chunks of 50 via `POST /api/notes/batch-read` (falling back to per-note `GET /api/notes/{id}` on servers that predate the batch endpoint), writes one markdown file per note under the vault directory, and builds the local SQLite index in the cache dir.
 
 If `./kasten/` already contains unrelated content, it is preserved — sync writes files by their export-style path (`entity/`, `note/`, `literature/`, `files/`, `journal/YYYY-MM/`) and will not overwrite arbitrary files in parallel directories.
 

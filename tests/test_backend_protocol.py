@@ -15,6 +15,7 @@ from knoten.repositories.backend import (
     AttachmentDownloadResult,
     AttachmentUploadResult,
     Backend,
+    BatchReadResult,
     NoteDraft,
     NotePatch,
     NotesPage,
@@ -44,6 +45,9 @@ class _FakeBackend:
             source=None,
             body="",
         )
+
+    def read_notes(self, note_ids) -> BatchReadResult:
+        return BatchReadResult(notes=(), failed=tuple(note_ids))
 
     def create_note(self, draft: NoteDraft) -> str:
         return "00000000-0000-0000-0000-000000000000"
@@ -115,6 +119,7 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
     _: Any = backend.list_note_summaries
     _ = backend.list_trashed_notes
     _ = backend.read_note
+    _ = backend.read_notes
     _ = backend.create_note
     _ = backend.update_note
     _ = backend.append_to_note
@@ -127,6 +132,7 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
         "list_note_summaries",
         "list_trashed_notes",
         "read_note",
+        "read_notes",
         "create_note",
         "update_note",
         "append_to_note",
@@ -140,4 +146,4 @@ def _static_type_check(backend: Backend) -> tuple[str, ...]:
 
 def test_backend_protocol_static_surface() -> None:
     names = _static_type_check(_FakeBackend())
-    assert len(names) == 11
+    assert len(names) == 12

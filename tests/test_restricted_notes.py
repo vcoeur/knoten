@@ -1,8 +1,9 @@
 """Restricted-note handling: LIST-permission notes become local placeholders.
 
 The server returns 404 on `GET /api/notes/{id}` for notes the token cannot
-READ (conflating "forbidden" with "not found" to hide existence). Sync must
-catch this and create a metadata-only placeholder so (a) title search still
+READ (conflating "forbidden" with "not found" to hide existence); the
+batch-read endpoint reports the same ids in its `failed` list. Sync must
+catch both and create a metadata-only placeholder so (a) title search still
 finds the note and (b) local_total == remote_total despite restrictions.
 """
 
@@ -86,14 +87,12 @@ def test_sync_creates_placeholder_for_404_note(
         url=f"{tmp_settings.api_url}/api/notes?limit=100&offset=0",
         json=list_payload,
     )
+    # The pull pass batch-reads both ids; the restricted one comes back in
+    # `failed` (same forbidden/missing conflation as the single read's 404).
     httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/{readable_id}",
-        json=_note_payload(readable_id, "! Readable"),
-    )
-    httpx_mock.add_response(
-        url=f"{tmp_settings.api_url}/api/notes/{restricted_id}",
-        status_code=404,
-        json={"error": "not_found"},
+        url=f"{tmp_settings.api_url}/api/notes/batch-read",
+        method="POST",
+        json={"notes": [_note_payload(readable_id, "! Readable")], "failed": [restricted_id]},
     )
     # Delete detection ID scan (always runs on every sync).
     httpx_mock.add_response(
