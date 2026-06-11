@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from knoten.models import NoteSummary
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
 from knoten.repositories.errors import (
+    FrontmatterValidationError,
     KnotenError,
     NoteForbiddenError,
     NotFoundError,
@@ -151,8 +152,10 @@ class SyncResult:
     # Human-readable warnings (delete-phase skips, invalid filenames, …) —
     # surfaced in the JSON payload, not just the progress stream.
     warnings: list[str] = field(default_factory=list)
-    # Remote notes skipped because their server-provided filename failed
-    # validation at the ingest boundary.
+    # Remote notes skipped because a server-provided value failed validation
+    # at the ingest boundary — a hostile filename (path separators / NUL /
+    # empty) or a frontmatter value containing a control character. Each
+    # skip also appends a `warnings` entry naming the note.
     skipped_invalid: int = 0
 
 
@@ -171,6 +174,10 @@ class PushOutcome:
     # `{"id", "reason"}`. Surfaced in SyncResult.push_rejected and skipped by
     # subsequent push passes until a local edit clears the marker.
     rejected: list[dict] = field(default_factory=list)
+    # Post-push refetches whose server copy failed frontmatter validation —
+    # the push succeeded but the mirror was not updated. Rolled up into
+    # SyncResult.skipped_invalid.
+    skipped_invalid: int = 0
 
 
 def push_local_writes(
@@ -332,6 +339,24 @@ def push_local_writes(
                 "kept it marked synced; the mirror may lag the server by one sync"
             )
             log(f"  ⚠ '{filename}' pushed but not re-readable (forbidden) — mirror may lag")
+        except FrontmatterValidationError as exc:
+            # The push succeeded but the server's copy now carries a
+            # frontmatter value the mirror writer refuses (control character).
+            # Same treatment as any other unmirrorable server payload: warn,
+            # count it, keep the run going. mark_synced so the row is not
+            # re-pushed forever.
+            store.mark_synced(target_id)
+            outcome.skipped_invalid += 1
+            warnings.append(
+                f"pushed '{filename}' but its server copy could not be mirrored — "
+                f"note {target_id} ('{filename}'): frontmatter value for {exc.key!r} "
+                "contains a control character; frontmatter values must be "
+                "single-line. Fix the value on the server, then re-sync."
+            )
+            log(
+                f"  ⚠ '{filename}' pushed but its frontmatter value for {exc.key!r} "
+                "failed validation — mirror not updated"
+            )
         except Exception as exc:  # noqa: BLE001 — refetch is best-effort
             store.mark_synced(target_id)
             warnings.append(
@@ -435,6 +460,9 @@ def incremental_sync(
     fetched = 0
     restricted_placeholders = 0
     skipped_invalid = 0
+    # Ids skipped this run because a server value failed ingest validation —
+    # the catch-up pass must not re-fetch (and re-count) them.
+    skipped_invalid_ids: set[str] = set()
     conflicts: list[dict] = []
     warnings: list[str] = []
     max_seen = cursor
@@ -489,6 +517,7 @@ def incremental_sync(
                     log=log,
                     conflicts=conflicts,
                     warnings=warnings,
+                    skipped_invalid_ids=skipped_invalid_ids,
                 )
                 fetched += fetched_count
                 restricted_placeholders += restricted_count
@@ -535,6 +564,8 @@ def incremental_sync(
             continue
         if item_id in pending_delete_ids:
             continue  # locally trashed, delete push failed — do not resurrect
+        if item_id in skipped_invalid_ids:
+            continue  # already skipped this run — do not re-fetch or re-count
         if not catch_up_started:
             log("  catching up on never-seen-locally notes")
             catch_up_started = True
@@ -548,6 +579,7 @@ def incremental_sync(
             log=log,
             conflicts=conflicts,
             warnings=warnings,
+            skipped_invalid_ids=skipped_invalid_ids,
         )
         fetched += fetched_count
         catch_up_count += fetched_count
@@ -622,6 +654,7 @@ def incremental_sync(
         progress=log,
     )
     remote_ids_seen.update(push_outcome.pushed_ids)
+    skipped_invalid += push_outcome.skipped_invalid
     if push_outcome.creates or push_outcome.edits:
         log(
             f"  pushed {push_outcome.creates} create(s), {push_outcome.edits} edit(s)"
@@ -702,6 +735,8 @@ def incremental_sync(
         verify_hashes=verify_hashes,
         progress=log,
     )
+    skipped_invalid += reconcile.skipped_invalid
+    warnings.extend(reconcile.warnings)
     log(
         f"  missing re-fetched: {reconcile.missing_refetched}, "
         f"mismatched re-fetched: {reconcile.mismatched_refetched}, "
@@ -797,6 +832,23 @@ def _invalid_filename_reason(filename: str | None) -> str | None:
     return None
 
 
+def _frontmatter_skip_warning(
+    note_id: str, filename: str | None, exc: FrontmatterValidationError
+) -> str:
+    """One canonical warning line for a frontmatter-validation skip.
+
+    Names the note (id + filename) and the offending frontmatter key, so the
+    user can fix the value on the server — the v0.7.0 ingest-boundary
+    contract: server payloads that fail validation are skipped with a
+    warning, never aborting the run.
+    """
+    return (
+        f"skipped remote note {note_id} ('{filename}'): frontmatter value for "
+        f"{exc.key!r} contains a control character — frontmatter values must be "
+        "single-line. Fix the value on the server, then re-sync."
+    )
+
+
 def _fetch_or_placeholder(
     item: NoteSummary,
     *,
@@ -806,11 +858,14 @@ def _fetch_or_placeholder(
     log: ProgressCallback,
     conflicts: list[dict],
     warnings: list[str],
+    skipped_invalid_ids: set[str],
 ) -> tuple[int, int, int]:
     """Fetch a full note by ID and ingest it. On 404, create a placeholder.
 
     Returns `(fetched_full_count, placeholder_count, skipped_invalid_count)`
-    — at most one of them is 1.
+    — at most one of them is 1. Every skipped note's id is also added to
+    `skipped_invalid_ids` so the caller's catch-up pass does not re-fetch
+    (and re-count) it within the same run.
 
     Guards, in order:
 
@@ -819,6 +874,11 @@ def _fetch_or_placeholder(
       pass later uploads the local version.
     - A server-provided filename failing validation is skipped with a
       warning — never written to disk, never committed to the store.
+    - A server-provided frontmatter value failing the writer's validation
+      (control character — the mirror writes single-line YAML scalars) is
+      skipped with a warning naming the note and the offending key, never
+      aborting the run. The render failure happens before the store
+      transaction, so nothing is committed.
     - A `UNIQUE(filename)` constraint failure (remote note colliding with
       a different local row's filename) is recorded as a conflict instead
       of aborting the whole sync.
@@ -841,18 +901,26 @@ def _fetch_or_placeholder(
     if reason is not None:
         warnings.append(f"skipped remote note {item_id}: {reason}")
         log(f"    ⚠ skipping remote note {item_id}: {reason}")
+        skipped_invalid_ids.add(item_id)
         return (0, 0, 1)
 
     try:
         note = backend.read_note(item_id)
     except NoteForbiddenError:
         previous = store.get_row(item_id)
-        ingest_placeholder(
-            item,
-            store=store,
-            vault_dir=settings.paths.vault_dir,
-            previous_path=previous.path if previous else None,
-        )
+        try:
+            ingest_placeholder(
+                item,
+                store=store,
+                vault_dir=settings.paths.vault_dir,
+                previous_path=previous.path if previous else None,
+            )
+        except FrontmatterValidationError as exc:
+            warning = _frontmatter_skip_warning(item_id, item.filename, exc)
+            warnings.append(warning)
+            log(f"    ⚠ {warning}")
+            skipped_invalid_ids.add(item_id)
+            return (0, 0, 1)
         log(f"    ⚠ '{item.filename}' is restricted (LIST but not READ) — stored as placeholder")
         return (0, 1, 0)
 
@@ -862,6 +930,7 @@ def _fetch_or_placeholder(
     if reason is not None:
         warnings.append(f"skipped remote note {item_id}: {reason}")
         log(f"    ⚠ skipping remote note {item_id}: {reason}")
+        skipped_invalid_ids.add(item_id)
         return (0, 0, 1)
 
     previous = store.get_row(note.id)
@@ -872,6 +941,16 @@ def _fetch_or_placeholder(
             vault_dir=settings.paths.vault_dir,
             previous_path=previous.path if previous else None,
         )
+    except FrontmatterValidationError as exc:
+        # The server sent a frontmatter value the mirror writer refuses
+        # (control character). Render fails before the store transaction,
+        # so nothing was committed — skip the note with a warning naming
+        # it, exactly like a hostile filename, instead of aborting the run.
+        warning = _frontmatter_skip_warning(note.id, note.filename, exc)
+        warnings.append(warning)
+        log(f"    ⚠ {warning}")
+        skipped_invalid_ids.add(note.id)
+        return (0, 0, 1)
     except sqlite3.IntegrityError:
         # UNIQUE(filename) — a different local row already uses this name
         # (typically a local-only note created offline). The transaction

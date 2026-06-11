@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from knoten.models import Note, NoteSummary
-from knoten.repositories.errors import UserError
+from knoten.repositories.errors import FrontmatterValidationError
 
 # Mirrors the remote backend's export layout. The `docs/api.md` file on
 # upstream backends has sometimes shown underscore-prefixed names, but the
@@ -71,11 +71,18 @@ def _month_prefix(value: str | None) -> str | None:
 
 
 def render_note_markdown(note: Note) -> str:
-    """Produce the YAML-frontmatter markdown representation of a note."""
+    """Produce the YAML-frontmatter markdown representation of a note.
+
+    Raises `FrontmatterValidationError` — enriched with the note's id and
+    filename — when a frontmatter value contains a control character.
+    """
     frontmatter = _sanitise_frontmatter(note)
     lines = ["---"]
     for key, value in frontmatter.items():
-        lines.append(_yaml_line(key, value))
+        try:
+            lines.append(_yaml_line(key, value))
+        except FrontmatterValidationError as exc:
+            raise _with_note_context(exc, note_id=note.id, filename=note.filename) from exc
     lines.append("---")
     lines.append("")
     lines.append(note.body.rstrip("\n"))
@@ -92,14 +99,17 @@ def render_placeholder_markdown(summary: NoteSummary) -> str:
     explanation so Claude / the user can tell what is going on.
     """
     lines = ["---"]
-    lines.append(_yaml_line("kind", summary.kind))
-    lines.append(_yaml_line("family", summary.family))
-    lines.append(_yaml_line("title", summary.title))
-    if summary.source:
-        lines.append(_yaml_line("source", summary.source))
-    lines.append(_yaml_line("created", summary.created_at))
-    lines.append(_yaml_line("updated", summary.updated_at))
-    lines.append(_yaml_line("restricted", True))
+    try:
+        lines.append(_yaml_line("kind", summary.kind))
+        lines.append(_yaml_line("family", summary.family))
+        lines.append(_yaml_line("title", summary.title))
+        if summary.source:
+            lines.append(_yaml_line("source", summary.source))
+        lines.append(_yaml_line("created", summary.created_at))
+        lines.append(_yaml_line("updated", summary.updated_at))
+        lines.append(_yaml_line("restricted", True))
+    except FrontmatterValidationError as exc:
+        raise _with_note_context(exc, note_id=summary.id, filename=summary.filename) from exc
     lines.append("---")
     lines.append("")
     lines.append(
@@ -135,6 +145,18 @@ def _sanitise_frontmatter(note: Note) -> dict[str, Any]:
     return out
 
 
+def _with_note_context(
+    exc: FrontmatterValidationError, *, note_id: str, filename: str
+) -> FrontmatterValidationError:
+    """Re-wrap a key-only rejection so the error names the offending note."""
+    return FrontmatterValidationError(
+        f"cannot write note {note_id} ('{filename}'): {exc}",
+        key=exc.key,
+        note_id=note_id,
+        filename=filename,
+    )
+
+
 def _reject_control_chars(key: str, value: Any) -> None:
     """Refuse frontmatter values containing control characters.
 
@@ -145,9 +167,10 @@ def _reject_control_chars(key: str, value: Any) -> None:
     """
     text = str(value)
     if any(ch in "\n\r" or (ord(ch) < 0x20 and ch != "\t") for ch in text):
-        raise UserError(
+        raise FrontmatterValidationError(
             f"Frontmatter value for {key!r} contains a control character "
-            "(newline?) — frontmatter values must be single-line."
+            "(newline?) — frontmatter values must be single-line.",
+            key=key,
         )
 
 
@@ -156,7 +179,8 @@ def _yaml_line(key: str, value: Any) -> str:
 
     Kept intentionally simple — the export format uses only scalars and flat
     lists, and we match that. Anything more exotic is JSON-encoded. Values
-    containing control characters are rejected with a UserError.
+    containing control characters are rejected with a
+    FrontmatterValidationError.
     """
     if value is None:
         return f"{key}: "

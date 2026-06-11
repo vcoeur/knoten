@@ -17,6 +17,7 @@ from knoten.models import Note, NoteSummary, SearchHit, permission_at_least
 from knoten.repositories.backend import Backend, NoteDraft, NotePatch
 from knoten.repositories.errors import (
     AmbiguousTargetError,
+    FrontmatterValidationError,
     NoteForbiddenError,
     NotFoundError,
     UserError,
@@ -760,11 +761,15 @@ class EditNoteResult:
     `note` is the refreshed primary note. `restricted_affected` holds the ids
     of rename-cascade targets the server rewrote but this token cannot READ
     (per-note 404 → `NoteForbiddenError`); each is mirrored as a metadata-only
-    placeholder instead of a full note. Empty tuple on the common path.
+    placeholder instead of a full note. `warnings` carries human-readable
+    notices for cascade targets whose re-mirror was skipped (frontmatter
+    failed the writer's validation) — the edit itself succeeded server-side.
+    Both are empty on the common path.
     """
 
     note: Note
     restricted_affected: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def summary_from_row(row: dict[str, Any]) -> NoteSummary:
@@ -851,6 +856,7 @@ def edit_note_remote(
     # notes' bodies, it returns them in `affected_notes`. Re-fetch each and
     # re-ingest so the local mirror converges without a full sync.
     restricted_affected: list[str] = []
+    cascade_warnings: list[str] = []
     for affected_id in update_result.affected_notes:
         if affected_id == note_id:
             continue
@@ -876,9 +882,27 @@ def edit_note_remote(
                 )
             restricted_affected.append(affected_id)
             continue
-        ingest_note(affected_note, store=store, vault_dir=vault_dir, synced=synced)
+        try:
+            ingest_note(affected_note, store=store, vault_dir=vault_dir, synced=synced)
+        except FrontmatterValidationError as exc:
+            # The cascade target's server copy carries a frontmatter value the
+            # mirror writer refuses (control character). The rename already
+            # succeeded server-side, so skip re-mirroring this one note with a
+            # warning naming it instead of failing the whole edit — same
+            # ingest-boundary contract as the sync pull pass.
+            cascade_warnings.append(
+                f"skipped re-mirroring affected note {affected_note.id} "
+                f"('{affected_note.filename}'): frontmatter value for {exc.key!r} "
+                "contains a control character — its local mirror is stale until "
+                "the value is fixed on the server"
+            )
+            continue
 
-    return EditNoteResult(note=fresh, restricted_affected=tuple(restricted_affected))
+    return EditNoteResult(
+        note=fresh,
+        restricted_affected=tuple(restricted_affected),
+        warnings=tuple(cascade_warnings),
+    )
 
 
 def delete_note_remote(

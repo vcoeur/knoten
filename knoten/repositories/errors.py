@@ -132,6 +132,32 @@ class ValidationError(UserError):
         self.path = path
 
 
+class FrontmatterValidationError(UserError):
+    """A frontmatter value cannot be written as a single-line YAML scalar.
+
+    Raised by the vault-file writer (`render_note_markdown` /
+    `render_placeholder_markdown`) when a value contains a control character
+    (newline, carriage return, any C0 except tab). Carries the offending
+    `key` plus — once the writer has enriched it — the note's `note_id` and
+    `filename`, so callers can either name the note in a loud failure
+    (interactive writes) or skip it with a warning (sync ingest, where a
+    hostile server value must never abort the run).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        key: str,
+        note_id: str | None = None,
+        filename: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.key = key
+        self.note_id = note_id
+        self.filename = filename
+
+
 class NetworkError(KnotenError):
     """Remote API unreachable, authentication failed, or returned 5xx."""
 

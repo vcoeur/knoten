@@ -157,7 +157,7 @@ def test_render_rejects_control_characters_in_frontmatter_values() -> None:
     """
     import pytest
 
-    from knoten.repositories.errors import UserError
+    from knoten.repositories.errors import FrontmatterValidationError, UserError
     from knoten.repositories.vault_files import render_note_markdown
 
     for hostile in ("multi\nline", "carriage\rreturn", "fence\n---\nbreak", "\x00nul"):
@@ -176,8 +176,17 @@ def test_render_rejects_control_characters_in_frontmatter_values() -> None:
             created_at=note.created_at,
             updated_at=note.updated_at,
         )
-        with pytest.raises(UserError, match="control character"):
+        with pytest.raises(UserError, match="control character") as excinfo:
             render_note_markdown(bad)
+        # The writer's error names the note (id + filename) and carries the
+        # offending key, so interactive writes fail loudly with context and
+        # sync can skip per-note.
+        assert isinstance(excinfo.value, FrontmatterValidationError)
+        assert excinfo.value.key == "crafted"
+        assert excinfo.value.note_id == bad.id
+        assert excinfo.value.filename == "! Hostile fm"
+        assert bad.id in str(excinfo.value)
+        assert "! Hostile fm" in str(excinfo.value)
 
     # List items are checked too.
     listed = _note("! Hostile list", "permanent", "body")
