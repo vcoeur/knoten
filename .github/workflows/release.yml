@@ -51,4 +51,12 @@ jobs:
         run: uv build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to an exact release tag (not the floating `release/v1` branch):
+        # this job holds OIDC publish rights, so its action ref must not be a
+        # moving target someone else controls.
+        uses: pypa/gh-action-pypi-publish@v1.14.1
+        with:
+          # A tag re-push (e.g. amending lint fixes onto an already-released
+          # version) re-runs this job; without this the second run hard-fails
+          # with "400 File already exists" instead of being a no-op.
+          skip-existing: true
