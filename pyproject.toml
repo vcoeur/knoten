@@ -40,7 +40,11 @@ Issues = "https://github.com/vcoeur/knoten/issues"
 knoten = "knoten.cli.main:app"
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+# Pinned: uv.lock does not lock build backends, so an unpinned hatchling resolves to
+# whatever is newest at build time. hatchling 1.32.0 emits Metadata-Version 2.5, which
+# older pypa/gh-action-pypi-publish validators reject — the same source tree then fails
+# at publish with every other release gate green (nodum v0.18.0, 2026-08-14).
+requires = ["hatchling==1.31.0", "hatch-vcs==0.5.0"]
 build-backend = "hatchling.build"
 
 # Version is derived from the git tag (vX.Y.Z) at build time — never committed.
